@@ -378,6 +378,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   const triggerGrabRef = useRef<(() => void) | null>(null);
   const triggerThrowRef = useRef<(() => void) | null>(null);
   const triggerEatRef = useRef<(() => void) | null>(null);
+  const triggerHibernateRef = useRef<(() => void) | null>(null);
 
   const worldWidth = currentLocation.width || 1000;
   const worldHeight = currentLocation.height || 580;
@@ -431,6 +432,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     let eatingUiThrottleTimer = 0;
     let lastBroadcastTime = 0;
     let lastItemsSyncTime = 0;
+    let shelterSleepTimer = 0;
 
     // Dynamic Camera Tracking State
     const initialZoom = zoomRef.current;
@@ -1619,8 +1621,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               const spawnY = pipeTransit.targetSpawnY ?? targetLoc.playerSpawn.y;
               player.x = spawnX;
               player.y = spawnY;
-              player.vx = 2.0;
-              player.vy = -1.5;
+              
+              // Direction polish: if spawning on left half of room, pop out moving right; if right half, pop out moving left
+              const exitDir = spawnX < (targetLoc.width / 2) ? 1 : -1;
+              player.vx = exitDir * 2.5;
+              player.vy = -1.6;
+              player.facingRight = exitDir > 0;
+              
               soundEngine.playPickup();
               setCurrentLocation(targetLoc);
               setInShelterChamber(!!targetLoc.isShelterRoom);
@@ -1855,6 +1862,32 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         if (player.x > worldWidth - player.width - 10) {
           player.x = worldWidth - player.width - 10;
           player.vx = 0;
+        }
+
+        // Dedicated Shelter Room physical crouching hibernation:
+        // "типа ти должен там досидіть до конца цикла коли наївся(только коли в мультиплеєрі) ну і або коли всі играки нажали кнопку вниз і типа не долєно на екрані менюшка появляться де можна нажать кнопку і тебе засейве там"
+        if (currentLocation.isShelterRoom && canControl && !isHibernating && !pipeTransit) {
+          const isHoldingDown = ctrl.down || player.crouching;
+          if (isHoldingDown && player.isGrounded && Math.abs(player.vx) < 1.0) {
+            if (foodCount >= 4) {
+              shelterSleepTimer += delta;
+              if (shelterSleepTimer >= 2.0) {
+                shelterSleepTimer = 0;
+                triggerHibernateRef.current?.();
+              }
+            } else {
+              shelterSleepTimer = 0;
+            }
+          } else {
+            shelterSleepTimer = Math.max(0, shelterSleepTimer - delta * 2.5);
+          }
+
+          // Cycle timer ended while inside shelter with required food
+          if (cycleSecondsLeftRef.current <= 0 && foodCount >= 4) {
+            triggerHibernateRef.current?.();
+          }
+        } else {
+          shelterSleepTimer = 0;
         }
 
         // Rain World shortcut transit pipes check (delayed 1.2s conduit travel instead of instant teleport)
@@ -2534,40 +2567,20 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         }
       });
 
-      // 3.1 Draw Transit Shortcut Pipes (Authentic Rain World shortcut pipes)
+      // 3.1 Draw Transit Shortcut Pipes (Clear Rain World inter-region and shortcut pipes)
       transitPipes.forEach((pipe, idx) => {
         ctx.save();
-
-        // Heavy conduit pipe between entrances
-        ctx.strokeStyle = '#064e3b';
-        ctx.lineWidth = 14;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(pipe.startX, pipe.startY);
-        ctx.lineTo(pipe.endX, pipe.endY);
-        ctx.stroke();
-
-        ctx.strokeStyle = '#022c22';
-        ctx.lineWidth = 8;
-        ctx.stroke();
-
-        // Conduit moving pulse dot
-        const pulseRatio = (t * 1.5 + idx * 0.4) % 1;
-        const pulseX = pipe.startX + (pipe.endX - pipe.startX) * pulseRatio;
-        const pulseY = pipe.startY + (pipe.endY - pipe.startY) * pulseRatio;
-        ctx.fillStyle = pipe.isShelterPipe ? '#38bdf8' : '#34d399';
-        ctx.beginPath();
-        ctx.arc(pulseX, pulseY, 2.5, 0, Math.PI * 2);
-        ctx.fill();
+        const isInterRoom = !!pipe.targetLocationId;
+        const isShelter = !!pipe.isShelterPipe;
 
         // Helper to draw authentic Rain World pipe portal
-        const drawPipePortal = (x: number, y: number, isShelter: boolean, targetX: number, targetY: number) => {
+        const drawPipePortal = (x: number, y: number, shelter: boolean, targetX: number, targetY: number) => {
           // Outer rubber seal collar
           ctx.fillStyle = '#1e293b';
           ctx.beginPath();
           ctx.arc(x, y, 14, 0, Math.PI * 2);
           ctx.fill();
-          ctx.strokeStyle = isShelter ? '#0284c7' : '#047857';
+          ctx.strokeStyle = shelter ? '#0284c7' : '#047857';
           ctx.lineWidth = 2.5;
           ctx.stroke();
 
@@ -2577,14 +2590,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           ctx.arc(x, y, 9, 0, Math.PI * 2);
           ctx.fill();
 
-          // Directional indicator
-          if (isShelter) {
+          // Directional indicator inside hole
+          if (shelter) {
             ctx.fillStyle = '#38bdf8';
             ctx.font = 'bold 10px monospace';
             ctx.textAlign = 'center';
             ctx.fillText('⛊', x, y + 3.5);
           } else {
-            // Pulsing green chevron arrow
             const angle = Math.atan2(targetY - y, targetX - x);
             const alpha = 0.5 + Math.sin(t * 5 + idx) * 0.45;
             ctx.fillStyle = `rgba(52, 211, 153, ${alpha})`;
@@ -2594,8 +2606,93 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           }
         };
 
-        drawPipePortal(pipe.startX, pipe.startY, !!pipe.isShelterPipe, pipe.endX, pipe.endY);
-        drawPipePortal(pipe.endX, pipe.endY, !!pipe.isShelterPipe, pipe.startX, pipe.startY);
+        if (!isInterRoom) {
+          // Internal room shortcut: draw full heavy conduit between both ends
+          ctx.strokeStyle = '#064e3b';
+          ctx.lineWidth = 14;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(pipe.startX, pipe.startY);
+          ctx.lineTo(pipe.endX, pipe.endY);
+          ctx.stroke();
+
+          ctx.strokeStyle = '#022c22';
+          ctx.lineWidth = 8;
+          ctx.stroke();
+
+          // Moving pulse dot
+          const pulseRatio = (t * 1.5 + idx * 0.4) % 1;
+          const pulseX = pipe.startX + (pipe.endX - pipe.startX) * pulseRatio;
+          const pulseY = pipe.startY + (pipe.endY - pipe.startY) * pulseRatio;
+          ctx.fillStyle = '#34d399';
+          ctx.beginPath();
+          ctx.arc(pulseX, pulseY, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          drawPipePortal(pipe.startX, pipe.startY, false, pipe.endX, pipe.endY);
+          drawPipePortal(pipe.endX, pipe.endY, false, pipe.startX, pipe.startY);
+        } else {
+          // INTER-REGION TRANSIT PIPE OR SHELTER ENTRANCE
+          // Lead conduit off into the wall/perimeter
+          const anchorDirX = pipe.startX > (worldWidth / 2) ? 1 : -1;
+          ctx.strokeStyle = isShelter ? '#0c4a6e' : '#064e3b';
+          ctx.lineWidth = 16;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(pipe.startX, pipe.startY);
+          ctx.lineTo(pipe.startX + anchorDirX * 22, pipe.startY);
+          ctx.stroke();
+
+          ctx.strokeStyle = isShelter ? '#0284c7' : '#047857';
+          ctx.lineWidth = 8;
+          ctx.stroke();
+
+          drawPipePortal(pipe.startX, pipe.startY, isShelter, pipe.startX + anchorDirX * 30, pipe.startY);
+
+          // HOLOGRAPHIC REGION SIGNBOARD: "щоб хотиби було понятиє куда тебе веде труба"
+          const px = player.x + player.width / 2;
+          const py = player.y + player.height / 2;
+          const dist = Math.hypot(px - pipe.startX, py - pipe.startY);
+          const isNearby = dist < 85;
+
+          const signText = pipe.label || (isShelter ? '⛊ УКРИТТЯ' : '➔ ПЕРЕХІД');
+          ctx.font = 'bold 9px monospace';
+          const metrics = ctx.measureText(signText);
+          const padX = 7;
+          const signW = metrics.width + padX * 2;
+          const signH = 15;
+          const signX = Math.max(10, Math.min(worldWidth - signW - 10, pipe.startX - signW / 2));
+          const signY = Math.max(12, pipe.startY - 25);
+
+          // Sign background
+          ctx.fillStyle = isNearby 
+            ? (isShelter ? 'rgba(8, 47, 73, 0.95)' : 'rgba(6, 78, 59, 0.95)')
+            : 'rgba(3, 7, 18, 0.85)';
+          ctx.strokeStyle = isNearby 
+            ? (isShelter ? '#38bdf8' : '#34d399')
+            : (isShelter ? '#0284c7' : '#059669');
+          ctx.lineWidth = isNearby ? 1.6 : 1.0;
+          ctx.beginPath();
+          ctx.roundRect(signX, signY, signW, signH, 3);
+          ctx.fill();
+          ctx.stroke();
+
+          // Sign text label
+          ctx.fillStyle = isNearby 
+            ? '#ffffff' 
+            : (isShelter ? '#7dd3fc' : '#a7f3d0');
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(signText, signX + signW / 2, signY + signH / 2);
+
+          // Nearby enter prompt
+          if (isNearby) {
+            const glow = 0.6 + Math.sin(t * 6) * 0.4;
+            ctx.fillStyle = isShelter ? `rgba(56, 189, 248, ${glow})` : `rgba(52, 211, 153, ${glow})`;
+            ctx.font = 'bold 8px monospace';
+            ctx.fillText('▼ ЗАЛІЗТИ В ТРУБУ', pipe.startX, pipe.startY - 13);
+          }
+        }
 
         ctx.restore();
       });
@@ -2662,8 +2759,40 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         ctx.ellipse(curX, curY, 11, 7, transitAngle, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
-      } else {
         renderSlugcatCharacter(ctx, player, t, true, webRTCManager.localPlayerName);
+      }
+
+      // 7.05 Draw Shelter Hibernation Sleep Meter and In-World Prompts
+      if (currentLocation.isShelterRoom && !pipeTransit && !isHibernating) {
+        ctx.save();
+        const px = player.x + player.width / 2;
+        const py = player.y - 18;
+
+        if (shelterSleepTimer > 0 && foodCount >= 4) {
+          const sleepProgress = Math.min(1, shelterSleepTimer / 2.0);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(px, py, 11, -Math.PI / 2, -Math.PI / 2 + sleepProgress * Math.PI * 2);
+          ctx.stroke();
+
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 9px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('Zzz...', px, py - 15);
+        } else if (player.crouching && player.isGrounded && foodCount < 4) {
+          ctx.fillStyle = '#f87171';
+          ctx.font = 'bold 8px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(`ПОТРІБНО 4 ЇЖІ (${foodCount}/4)`, px, py - 8);
+        } else if (foodCount >= 4) {
+          const pulseAlpha = 0.5 + Math.sin(t * 3.5) * 0.35;
+          ctx.fillStyle = `rgba(56, 189, 248, ${pulseAlpha})`;
+          ctx.font = 'bold 8px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('⛊ ЗАТИСНІТЬ [ВНИЗ] ДЛЯ СПЛЯЧКИ', px, py - 8);
+        }
+        ctx.restore();
       }
 
       // 7.1 Draw Remote P2P Players in current location room
@@ -4710,198 +4839,59 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         )}
       </AnimatePresence>
 
-      {/* ---------------- SHELTER HIBERNATION CHAMBER ---------------- */}
-      {/* "убержки це не просто якийсь блок а окрема локация куда нада залісти для гібернації щоб піднять карму і сохраниться" */}
+      {/* ---------------- AUTHENTIC RAIN WORLD HIBERNATION CINEMATIC ---------------- */}
+      {/* "типа не долєно на екрані менюшка появляться де можна нажать кнопку і тебе засейве там" */}
       <AnimatePresence>
-        {inShelterChamber && (
+        {isHibernating && (
           <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            transition={{ duration: 0.25 }}
-            className="absolute inset-2 sm:inset-6 z-50 bg-[#090b10]/96 border-2 border-cyan-800/80 rounded-3xl shadow-[0_0_80px_rgba(6,182,212,0.25)] backdrop-blur-xl flex flex-col justify-between p-4 sm:p-7 text-left font-sans select-none overflow-hidden"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.8 }}
+            className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center p-6 text-center select-none"
           >
-            {/* Shelter Vault Atmospheric Backing */}
-            <div className="absolute inset-0 pointer-events-none opacity-20 bg-[radial-gradient(circle_at_center,rgba(56,189,248,0.3)_0%,transparent_70%)]" />
+            {/* Ambient Dark Chamber Vignette */}
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(40,40,45,0.4)_0%,black_80%)] pointer-events-none" />
 
-            {/* Chamber Header */}
-            <div className="relative flex items-center justify-between border-b border-zinc-800 pb-3">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-cyan-950/80 border border-cyan-500/50 flex items-center justify-center shadow-lg">
-                  <Home className="w-5 h-5 text-cyan-400" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono font-bold tracking-widest text-cyan-400 uppercase">
-                      КАМЕРА ГІБЕРНАЦІЇ // ШЛЮЗ УКРИТТЯ
-                    </span>
-                    <span className="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-cyan-950 border border-cyan-700 text-cyan-300">
-                      ЦИКЛ {playerSave.cycle}
-                    </span>
-                  </div>
-                  <h2 className="text-base sm:text-lg font-bold text-slate-100 tracking-wide">
-                    {currentLocation.name}
-                  </h2>
-                </div>
+            {/* Rising Karma Wheel */}
+            <motion.div
+              initial={{ scale: 0.7, opacity: 0, y: 30 }}
+              animate={{ scale: [0.7, 1.15, 1], opacity: 1, y: 0 }}
+              transition={{ duration: 1.4, ease: "easeOut" }}
+              className="relative z-10 flex flex-col items-center"
+            >
+              <div className="relative w-36 h-36 sm:w-44 sm:h-44 rounded-full border-2 border-white/90 bg-black/80 flex items-center justify-center shadow-[0_0_50px_rgba(255,255,255,0.35)]">
+                <svg className="w-24 h-24 sm:w-32 sm:h-32" viewBox="0 0 36 36" fill="none">
+                  <circle cx="18" cy="18" r="14" stroke="#ffffff" strokeWidth="1.8" />
+                  <circle cx="18" cy="18" r="8.5" stroke="#ffffff" strokeWidth="1.4" />
+                  <line x1="18" y1="4" x2="18" y2="32" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
+                  <line x1="4" y1="18" x2="32" y2="18" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
+                  <circle cx="18" cy="18" r="3" fill="#ffffff" />
+                  {playerSave.karma >= 2 && <circle cx="11" cy="11" r="1.4" fill="#ffffff" />}
+                  {playerSave.karma >= 3 && <circle cx="25" cy="11" r="1.4" fill="#ffffff" />}
+                  {playerSave.karma >= 4 && <circle cx="11" cy="25" r="1.4" fill="#ffffff" />}
+                  {playerSave.karma >= 5 && <circle cx="25" cy="25" r="1.4" fill="#ffffff" />}
+                </svg>
               </div>
 
-              {/* Exit button */}
-              <button
-                onClick={() => setInShelterChamber(false)}
-                disabled={isHibernating}
-                className="px-3 py-1.5 rounded-xl border border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-mono font-bold flex items-center gap-1.5 cursor-pointer transition-all active:scale-95 disabled:opacity-40"
+              {/* Progress Title */}
+              <motion.div
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.6, duration: 0.8 }}
+                className="mt-6 space-y-1.5 font-mono"
               >
-                <X className="w-4 h-4" />
-                <span>ВИЙТИ НАЗОВНІ</span>
-              </button>
-            </div>
-
-            {/* Chamber Center: Heavy Blast Door & Karma Ascension Ring */}
-            <div className="relative flex-1 flex flex-col items-center justify-center py-6 text-center">
-              
-              {/* Hydraulic Pneumatic Vault Door Graphic */}
-              <div className="relative w-44 h-44 sm:w-52 sm:h-52 rounded-full border-4 border-zinc-700 bg-gradient-to-b from-zinc-900 to-black flex items-center justify-center shadow-[inset_0_0_40px_rgba(0,0,0,0.9),0_0_30px_rgba(0,0,0,0.8)]">
-                
-                {/* Vault Teeth & Rivets */}
-                <div className="absolute inset-2 rounded-full border-2 border-dashed border-zinc-600/60" />
-                
-                {/* Karma Wheel in Center of Blast Door */}
-                <motion.div
-                  animate={isHibernating ? { scale: [1, 1.25, 1.1], rotate: [0, 180, 360] } : {}}
-                  transition={{ duration: 1.5, ease: "easeInOut" }}
-                  className="relative w-24 h-24 sm:w-28 sm:h-28 rounded-full border-2 border-white/90 bg-black/60 flex items-center justify-center shadow-[0_0_25px_rgba(255,255,255,0.4)]"
-                >
-                  <svg className="w-16 h-16 sm:w-20 sm:h-20" viewBox="0 0 36 36" fill="none">
-                    <circle cx="18" cy="18" r="14" stroke="#ffffff" strokeWidth="1.8" />
-                    <circle cx="18" cy="18" r="8.5" stroke="#ffffff" strokeWidth="1.4" />
-                    <line x1="18" y1="4" x2="18" y2="32" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
-                    <line x1="4" y1="18" x2="32" y2="18" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
-                    <circle cx="18" cy="18" r="2.8" fill="#ffffff" />
-                    {playerSave.karma >= 2 && <circle cx="11" cy="11" r="1.2" fill="#ffffff" />}
-                    {playerSave.karma >= 3 && <circle cx="25" cy="11" r="1.2" fill="#ffffff" />}
-                    {playerSave.karma >= 4 && <circle cx="11" cy="25" r="1.2" fill="#ffffff" />}
-                    {playerSave.karma >= 5 && <circle cx="25" cy="25" r="1.2" fill="#ffffff" />}
-                  </svg>
-                </motion.div>
-
-                {/* Hydraulic Status Lock Lights */}
-                <div className="absolute bottom-2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/80 border border-zinc-700">
-                  <div className={`w-2 h-2 rounded-full ${foodCount >= 4 ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-red-500 animate-pulse'}`} />
-                  <span className="text-[9px] font-mono text-zinc-300">
-                    {foodCount >= 4 ? 'ГІДРАВЛІКА: ГОТОВО' : 'БЛОКУВАННЯ: ГОЛОД'}
-                  </span>
+                <div className="text-xl sm:text-2xl font-black tracking-widest text-white">
+                  ЦИКЛ {playerSave.cycle} ПРОЙДЕНО
                 </div>
-              </div>
-
-              {/* Status Banner */}
-              <div className="mt-4 max-w-md">
-                <div className="flex items-center justify-center gap-2 mb-1">
-                  <span className="text-xs font-mono font-bold text-amber-400">
-                    КАРМА: РІВЕНЬ {playerSave.karma} / 5
-                  </span>
-                  <span className="text-zinc-600">•</span>
-                  <span className="text-xs font-mono font-bold text-cyan-400">
-                    ЦИКЛ: {playerSave.cycle}
-                  </span>
+                <div className="text-xs sm:text-sm font-bold text-amber-400 tracking-wider">
+                  КАРМА ПІДВИЩЕНА ДО {playerSave.karma} / 5
                 </div>
-
-                <p className="text-xs text-zinc-400 leading-relaxed">
-                  {foodCount >= 4 
-                    ? "Укриття герметично захистить від смертоносної зливи. 4 ячейки їжі забезпечать успішну сплячку, а рівень карми зросте."
-                    : `Слимакокоту потрібно щонайменше 4 ячейки їжі для виживання в сплячці. Зараз у вас ${foodCount}/4 обов'язкових ягід.`
-                  }
-                </p>
-              </div>
-
-              {/* Food pips indicator inside chamber */}
-              <div className="mt-3 flex items-center justify-center gap-2 p-2 bg-black/50 rounded-2xl border border-zinc-800">
-                <span className="text-[10px] font-mono text-zinc-400 font-bold">ЗАПАС ЇЖІ:</span>
-                
-                {/* 4 Required */}
-                <div className="flex items-center gap-1.5">
-                  {Array.from({ length: 4 }).map((_, i) => (
-                    <div 
-                      key={`ch-req-${i}`}
-                      className={`w-4 h-4 rounded-full border-2 ${
-                        i < foodCount 
-                          ? 'bg-white border-white shadow-[0_0_8px_white]' 
-                          : 'bg-black/40 border-white/50'
-                      }`}
-                      title={`Обов'язкова ячейка ${i + 1} / 4`}
-                    />
-                  ))}
+                <div className="text-[11px] text-zinc-400 mt-2">
+                  Прогрес надійно збережено в укритті • Злива закінчується...
                 </div>
-
-                <div className="w-[2px] h-4 bg-zinc-600 rounded-full mx-1" />
-
-                {/* 3 Extra */}
-                <div className="flex items-center gap-1.5">
-                  {Array.from({ length: 3 }).map((_, idx) => {
-                    const filled = 4 + idx < foodCount;
-                    return (
-                      <div 
-                        key={`ch-ext-${idx}`}
-                        className={`w-3.5 h-3.5 rounded-full border-2 ${
-                          filled 
-                            ? 'bg-sky-300 border-sky-300 shadow-[0_0_8px_#38bdf8]' 
-                            : 'bg-sky-950/40 border-sky-500/40'
-                        }`}
-                        title={`Додаткова ячейка ${idx + 1} / 3`}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            {/* Chamber Footer Actions */}
-            <div className="relative border-t border-zinc-800 pt-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="text-[10px] font-mono text-zinc-400">
-                {stormActive ? (
-                  <span className="text-red-400 font-bold flex items-center gap-1.5 animate-pulse">
-                    <CloudRain className="w-3.5 h-3.5" />
-                    НА ЗОВНІ ШТОРМИТЬ СМЕРТОНОСНА ЗЛИВА! (В укритті безпечно)
-                  </span>
-                ) : (
-                  <span className="text-emerald-400 flex items-center gap-1.5">
-                    <Shield className="w-3.5 h-3.5" />
-                    Захисна пневматика активна • Прогрес зберігається після гібернації
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setInShelterChamber(false)}
-                  disabled={isHibernating}
-                  className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs font-mono font-bold cursor-pointer transition-all active:scale-95 disabled:opacity-40"
-                >
-                  Вийти
-                </button>
-
-                <button
-                  onClick={handleHibernate}
-                  disabled={foodCount < 4 || isHibernating}
-                  className={`px-5 py-2.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-2 shadow-xl transition-all cursor-pointer active:scale-95 ${
-                    foodCount >= 4 && !isHibernating
-                      ? 'bg-cyan-600 hover:bg-cyan-500 text-black border-cyan-400 shadow-[0_0_20px_rgba(6,182,212,0.5)]'
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-500 cursor-not-allowed opacity-60'
-                  }`}
-                >
-                  {isHibernating ? (
-                    <>
-                      <Moon className="w-4 h-4 animate-spin text-black" />
-                      <span>ГІБЕРНАЦІЯ...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Moon className="w-4 h-4" />
-                      <span>ГІБЕРНУВАТИ ТА ЗБЕРЕГТИСЯ [СПАТИ]</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
+              </motion.div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

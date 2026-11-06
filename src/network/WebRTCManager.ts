@@ -91,6 +91,86 @@ export class WebRTCManager {
     this.statusHandlers.forEach(h => h(s));
   }
 
+  public static GLOBAL_ROOM_ID = 'rain-world-global-main';
+  public static GLOBAL_ROOM_NAME = 'Спільний світ Rain World (1 кімната для всіх)';
+
+  public async joinGlobalWorld(): Promise<boolean> {
+    this.disconnect();
+    this.setStatus('signaling');
+
+    // 1. Try to join existing global room
+    try {
+      const joinRes = await signalingClient.joinRoom(WebRTCManager.GLOBAL_ROOM_ID, {
+        id: this.localPlayerId,
+        name: this.localPlayerName,
+      });
+
+      if (joinRes.success) {
+        this.isRoomHost = false;
+        this.currentRoomId = WebRTCManager.GLOBAL_ROOM_ID;
+        this.startSignalingListener();
+        if (joinRes.peers && joinRes.peers.length > 0) {
+          for (const peer of joinRes.peers) {
+            await this.initiatePeerConnection(peer.id, peer.name);
+          }
+        }
+        this.setStatus('connected');
+        return true;
+      }
+    } catch (e) {
+      console.warn('Initial global room join error, attempting creation:', e);
+    }
+
+    // 2. If room does not exist yet on server, create it with fixed GLOBAL_ROOM_ID
+    try {
+      this.isRoomHost = true;
+      const hostRes = await signalingClient.createRoom({
+        id: WebRTCManager.GLOBAL_ROOM_ID,
+        name: WebRTCManager.GLOBAL_ROOM_NAME,
+        hostId: this.localPlayerId,
+        hostName: this.localPlayerName,
+        cycleDurationSeconds: 360,
+        maxPlayers: 16,
+        friendlyFire: true
+      });
+
+      if (hostRes.success && hostRes.room) {
+        this.currentRoomId = hostRes.room.id;
+        this.startSignalingListener();
+        this.setStatus('connected');
+        return true;
+      }
+    } catch (e) {
+      console.warn('Create global room error, attempting retry join:', e);
+    }
+
+    // 3. Race condition fallback or offline local BroadcastChannel mode
+    try {
+      const retryJoin = await signalingClient.joinRoom(WebRTCManager.GLOBAL_ROOM_ID, {
+        id: this.localPlayerId,
+        name: this.localPlayerName,
+      });
+      if (retryJoin.success) {
+        this.isRoomHost = false;
+        this.currentRoomId = WebRTCManager.GLOBAL_ROOM_ID;
+        this.startSignalingListener();
+        if (retryJoin.peers && retryJoin.peers.length > 0) {
+          for (const peer of retryJoin.peers) {
+            await this.initiatePeerConnection(peer.id, peer.name);
+          }
+        }
+        this.setStatus('connected');
+        return true;
+      }
+    } catch {
+      // Offline / LAN BroadcastChannel fallback
+    }
+
+    this.currentRoomId = WebRTCManager.GLOBAL_ROOM_ID;
+    this.setStatus('connected');
+    return true;
+  }
+
   public async hostRoom(roomName: string, cycleSec = 300, maxPlayers = 12): Promise<boolean> {
     this.disconnect();
     this.setStatus('signaling');

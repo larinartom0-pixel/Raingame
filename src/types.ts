@@ -132,31 +132,31 @@ export const DEFAULT_OUTSKIRTS_LOCATION: CustomLocationData = {
       label: 'Укриття SU-S01', 
       isShelterPipe: true,
       targetLocationId: 'shelter-outskirts',
-      targetSpawnX: 120,
-      targetSpawnY: 280
+      targetSpawnX: 100,
+      targetSpawnY: 330
     },
-    // Inter-region pipe to Drainage System
+    // Inter-region pipe to Drainage System (East side -> Drainage West)
     {
       id: 'pipe-outskirts-to-drainage',
       startX: 960,
       startY: 170,
       endX: 990,
       endY: 170,
-      label: 'Вхід: Дренажна система',
+      label: '➔ ДРЕНАЖНА СИСТЕМА',
       targetLocationId: 'drainage-system',
-      targetSpawnX: 100,
+      targetSpawnX: 80,
       targetSpawnY: 420
     },
-    // Inter-region pipe to Industrial Complex
+    // Inter-region pipe to Industrial Complex (West side -> Industrial East)
     {
       id: 'pipe-outskirts-to-industrial',
-      startX: 30,
+      startX: 40,
       startY: 150,
       endX: 10,
       endY: 150,
-      label: 'Вхід: Пром-комплекс',
+      label: '➔ ПРОМИСЛОВИЙ КОМПЛЕКС',
       targetLocationId: 'industrial-complex',
-      targetSpawnX: 1680,
+      targetSpawnX: 1700,
       targetSpawnY: 780
     }
   ],
@@ -181,7 +181,7 @@ export const DRAINAGE_SYSTEM_LOCATION: CustomLocationData = {
   version: 1,
   width: 1600,
   height: 800,
-  playerSpawn: { x: 120, y: 400 },
+  playerSpawn: { x: 100, y: 400 },
   npcSpawn: { x: 1350, y: 700 },
   platforms: [
     // Bottom reservoir floor
@@ -226,34 +226,34 @@ export const DRAINAGE_SYSTEM_LOCATION: CustomLocationData = {
       startY: 330, 
       endX: 1440, 
       endY: 300, 
-      label: 'Укриття DS-S02', 
+      label: '⛊ УКРИТТЯ DS-S02', 
       isShelterPipe: true,
       targetLocationId: 'shelter-drainage',
-      targetSpawnX: 120,
-      targetSpawnY: 280
+      targetSpawnX: 100,
+      targetSpawnY: 330
     },
-    // Inter-region pipe back to Outskirts
+    // Inter-region pipe back to Outskirts (West side -> Outskirts East)
     {
       id: 'ds-pipe-to-outskirts',
       startX: 40,
       startY: 440,
       endX: 10,
       endY: 440,
-      label: 'Вхід: Окраїни',
+      label: '➔ ОКРАЇНИ',
       targetLocationId: 'outskirts-default',
-      targetSpawnX: 930,
+      targetSpawnX: 920,
       targetSpawnY: 170
     },
-    // Inter-region pipe to Garbage Wastes
+    // Inter-region pipe to Garbage Wastes (East side -> Garbage West)
     {
       id: 'ds-pipe-to-garbage',
       startX: 1560,
       startY: 320,
       endX: 1590,
       endY: 320,
-      label: 'Вхід: Сміттєзвалище',
+      label: '➔ СМІТТЄЗВАЛИЩЕ',
       targetLocationId: 'garbage-wastes',
-      targetSpawnX: 100,
+      targetSpawnX: 80,
       targetSpawnY: 530
     }
   ],
@@ -328,35 +328,59 @@ export const INDUSTRIAL_COMPLEX_LOCATION: CustomLocationData = {
       startY: 810, 
       endX: 100, 
       endY: 780, 
-      label: 'Укриття HI-S01', 
+      label: '⛊ УКРИТТЯ HI-S01', 
       isShelterPipe: true,
       targetLocationId: 'shelter-industrial',
-      targetSpawnX: 120,
-      targetSpawnY: 280
+      targetSpawnX: 100,
+      targetSpawnY: 330
     },
-    // Inter-region pipe back to Outskirts
+    // Inter-region pipe back to Outskirts (East ground -> Outskirts West)
     {
       id: 'hi-pipe-to-outskirts',
       startX: 1740,
       startY: 800,
       endX: 1780,
       endY: 800,
-      label: 'Вхід: Окраїни',
+      label: '➔ ОКРАЇНИ',
       targetLocationId: 'outskirts-default',
-      targetSpawnX: 60,
-      targetSpawnY: 160
+      targetSpawnX: 80,
+      targetSpawnY: 150
     },
-    // Inter-region pipe to Garbage Wastes
+    // Inter-region pipe to Garbage Wastes (West top -> Garbage East)
     {
       id: 'hi-pipe-to-garbage',
       startX: 120,
       startY: 220,
       endX: 30,
       endY: 220,
-      label: 'Вхід: Сміттєзвалище',
+      label: '➔ СМІТТЄЗВАЛИЩЕ',
       targetLocationId: 'garbage-wastes',
-      targetSpawnX: 1320,
+      targetSpawnX: 1300,
       targetSpawnY: 240
+    },
+    // Inter-region pipe to Chimney Canopy (Top sky tower -> Chimney Canopy bottom)
+    {
+      id: 'hi-pipe-to-chimney',
+      startX: 835,
+      startY: 190,
+      endX: 835,
+      endY: 140,
+      label: '➔ ДИМАРІ (ВГОРУ)',
+      targetLocationId: 'chimney-canopy',
+      targetSpawnX: 140,
+      targetSpawnY: 820
+    },
+    // Inter-region pipe to Shaded Citadel (East upper catwalk -> Shaded Citadel West)
+    {
+      id: 'hi-pipe-to-shaded',
+      startX: 1740,
+      startY: 370,
+      endX: 1780,
+      endY: 370,
+      label: '➔ ЗАТІНЕНА ЦИТАДЕЛЬ',
+      targetLocationId: 'shaded-citadel',
+      targetSpawnX: 100,
+      targetSpawnY: 220
     }
   ],
   items: [
@@ -419,35 +443,35 @@ export const GARBAGE_WASTES_LOCATION: CustomLocationData = {
       startY: 610, 
       endX: 1220, 
       endY: 580, 
-      label: 'Укриття GW-S05', 
+      label: '⛊ УКРИТТЯ GW-S05', 
       isShelterPipe: true,
       targetLocationId: 'shelter-garbage',
-      targetSpawnX: 120,
-      targetSpawnY: 280
+      targetSpawnX: 100,
+      targetSpawnY: 330
     },
-    // Inter-region pipe to Drainage System
+    // Inter-region pipe back to Drainage System (West side -> Drainage East)
     {
       id: 'gw-pipe-to-drainage',
       startX: 40,
       startY: 550,
       endX: 10,
       endY: 550,
-      label: 'Вхід: Дренажна система',
+      label: '➔ ДРЕНАЖНА СИСТЕМА',
       targetLocationId: 'drainage-system',
-      targetSpawnX: 1520,
+      targetSpawnX: 1500,
       targetSpawnY: 320
     },
-    // Inter-region pipe to Industrial Complex
+    // Inter-region pipe to Industrial Complex (East side -> Industrial West)
     {
       id: 'gw-pipe-to-industrial',
       startX: 1360,
       startY: 240,
       endX: 1390,
       endY: 240,
-      label: 'Вхід: Пром-комплекс',
+      label: '➔ ПРОМИСЛОВИЙ КОМПЛЕКС',
       targetLocationId: 'industrial-complex',
-      targetSpawnX: 180,
-      targetSpawnY: 240
+      targetSpawnX: 160,
+      targetSpawnY: 220
     }
   ],
   items: [
@@ -466,13 +490,202 @@ export const GARBAGE_WASTES_LOCATION: CustomLocationData = {
   ]
 };
 
+// 5. Димарі (Chimney Canopy) - Високі вежі над хмарами, металеві ферми та запаморочлива висота
+export const CHIMNEY_CANOPY_LOCATION: CustomLocationData = {
+  id: 'chimney-canopy',
+  name: 'Димарі (Chimney Canopy)',
+  region: 'CC',
+  version: 1,
+  width: 1600,
+  height: 950,
+  playerSpawn: { x: 160, y: 800 },
+  npcSpawn: { x: 1100, y: 420 },
+  platforms: [
+    // Bottom foundation with abyssal gaps
+    { id: 'cc-ground-left', x: 0, y: 870, w: 420, h: 80, type: 'concrete', label: 'НИЖНІЙ ПІЛОН' },
+    { id: 'cc-ground-right', x: 1180, y: 870, w: 420, h: 80, type: 'concrete', label: 'СХІДНИЙ ПІЛОН' },
+
+    // Tall vertical chimney towers
+    { id: 'cc-tower-w', x: 220, y: 380, w: 100, h: 500, type: 'concrete', label: 'ВЕЖА CC-1' },
+    { id: 'cc-tower-mid', x: 720, y: 260, w: 120, h: 620, type: 'concrete', label: 'ГОЛОВНИЙ ДИМАР' },
+    { id: 'cc-tower-e', x: 1260, y: 340, w: 110, h: 540, type: 'concrete', label: 'ВЕЖА CC-2' },
+
+    // Suspended high-altitude catwalks & narrow girders
+    { id: 'cc-catwalk-low', x: 320, y: 640, w: 400, h: 18, type: 'metal' },
+    { id: 'cc-catwalk-mid', x: 840, y: 520, w: 420, h: 18, type: 'metal' },
+    { id: 'cc-catwalk-high', x: 340, y: 360, w: 380, h: 18, type: 'metal' },
+    { id: 'cc-catwalk-sky', x: 840, y: 240, w: 460, h: 18, type: 'metal', label: 'ВЕРХНІЙ МІСТ' },
+
+    // Concrete walls and wind baffles
+    { id: 'cc-wall-1', x: 700, y: 240, w: 20, h: 80, type: 'wall' },
+    { id: 'cc-wall-2', x: 840, y: 220, w: 20, h: 80, type: 'wall' },
+
+    // Narrow high pipes
+    { id: 'cc-pipe-1', x: 120, y: 480, w: 200, h: 16, type: 'pipe' },
+    { id: 'cc-pipe-2', x: 1370, y: 480, w: 220, h: 16, type: 'pipe' }
+  ],
+  poles: [
+    { id: 'cc-pole-1', x: 160, yMin: 380, yMax: 870 },
+    { id: 'cc-pole-2', x: 360, yMin: 340, yMax: 870 },
+    { id: 'cc-pole-3', x: 580, yMin: 340, yMax: 640 },
+    { id: 'cc-pole-4', x: 880, yMin: 220, yMax: 880 },
+    { id: 'cc-pole-5', x: 1100, yMin: 240, yMax: 880 },
+    { id: 'cc-pole-6', x: 1420, yMin: 320, yMax: 870 }
+  ],
+  transitPipes: [
+    { id: 'cc-pipe-sc-1', startX: 300, startY: 370, endX: 420, endY: 630, label: 'Шахта CC-1' },
+    { id: 'cc-pipe-sc-2', startX: 820, startY: 510, endX: 940, endY: 230, label: 'Шахта CC-2' },
+    // Entrance pipe to Shelter CC-S03
+    {
+      id: 'cc-pipe-shelter',
+      startX: 640,
+      startY: 460,
+      endX: 680,
+      endY: 460,
+      label: '⛊ УКРИТТЯ CC-S03',
+      isShelterPipe: true,
+      targetLocationId: 'shelter-chimney',
+      targetSpawnX: 100,
+      targetSpawnY: 330
+    },
+    // Inter-region pipe down to Industrial Complex (South pylon -> Industrial top)
+    {
+      id: 'cc-pipe-to-industrial',
+      startX: 120,
+      startY: 850,
+      endX: 120,
+      endY: 900,
+      label: '➔ ПРОМ-КОМПЛЕКС (ВНИЗ)',
+      targetLocationId: 'industrial-complex',
+      targetSpawnX: 835,
+      targetSpawnY: 230
+    },
+    // Inter-region pipe to Shaded Citadel (East upper girder -> Shaded Citadel West)
+    {
+      id: 'cc-pipe-to-shaded',
+      startX: 1540,
+      startY: 500,
+      endX: 1580,
+      endY: 500,
+      label: '➔ ЗАТІНЕНА ЦИТАДЕЛЬ',
+      targetLocationId: 'shaded-citadel',
+      targetSpawnX: 100,
+      targetSpawnY: 220
+    }
+  ],
+  items: [
+    { id: 'cc-spear-1', type: 'spear', x: 260, y: 360 },
+    { id: 'cc-spear-2', type: 'spear', x: 780, y: 240 },
+    { id: 'cc-spear-3', type: 'spear', x: 1300, y: 320 },
+    { id: 'cc-rock-1', type: 'rock', x: 380, y: 620 },
+    { id: 'cc-rock-2', type: 'rock', x: 960, y: 220 },
+    { id: 'cc-berry-1', type: 'berry', x: 440, y: 340 },
+    { id: 'cc-berry-2', type: 'berry', x: 520, y: 340 },
+    { id: 'cc-berry-3', type: 'berry', x: 920, y: 500 },
+    { id: 'cc-berry-4', type: 'berry', x: 1000, y: 500 },
+    { id: 'cc-berry-5', type: 'berry', x: 1080, y: 500 }
+  ]
+};
+
+// 6. Затінена цитадель (Shaded Citadel) - Стародавні підземні склепи, темні кам'яні колони
+export const SHADED_CITADEL_LOCATION: CustomLocationData = {
+  id: 'shaded-citadel',
+  name: 'Затінена цитадель (Shaded Citadel)',
+  region: 'SH',
+  version: 1,
+  width: 1500,
+  height: 750,
+  playerSpawn: { x: 120, y: 220 },
+  npcSpawn: { x: 1250, y: 620 },
+  platforms: [
+    // Subterranean temple floor
+    { id: 'sh-ground', x: 0, y: 670, w: 1500, h: 80, type: 'concrete', label: 'СКЛЕП ЦИТАДЕЛІ' },
+
+    // Heavy stone temple monoliths & pillars
+    { id: 'sh-pillar-1', x: 240, y: 340, w: 90, h: 330, type: 'concrete', label: 'КОЛОНА 1' },
+    { id: 'sh-pillar-2', x: 560, y: 280, w: 90, h: 390, type: 'concrete', label: 'КОЛОНА 2' },
+    { id: 'sh-pillar-3', x: 920, y: 320, w: 100, h: 350, type: 'concrete', label: 'КОЛОНА 3' },
+    { id: 'sh-pillar-4', x: 1240, y: 360, w: 90, h: 310, type: 'concrete', label: 'КОЛОНА 4' },
+
+    // Stone lintels & crypt arches
+    { id: 'sh-arch-1', x: 80, y: 240, w: 240, h: 22, type: 'concrete' },
+    { id: 'sh-arch-2', x: 330, y: 420, w: 230, h: 20, type: 'metal' },
+    { id: 'sh-arch-3', x: 650, y: 340, w: 270, h: 22, type: 'concrete' },
+    { id: 'sh-arch-4', x: 1020, y: 440, w: 220, h: 20, type: 'metal' },
+    { id: 'sh-high-beam', x: 440, y: 160, w: 640, h: 18, type: 'pipe', label: 'АКВЕДУК ТЕМРЯВИ' },
+
+    // Ancient stone security walls
+    { id: 'sh-wall-1', x: 400, y: 440, w: 30, h: 230, type: 'wall' },
+    { id: 'sh-wall-2', x: 1100, y: 460, w: 30, h: 210, type: 'wall' }
+  ],
+  poles: [
+    { id: 'sh-pole-1', x: 160, yMin: 220, yMax: 670 },
+    { id: 'sh-pole-2', x: 480, yMin: 160, yMax: 670 },
+    { id: 'sh-pole-3', x: 780, yMin: 140, yMax: 670 },
+    { id: 'sh-pole-4', x: 1080, yMin: 160, yMax: 670 },
+    { id: 'sh-pole-5', x: 1360, yMin: 240, yMax: 670 }
+  ],
+  transitPipes: [
+    { id: 'sh-pipe-sc-1', startX: 300, startY: 330, endX: 360, endY: 410, label: 'Гробниця 1' },
+    { id: 'sh-pipe-sc-2', startX: 680, startY: 330, endX: 1040, endY: 430, label: 'Гробниця 2' },
+    // Entrance pipe to Shelter SH-S04
+    {
+      id: 'sh-pipe-shelter',
+      startX: 760,
+      startY: 660,
+      endX: 800,
+      endY: 660,
+      label: '⛊ УКРИТТЯ SH-S04',
+      isShelterPipe: true,
+      targetLocationId: 'shelter-shaded',
+      targetSpawnX: 100,
+      targetSpawnY: 330
+    },
+    // Inter-region pipe to Chimney Canopy (West crypt -> Chimney Canopy East)
+    {
+      id: 'sh-pipe-to-chimney',
+      startX: 40,
+      startY: 220,
+      endX: 10,
+      endY: 220,
+      label: '➔ ДИМАРІ',
+      targetLocationId: 'chimney-canopy',
+      targetSpawnX: 1500,
+      targetSpawnY: 500
+    },
+    // Inter-region pipe to Industrial Complex (South/East -> Industrial catwalk)
+    {
+      id: 'sh-pipe-to-industrial',
+      startX: 1440,
+      startY: 650,
+      endX: 1480,
+      endY: 650,
+      label: '➔ ПРОМИСЛОВИЙ КОМПЛЕКС',
+      targetLocationId: 'industrial-complex',
+      targetSpawnX: 1700,
+      targetSpawnY: 370
+    }
+  ],
+  items: [
+    { id: 'sh-spear-1', type: 'spear', x: 260, y: 320 },
+    { id: 'sh-spear-2', type: 'spear', x: 940, y: 300 },
+    { id: 'sh-rock-1', type: 'rock', x: 180, y: 650 },
+    { id: 'sh-rock-2', type: 'rock', x: 740, y: 320 },
+    { id: 'sh-rock-3', type: 'rock', x: 1300, y: 650 },
+    { id: 'sh-berry-1', type: 'berry', x: 480, y: 140 },
+    { id: 'sh-berry-2', type: 'berry', x: 560, y: 140 },
+    { id: 'sh-berry-3', type: 'berry', x: 640, y: 140 },
+    { id: 'sh-berry-4', type: 'berry', x: 720, y: 140 },
+    { id: 'sh-berry-5', type: 'berry', x: 800, y: 140 },
+    { id: 'sh-berry-6', type: 'berry', x: 880, y: 140 }
+  ]
+};
+
 // ============================================================================
 // DEDICATED SHELTER ROOMS (ОКРЕМІ КАРТИ УКРИТТІВ ДЛЯ ГІБЕРНАЦІЇ)
-// "убержки це не просто якийсь блок а окрема локация куда нада залісти для гібернації"
-// "убержки сохраняють і место нахождения такшо після заходу ти появляєся там де сохранился"
 // ============================================================================
 
-// 5. Укриття Окраїн (Shelter SU-S01)
+// 7. Укриття Окраїн (Shelter SU-S01)
 export const SHELTER_OUTSKIRTS_LOCATION: CustomLocationData = {
   id: 'shelter-outskirts',
   name: 'Укриття SU-S01 (Shelter)',
@@ -484,16 +697,11 @@ export const SHELTER_OUTSKIRTS_LOCATION: CustomLocationData = {
   playerSpawn: { x: 280, y: 320 },
   npcSpawn: { x: 420, y: 320 },
   platforms: [
-    // Bottom reinforced chamber floor
     { id: 'su-sh-floor', x: 0, y: 360, w: 580, h: 60, type: 'metal', label: 'УКРИТТЯ SU-S01' },
-    // Heavy blast door perimeter walls
     { id: 'su-sh-wall-l', x: 0, y: 0, w: 60, h: 360, type: 'wall' },
     { id: 'su-sh-wall-r', x: 520, y: 0, w: 60, h: 360, type: 'wall' },
-    // Solid concrete roof
     { id: 'su-sh-ceiling', x: 0, y: 0, w: 580, h: 50, type: 'concrete' },
-    // Soft sleeping depression bunk
     { id: 'su-sh-bunk', x: 210, y: 340, w: 160, h: 20, type: 'concrete' },
-    // Overhead vent pipe
     { id: 'su-sh-pipe', x: 80, y: 160, w: 420, h: 16, type: 'pipe' }
   ],
   poles: [
@@ -501,14 +709,13 @@ export const SHELTER_OUTSKIRTS_LOCATION: CustomLocationData = {
     { id: 'su-sh-pole-2', x: 430, yMin: 50, yMax: 360 }
   ],
   transitPipes: [
-    // Exit pipe back into Outskirts main region!
     {
       id: 'su-sh-exit-pipe',
       startX: 100,
       startY: 330,
       endX: 100,
       endY: 330,
-      label: 'Вихід: Окраїни',
+      label: '➔ ВИХІД В ОКРАЇНИ',
       targetLocationId: 'outskirts-default',
       targetSpawnX: 860,
       targetSpawnY: 480
@@ -520,7 +727,7 @@ export const SHELTER_OUTSKIRTS_LOCATION: CustomLocationData = {
   ]
 };
 
-// 6. Укриття Дренажної системи (Shelter DS-S02)
+// 8. Укриття Дренажної системи (Shelter DS-S02)
 export const SHELTER_DRAINAGE_LOCATION: CustomLocationData = {
   id: 'shelter-drainage',
   name: 'Укриття DS-S02 (Shelter)',
@@ -544,14 +751,13 @@ export const SHELTER_DRAINAGE_LOCATION: CustomLocationData = {
     { id: 'ds-sh-pole-2', x: 430, yMin: 50, yMax: 360 }
   ],
   transitPipes: [
-    // Exit pipe back into Drainage System
     {
       id: 'ds-sh-exit-pipe',
       startX: 100,
       startY: 330,
       endX: 100,
       endY: 330,
-      label: 'Вихід: Дренажна система',
+      label: '➔ ВИХІД У ДРЕНАЖ',
       targetLocationId: 'drainage-system',
       targetSpawnX: 1360,
       targetSpawnY: 310
@@ -562,7 +768,7 @@ export const SHELTER_DRAINAGE_LOCATION: CustomLocationData = {
   ]
 };
 
-// 7. Укриття Промислового комплексу (Shelter HI-S01)
+// 9. Укриття Промислового комплексу (Shelter HI-S01)
 export const SHELTER_INDUSTRIAL_LOCATION: CustomLocationData = {
   id: 'shelter-industrial',
   name: 'Укриття HI-S01 (Shelter)',
@@ -586,14 +792,13 @@ export const SHELTER_INDUSTRIAL_LOCATION: CustomLocationData = {
     { id: 'hi-sh-pole-2', x: 430, yMin: 50, yMax: 360 }
   ],
   transitPipes: [
-    // Exit pipe back into Industrial Complex
     {
       id: 'hi-sh-exit-pipe',
       startX: 100,
       startY: 330,
       endX: 100,
       endY: 330,
-      label: 'Вихід: Пром-комплекс',
+      label: '➔ ВИХІД У ПРОМ-КОМПЛЕКС',
       targetLocationId: 'industrial-complex',
       targetSpawnX: 120,
       targetSpawnY: 790
@@ -605,7 +810,7 @@ export const SHELTER_INDUSTRIAL_LOCATION: CustomLocationData = {
   ]
 };
 
-// 8. Укриття Сміттєзвалища (Shelter GW-S05)
+// 10. Укриття Сміттєзвалища (Shelter GW-S05)
 export const SHELTER_GARBAGE_LOCATION: CustomLocationData = {
   id: 'shelter-garbage',
   name: 'Укриття GW-S05 (Shelter)',
@@ -629,14 +834,13 @@ export const SHELTER_GARBAGE_LOCATION: CustomLocationData = {
     { id: 'gw-sh-pole-2', x: 430, yMin: 50, yMax: 360 }
   ],
   transitPipes: [
-    // Exit pipe back into Garbage Wastes
     {
       id: 'gw-sh-exit-pipe',
       startX: 100,
       startY: 330,
       endX: 100,
       endY: 330,
-      label: 'Вихід: Сміттєзвалище',
+      label: '➔ ВИХІД У СМІТТЄЗВАЛИЩЕ',
       targetLocationId: 'garbage-wastes',
       targetSpawnX: 1180,
       targetSpawnY: 590
@@ -647,13 +851,100 @@ export const SHELTER_GARBAGE_LOCATION: CustomLocationData = {
   ]
 };
 
+// 11. Укриття Димарів (Shelter CC-S03)
+export const SHELTER_CHIMNEY_LOCATION: CustomLocationData = {
+  id: 'shelter-chimney',
+  name: 'Укриття CC-S03 (Shelter)',
+  region: 'CC',
+  version: 1,
+  width: 580,
+  height: 420,
+  isShelterRoom: true,
+  playerSpawn: { x: 280, y: 320 },
+  npcSpawn: { x: 420, y: 320 },
+  platforms: [
+    { id: 'cc-sh-floor', x: 0, y: 360, w: 580, h: 60, type: 'metal', label: 'УКРИТТЯ CC-S03' },
+    { id: 'cc-sh-wall-l', x: 0, y: 0, w: 60, h: 360, type: 'wall' },
+    { id: 'cc-sh-wall-r', x: 520, y: 0, w: 60, h: 360, type: 'wall' },
+    { id: 'cc-sh-ceiling', x: 0, y: 0, w: 580, h: 50, type: 'concrete' },
+    { id: 'cc-sh-bunk', x: 210, y: 340, w: 160, h: 20, type: 'concrete' },
+    { id: 'cc-sh-pipe', x: 80, y: 160, w: 420, h: 16, type: 'pipe' }
+  ],
+  poles: [
+    { id: 'cc-sh-pole-1', x: 150, yMin: 50, yMax: 360 },
+    { id: 'cc-sh-pole-2', x: 430, yMin: 50, yMax: 360 }
+  ],
+  transitPipes: [
+    {
+      id: 'cc-sh-exit-pipe',
+      startX: 100,
+      startY: 330,
+      endX: 100,
+      endY: 330,
+      label: '➔ ВИХІД У ДИМАРІ',
+      targetLocationId: 'chimney-canopy',
+      targetSpawnX: 600,
+      targetSpawnY: 450
+    }
+  ],
+  items: [
+    { id: 'cc-sh-fruit-1', type: 'berry', x: 260, y: 330 },
+    { id: 'cc-sh-fruit-2', type: 'berry', x: 330, y: 330 }
+  ]
+};
+
+// 12. Укриття Затіненої цитаделі (Shelter SH-S04)
+export const SHELTER_SHADED_LOCATION: CustomLocationData = {
+  id: 'shelter-shaded',
+  name: 'Укриття SH-S04 (Shelter)',
+  region: 'SH',
+  version: 1,
+  width: 580,
+  height: 420,
+  isShelterRoom: true,
+  playerSpawn: { x: 280, y: 320 },
+  npcSpawn: { x: 420, y: 320 },
+  platforms: [
+    { id: 'sh-sh-floor', x: 0, y: 360, w: 580, h: 60, type: 'metal', label: 'УКРИТТЯ SH-S04' },
+    { id: 'sh-sh-wall-l', x: 0, y: 0, w: 60, h: 360, type: 'wall' },
+    { id: 'sh-sh-wall-r', x: 520, y: 0, w: 60, h: 360, type: 'wall' },
+    { id: 'sh-sh-ceiling', x: 0, y: 0, w: 580, h: 50, type: 'concrete' },
+    { id: 'sh-sh-bunk', x: 210, y: 340, w: 160, h: 20, type: 'concrete' },
+    { id: 'sh-sh-pipe', x: 80, y: 160, w: 420, h: 16, type: 'pipe' }
+  ],
+  poles: [
+    { id: 'sh-sh-pole-1', x: 150, yMin: 50, yMax: 360 },
+    { id: 'sh-sh-pole-2', x: 430, yMin: 50, yMax: 360 }
+  ],
+  transitPipes: [
+    {
+      id: 'sh-sh-exit-pipe',
+      startX: 100,
+      startY: 330,
+      endX: 100,
+      endY: 330,
+      label: '➔ ВИХІД У ЦИТАДЕЛЬ',
+      targetLocationId: 'shaded-citadel',
+      targetSpawnX: 720,
+      targetSpawnY: 650
+    }
+  ],
+  items: [
+    { id: 'sh-sh-fruit-1', type: 'berry', x: 280, y: 330 }
+  ]
+};
+
 export const BUILTIN_LOCATIONS: CustomLocationData[] = [
   DEFAULT_OUTSKIRTS_LOCATION,
   DRAINAGE_SYSTEM_LOCATION,
   INDUSTRIAL_COMPLEX_LOCATION,
   GARBAGE_WASTES_LOCATION,
+  CHIMNEY_CANOPY_LOCATION,
+  SHADED_CITADEL_LOCATION,
   SHELTER_OUTSKIRTS_LOCATION,
   SHELTER_DRAINAGE_LOCATION,
   SHELTER_INDUSTRIAL_LOCATION,
-  SHELTER_GARBAGE_LOCATION
+  SHELTER_GARBAGE_LOCATION,
+  SHELTER_CHIMNEY_LOCATION,
+  SHELTER_SHADED_LOCATION
 ];
