@@ -290,6 +290,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     }
   }, [customLocation]);
 
+  // Synchronize distributedSimulation.currentRoom with currentLocation.id
+  // Fixes: "чогось єслі даже іграки у разних локациях їх модельки всеодно видно пофікси це"
+  useEffect(() => {
+    distributedSimulation.enterRoom(currentLocation.id);
+  }, [currentLocation.id]);
+
   // Food Pips State: 4 required + 3 extra = 7 slots total
   // "зроби слизне коту 4 обязательно ячуєк їди і 3 дополнительних"
   const [foodCount, setFoodCount] = useState<number>(() => Math.min(7, playerSave.food ?? 3));
@@ -305,6 +311,85 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     inShelterChamberRef.current = inShelterChamber;
   }, [inShelterChamber]);
   const [isHibernating, setIsHibernating] = useState<boolean>(false);
+
+  // GitHub Version Polling & 5-minute Auto-Restart State
+  // "додай щоб гра на клієнті кожні 20 сикунд провіряла версіЮ фАйла на гит хабі єслі там новіша чим та що на клієнті..."
+  const [updateCountdown, setUpdateCountdown] = useState<number | null>(null);
+  const [updateDetected, setUpdateDetected] = useState<boolean>(false);
+  const clientVersionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const checkVersion = async () => {
+      try {
+        const res = await fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const serverVer = data.version ? String(data.version) : null;
+        if (!serverVer) return;
+
+        if (clientVersionRef.current === null) {
+          clientVersionRef.current = serverVer;
+        } else if (clientVersionRef.current !== serverVer) {
+          if (!updateDetected && !isCancelled) {
+            setUpdateDetected(true);
+            setUpdateCountdown(prev => (prev === null ? 300 : prev)); // 5 minutes countdown
+          }
+        }
+      } catch {
+        // Silently catch network failures
+      }
+    };
+
+    checkVersion();
+    const interval = setInterval(checkVersion, 20000); // Poll every 20 seconds
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
+  }, [updateDetected]);
+
+  // Countdown timer for auto-reload
+  useEffect(() => {
+    if (updateCountdown === null) return;
+    if (updateCountdown <= 0) {
+      window.location.reload();
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setUpdateCountdown(prev => (prev !== null && prev > 0 ? prev - 1 : 0));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [updateCountdown]);
+
+  // Emergency shelter save during update countdown:
+  // "...і єслі за це время дойти до убержки даже єчлі не наївся або даже єслі ще цикл не закончился гра всеодно сохранить прогрес і перезапустить сторінку тому гравцю"
+  useEffect(() => {
+    if (updateCountdown !== null && updateCountdown > 0) {
+      if (currentLocation.isShelterRoom || inShelterChamber) {
+        const emergencySave: PlayerSaveData = {
+          karma: playerSave.karma,
+          maxKarma: 5,
+          cycle: playerSave.cycle + 1,
+          food: Math.max(4, foodCount),
+          lastLocationId: currentLocation.id,
+          playerSpawnX: 160,
+          playerSpawnY: 280,
+          hibernated: true
+        };
+        try {
+          localStorage.setItem('rain_world_player_progress', JSON.stringify(emergencySave));
+        } catch (e) {
+          console.warn('Emergency save error:', e);
+        }
+        alert('⚠️ Ви дісталися укриття! Прогрес екстрено збережено перед оновленням. Перезавантаження гри...');
+        window.location.reload();
+      }
+    }
+  }, [updateCountdown, currentLocation.isShelterRoom, inShelterChamber, currentLocation.id, foodCount, playerSave]);
 
   // Cycle Duration and Countdown: 10 dots around Karma symbol
   const [cycleTotalDuration, setCycleTotalDuration] = useState<number>(() => getRandomCycleSeconds());
@@ -1386,6 +1471,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     let pipeTransit: PipeTransitState | null = null;
     let lastTransitTimestamp = 0;
     let localStormSeconds = 0;
+    let pounceChargeTimer = 0;
+    let prevJumpPressed = false;
 
     // Worm grass elements along the ground floor
     const wormGrasses: WormGrass[] = [];
@@ -1465,7 +1552,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         controlsRef.current.down = true;
         setControls(prev => ({ ...prev, down: true }));
       }
-      if (e.key === ' ' || (key === 'z' && !controlsRef.current.down)) {
+      if (e.key === ' ' || key === 'z') {
         controlsRef.current.jump = true;
         setControls(prev => ({ ...prev, jump: true }));
       }
@@ -1629,6 +1716,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               player.facingRight = exitDir > 0;
               
               soundEngine.playPickup();
+              distributedSimulation.enterRoom(targetLoc.id);
               setCurrentLocation(targetLoc);
               setInShelterChamber(!!targetLoc.isShelterRoom);
               pipeTransit = null;
@@ -1763,43 +1851,105 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           // Ground & Airborne Locomotion with eatingSlowdownTimer effect
           const isSlowed = eatingSlowdownTimer > 0;
           const accel = isSlowed ? 0.22 : 0.55;
-          const baseWalkSpeed = player.crouching ? 2.0 : 4.8;
+          const baseWalkSpeed = player.crouching ? 2.2 : 4.8;
           const maxWalkSpeed = isSlowed ? Math.min(baseWalkSpeed, 2.0) : baseWalkSpeed;
           const friction = player.isGrounded ? (isSlowed ? 0.74 : 0.82) : 0.98;
 
-          if (ctrl.left) {
-            player.vx -= accel;
-            player.facingRight = false;
-          } else if (ctrl.right) {
-            player.vx += accel;
-            player.facingRight = true;
-          } else {
-            player.vx *= friction;
-          }
-
+          // 1. Persistent Crawl / Crouch State Transitions
+          // "зроби щоб кнопка присяда ну та що ↓ ложила персонажа ну тоєсть він полз поки не нажме ↑ або прижок"
           if (ctrl.down && player.isGrounded) {
             player.crouching = true;
-          } else if (!ctrl.down) {
+          }
+
+          // Standing up on pressing UP:
+          if (ctrl.up && player.crouching) {
             player.crouching = false;
+            pounceChargeTimer = 0;
+          }
+
+          if (!player.isGrounded) {
+            pounceChargeTimer = 0;
+          }
+
+          // 2. Pounce Charging Mechanics (Ривок):
+          // "но єслі при ползані зажать прижок на 1.8 сикунд(цей таймер скритий) то персонаж зробе високий ривок в ту сторону яку смотрел"
+          const isChargingPounce = player.crouching && player.isGrounded && ctrl.jump;
+
+          if (isChargingPounce) {
+            // Bracing for pounce: slow down horizontal momentum to zero
+            player.vx *= 0.55;
+            if (Math.abs(player.vx) < 0.05) player.vx = 0;
+            pounceChargeTimer += delta;
+
+            // Auto-launch if held past 2.0s
+            if (pounceChargeTimer >= 2.0) {
+              const dir = player.facingRight ? 1 : -1;
+              player.vx = dir * 11.5;
+              player.vy = -7.6;
+              player.isGrounded = false;
+              player.crouching = false;
+              pounceChargeTimer = 0;
+              soundEngine.playThunder();
+              setLastAction('Високий ривок Слимакокота (Pounce)!');
+            }
+          } else {
+            // Jump released or was previously charging
+            if (pounceChargeTimer >= 1.8) {
+              // Successfully charged for >= 1.8 seconds: unleash high pounce leap!
+              const dir = player.facingRight ? 1 : -1;
+              player.vx = dir * 11.5;
+              player.vy = -7.6;
+              player.isGrounded = false;
+              player.crouching = false;
+              pounceChargeTimer = 0;
+              soundEngine.playThunder();
+              setLastAction('Високий ривок Слимакокота (Pounce)!');
+            } else if (pounceChargeTimer > 0 && pounceChargeTimer < 1.8 && !ctrl.jump && prevJumpPressed) {
+              // Quick tap of jump from crawl: stand up and perform normal jump
+              player.vy = isSlowed ? -6.8 : -8.5;
+              player.isGrounded = false;
+              player.crouching = false;
+              pounceChargeTimer = 0;
+              if (!isSoundMuted) soundEngine.playThunder();
+              setLastAction('Стрибок з положення лежачи!');
+            } else {
+              pounceChargeTimer = 0;
+
+              // Horizontal movement (crawling if crouching, running if standing)
+              if (ctrl.left) {
+                player.vx -= accel;
+                player.facingRight = false;
+              } else if (ctrl.right) {
+                player.vx += accel;
+                player.facingRight = true;
+              } else {
+                player.vx *= friction;
+              }
+
+              // Normal Jump when standing
+              if (ctrl.jump && !prevJumpPressed && player.isGrounded) {
+                player.vy = isSlowed ? -6.8 : -8.5;
+                player.isGrounded = false;
+                player.crouching = false;
+                setLastAction(isSlowed ? 'Важкий стрибок...' : 'Класичний стрибок Слимакокота!');
+                if (!isSoundMuted) {
+                  soundEngine.playThunder();
+                }
+              }
+            }
           }
 
           if (player.vx > maxWalkSpeed) player.vx = maxWalkSpeed;
           if (player.vx < -maxWalkSpeed) player.vx = -maxWalkSpeed;
 
-          // Normal Jump
-          if (ctrl.jump && player.isGrounded) {
-            player.vy = isSlowed ? -6.8 : -8.5;
-            player.isGrounded = false;
-            setLastAction(isSlowed ? 'Важкий стрибок...' : 'Класичний стрибок Слимакокота!');
-            if (!isSoundMuted) {
-              soundEngine.playThunder();
-            }
-          }
+          prevJumpPressed = ctrl.jump;
         } else {
           // Stunned or dead: apply inertia and friction
           const friction = player.isGrounded ? 0.92 : 0.98;
           player.vx *= friction;
           player.crouching = false;
+          pounceChargeTimer = 0;
+          prevJumpPressed = false;
         }
 
         // Gravity
@@ -3756,6 +3906,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   };
 
   const handleSelectLocation = (loc: CustomLocationData) => {
+    distributedSimulation.enterRoom(loc.id);
     setCurrentLocation(loc);
     setShowLocationModal(false);
     setInShelterChamber(false);
@@ -3769,6 +3920,36 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       className="absolute inset-0 bg-[#0c0a10] z-40 flex flex-col items-center justify-between font-sans text-slate-100 overflow-hidden select-none touch-none"
     >
       
+      {/* GitHub Update Notification Banner */}
+      {/* "додай щоб гра на клієнті кожні 20 сикунд провіряла версіЮ фАйла на гит хабі єслі там новіша чим та що на клієнті то воно зверху показувало зверху сопщения що через 5 минут буде примусовий перезапуск сторінки..." */}
+      <AnimatePresence>
+        {updateCountdown !== null && (
+          <motion.div
+            initial={{ opacity: 0, y: -25 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -25 }}
+            className="w-full z-[60] bg-gradient-to-r from-red-950 via-amber-950 to-red-950 border-b-2 border-amber-500/80 text-white px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 shadow-2xl font-mono text-[11px] sm:text-xs select-none"
+          >
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping inline-block" />
+              <span className="font-bold text-amber-400 tracking-wider">⚠️ ОНОВЛЕННЯ НА GITHUB!</span>
+              <span className="text-zinc-200">
+                Перезапуск через: <strong className="text-amber-300 font-mono text-sm font-black">{Math.floor(updateCountdown / 60)}:{String(updateCountdown % 60).padStart(2, '0')}</strong>
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-[10px] text-amber-200/90">
+              <span className="hidden sm:inline font-sans">Дійдіть до укриття (убержки) для екстреного збереження!</span>
+              <button
+                onClick={() => window.location.reload()}
+                className="px-2.5 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold uppercase cursor-pointer text-[9px] active:scale-95 shadow-sm"
+              >
+                Оновити зараз
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Top Ambient Control Bar */}
       <div className="w-full flex items-center justify-between px-2 py-2 sm:px-4 sm:py-3 z-50 bg-gradient-to-b from-black/85 to-transparent">
         <div className="flex items-center gap-2 sm:gap-3">
@@ -4086,23 +4267,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 })}
               </div>
             </div>
-
-            {/* If in a dedicated Shelter Room, show the Sleep / Hibernate action button directly in HUD */}
-            {currentLocation.isShelterRoom && (
-              <button
-                onClick={handleHibernate}
-                disabled={foodCount < 4 || isHibernating}
-                className={`pointer-events-auto px-3 py-1.5 rounded-xl border font-mono text-xs font-bold flex items-center gap-1.5 shadow-2xl transition-all cursor-pointer active:scale-95 ${
-                  foodCount >= 4 && !isHibernating
-                    ? 'bg-amber-500 hover:bg-amber-400 text-black border-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.6)] animate-pulse'
-                    : 'bg-zinc-900/90 border-zinc-700 text-zinc-400 opacity-80 hover:text-white'
-                }`}
-                title="Заснути та зберегти гру в укритті (потрібно щонайменше 4 ячейки їжі)"
-              >
-                <Moon className="w-3.5 h-3.5" />
-                <span>{foodCount >= 4 ? 'СПАТИ / ГІБЕРНАЦІЯ' : `ДЛЯ СПУ: ${foodCount}/4`}</span>
-              </button>
-            )}
           </div>
 
           {/* HOLOGRAPHIC ROOM MAP OVERLAY (КАРТА КІМНАТИ ОКРАЇН) */}
@@ -4658,8 +4822,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 15 }}
             transition={{ duration: 0.15 }}
-            style={{ touchAction: 'none' }}
-            className="w-full max-w-5xl flex items-end justify-between px-3 sm:px-6 pb-2 sm:pb-4 pt-1 z-40 select-none pointer-events-none touch-none"
+            style={{ touchAction: 'none', paddingBottom: 'max(2.25rem, env(safe-area-inset-bottom, 2.25rem))' }}
+            className="w-full max-w-5xl flex items-end justify-between px-3 sm:px-6 pt-1 z-40 select-none pointer-events-none touch-none pb-8 sm:pb-12 mb-2 sm:mb-4"
           >
             {/* LEFT COMPARTMENT: HORIZONTAL NAVIGATION PAD */}
             <div 

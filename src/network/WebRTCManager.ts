@@ -171,6 +171,32 @@ export class WebRTCManager {
     return true;
   }
 
+  // Automatic room matchmaking & creation:
+  // "убери кнопку создания комнат гра сама создає комнату єслі їх нету або всі заповнені з рандомним таймером циклов та 12 слотами гравців"
+  public async autoMatchmakeAndJoin(): Promise<boolean> {
+    this.disconnect();
+    this.setStatus('signaling');
+
+    try {
+      const rooms = await signalingClient.listRooms();
+      // Look for any joinable room with available slots
+      const joinable = rooms.find(r => r.playerCount < (r.maxPlayers || 12));
+
+      if (joinable) {
+        const ok = await this.joinRoom(joinable.id);
+        if (ok) return true;
+      }
+    } catch (e) {
+      console.warn('Failed listing rooms during auto-matchmaking:', e);
+    }
+
+    // If no rooms exist or all are full (12/12), automatically create a room!
+    // Randomized cycle duration: 3 to 7 min, rare 12 min
+    const randomCycle = Math.random() < 0.08 ? 12 * 60 : (180 + Math.floor(Math.random() * (420 - 180 + 1)));
+    const roomName = `Світ Rain World #${Math.floor(Math.random() * 899 + 100)}`;
+    return await this.hostRoom(roomName, randomCycle, 12);
+  }
+
   public async hostRoom(roomName: string, cycleSec = 300, maxPlayers = 12): Promise<boolean> {
     this.disconnect();
     this.setStatus('signaling');

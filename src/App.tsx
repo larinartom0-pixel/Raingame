@@ -162,16 +162,21 @@ export default function App() {
 
           {/* Interactive Options list */}
           <div className="flex flex-col gap-4 w-full">
-            {/* 1. PLAY BUTTON (SOLO) */}
-            <motion.button
-              id="menu-btn-play"
-              onClick={() => handleMenuClick('play')}
-              whileHover={{ x: 8 }}
-              className="group flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg hover:text-amber-400 transition-all duration-300 text-slate-300 cursor-pointer"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
-              ОДИНОЧНА ГРА
-            </motion.button>
+            {/* 1. PLAY BUTTON (SOLO) - DISABLED AS REQUESTED ("зроби кнопку одиночной гри неактивноЙ і ПІДПиШи Шо це времено") */}
+            <div className="flex flex-col items-start gap-1 select-none">
+              <button
+                id="menu-btn-play"
+                disabled={true}
+                className="flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-zinc-500 cursor-not-allowed opacity-60"
+                title="Одиночна гра тимчасово недоступна. Використовуйте Мережеву гру!"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-zinc-700" />
+                <span className="line-through decoration-zinc-600">ОДИНОЧНА ГРА</span>
+              </button>
+              <span className="ml-5 px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-amber-950/90 border border-amber-500/50 text-amber-400 tracking-wider shadow-sm">
+                [ТИМЧАСОВО НЕДОСТУПНО]
+              </span>
+            </div>
 
             {/* 2. MULTIPLAYER P2P BUTTON */}
             <motion.button

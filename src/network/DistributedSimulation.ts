@@ -66,6 +66,10 @@ export class DistributedSimulationManager {
     return () => this.onHostChangedHandlers.delete(handler);
   }
 
+  public setCurrentRoom(roomName: string) {
+    this.enterRoom(roomName);
+  }
+
   public enterRoom(roomName: string) {
     const prevRoom = this.currentRoom;
     this.currentRoom = roomName;
