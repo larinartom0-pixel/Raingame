@@ -257,10 +257,11 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
       ctx.restore();
 
       // 4. THE PROTAGONIST'S PIPE (where Slugcat sits in focus)
-      // Placed centrally-left in standard cinematic styling
-      const pipeY = height * 0.65;
-      const pipeLeft = width * 0.2;
-      const pipeRight = width * 0.8;
+      // Placed centrally-left in standard cinematic styling (comfortably elevated and centered on mobile phones)
+      const isMobile = width < 768;
+      const pipeY = isMobile ? height * 0.44 : height * 0.65;
+      const pipeLeft = isMobile ? width * 0.38 : width * 0.2;
+      const pipeRight = width * 0.85;
       
       ctx.save();
       // Draw industrial girders framing of the foreground

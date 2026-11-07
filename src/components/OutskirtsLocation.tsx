@@ -2416,7 +2416,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
       // ---------------- Procedural Skeleton Physics (Remote Peers) ----------------
       for (const rp of webRTCManager.remotePlayers.values()) {
-        if (rp.room === distributedSimulation.currentRoom) {
+        if (rp.room === currentLocation.id || rp.room === distributedSimulation.currentRoom) {
           updateSkeleton(rp, t, delta);
         }
       }
@@ -2438,7 +2438,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           maxHp: player.maxHp,
           stunTimer: player.stunTimer,
           heldItem: player.heldItem ? player.heldItem.type : null,
-          room: distributedSimulation.currentRoom,
+          room: currentLocation.id,
           head: player.head,
           chest: player.chest,
           hips: player.hips,
@@ -2909,6 +2909,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         ctx.ellipse(curX, curY, 11, 7, transitAngle, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
+      } else {
         renderSlugcatCharacter(ctx, player, t, true, webRTCManager.localPlayerName);
       }
 
@@ -2947,7 +2948,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
       // 7.1 Draw Remote P2P Players in current location room
       for (const rp of webRTCManager.remotePlayers.values()) {
-        if (rp.room === distributedSimulation.currentRoom) {
+        if (rp.room === currentLocation.id || rp.room === distributedSimulation.currentRoom) {
           renderSlugcatCharacter(ctx, rp, t, false, rp.name);
         }
       }

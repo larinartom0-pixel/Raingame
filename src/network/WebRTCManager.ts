@@ -396,7 +396,7 @@ export class WebRTCManager {
         this.remotePlayers.set(wrapper.peerId, {
           id: wrapper.peerId,
           name: wrapper.peerName,
-          room: this.currentRoomId || 'SU_A01',
+          room: 'SU_A01',
           x: 220,
           y: 450,
           vx: 0,

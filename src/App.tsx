@@ -148,22 +148,28 @@ export default function App() {
       {hasEntered && (
         <motion.div
           id="main-menu-hud-sidebar"
-          initial={{ opacity: 0, x: 50 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 1.0, delay: 0.3 }}
-          className="absolute right-6 md:right-24 top-1/2 -translate-y-1/2 z-20 flex flex-col items-start gap-8 select-none p-6 md:p-8 max-w-xs bg-zinc-950/40 border border-zinc-900/40 rounded-2xl backdrop-blur-md pointer-events-auto shadow-2xl"
+          initial={{ opacity: 0, y: 30 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.8, delay: 0.2 }}
+          style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom, 0.75rem))' }}
+          className="fixed bottom-3 inset-x-3 sm:bottom-5 sm:inset-x-8 z-20 flex flex-col gap-2.5 p-3 sm:p-4 bg-black/60 border border-zinc-800/80 rounded-2xl backdrop-blur-md shadow-2xl select-none pointer-events-auto md:fixed-none md:absolute md:inset-auto md:right-24 md:top-1/2 md:-translate-y-1/2 md:p-8 md:max-w-xs md:flex-col md:items-start md:gap-8 md:bg-zinc-950/40 md:border-zinc-900/40 md:pb-8"
         >
-          {/* Menu Title Accent */}
-          <div className="space-y-1">
-            <h2 className="text-xl font-bold font-sans tracking-[0.15em] text-white">
-              MAIN MENU
+          {/* Menu Title Accent (Desktop Title / Mobile compact header) */}
+          <div className="flex items-center justify-between w-full md:block md:space-y-1">
+            <h2 className="text-xs sm:text-sm md:text-xl font-bold font-sans tracking-[0.15em] text-white flex items-center gap-2">
+              <span className="hidden md:inline">MAIN MENU</span>
+              <span className="md:hidden text-amber-400 font-mono text-xs">RAIN GAME // МЕНЮ</span>
             </h2>
+            {/* Solo disabled indicator on mobile header */}
+            <span className="md:hidden px-2 py-0.5 rounded text-[8px] font-mono font-bold bg-amber-950/90 border border-amber-500/40 text-amber-400">
+              [ОДИНОЧНА: ТИМЧАСОВО ОФЛАЙН]
+            </span>
           </div>
 
-          {/* Interactive Options list */}
-          <div className="flex flex-col gap-4 w-full">
-            {/* 1. PLAY BUTTON (SOLO) - DISABLED AS REQUESTED ("зроби кнопку одиночной гри неактивноЙ і ПІДПиШи Шо це времено") */}
-            <div className="flex flex-col items-start gap-1 select-none">
+          {/* Interactive Options list: Grid/Row on mobile, Vertical stack on PC */}
+          <div className="flex flex-col gap-2 md:gap-4 w-full">
+            {/* 1. PLAY BUTTON (SOLO) - Desktop view */}
+            <div className="hidden md:flex flex-col items-start gap-1 select-none">
               <button
                 id="menu-btn-play"
                 disabled={true}
@@ -178,7 +184,7 @@ export default function App() {
               </span>
             </div>
 
-            {/* 2. MULTIPLAYER P2P BUTTON */}
+            {/* 2. MULTIPLAYER P2P BUTTON (Highlighted on mobile as primary launch button) */}
             <motion.button
               id="menu-btn-multiplayer"
               onClick={() => {
@@ -186,59 +192,62 @@ export default function App() {
                 setShowMultiplayerModal(true);
               }}
               whileHover={{ x: 8 }}
-              className="group flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-cyan-300 hover:text-cyan-200 transition-all duration-300 cursor-pointer"
+              className="group w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-950/90 via-cyan-900/60 to-emerald-950/90 border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.25)] flex items-center justify-center gap-2 text-cyan-200 font-mono font-bold text-sm tracking-wider cursor-pointer active:scale-98 transition-all md:w-auto md:bg-transparent md:border-0 md:p-0 md:shadow-none md:justify-start md:text-base md:sm:text-lg md:text-cyan-300 md:hover:text-cyan-200 md:tracking-[0.2em]"
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+              <span className="hidden md:inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
               <Globe className="w-4 h-4 text-cyan-400 mr-[-2px] group-hover:rotate-45 transition-transform" />
-              МЕРЕЖА [P2P]
+              <span>МЕРЕЖА [P2P]</span>
             </motion.button>
 
-            {/* 3. LOCATION EDITOR BUTTON */}
-            <motion.button
-              id="menu-btn-editor"
-              onClick={() => {
-                if (!isSoundMuted) soundEngine.playThunder();
-                setIsEditorActive(true);
-              }}
-              whileHover={{ x: 8 }}
-              className="group flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-amber-300 hover:text-amber-200 transition-all duration-300 cursor-pointer"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
-              <Layers className="w-4 h-4 text-amber-400 mr-[-2px] group-hover:rotate-12 transition-transform" />
-              РЕДАКТОР ЛОКАЦІЙ
-            </motion.button>
+            {/* Mobile 3-item sub-actions row / Desktop standard vertical links */}
+            <div className="grid grid-cols-3 gap-2 w-full md:flex md:flex-col md:gap-4">
+              {/* 3. LOCATION EDITOR BUTTON */}
+              <motion.button
+                id="menu-btn-editor"
+                onClick={() => {
+                  if (!isSoundMuted) soundEngine.playThunder();
+                  setIsEditorActive(true);
+                }}
+                whileHover={{ x: 8 }}
+                className="group p-2 rounded-xl bg-zinc-900/70 border border-zinc-800 hover:border-amber-500/50 flex items-center justify-center gap-1.5 font-mono text-[11px] font-bold text-amber-300 hover:text-amber-200 transition-all cursor-pointer active:scale-95 md:p-0 md:bg-transparent md:border-0 md:justify-start md:text-base md:sm:text-lg md:tracking-[0.2em]"
+              >
+                <span className="hidden md:inline-block w-1.5 h-1.5 rounded-full bg-amber-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+                <Layers className="w-3.5 h-3.5 text-amber-400 group-hover:rotate-12 transition-transform shrink-0" />
+                <span className="truncate">РЕДАКТОР</span>
+              </motion.button>
 
-            {/* 4. SETTINGS BUTTON */}
-            <motion.button
-              id="menu-btn-settings"
-              onClick={() => handleMenuClick('settings')}
-              whileHover={{ x: 8 }}
-              className="group flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg hover:text-amber-400 transition-all duration-300 text-slate-300 cursor-pointer"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
-              НАСТРОЙКИ
-            </motion.button>
+              {/* 4. SETTINGS BUTTON */}
+              <motion.button
+                id="menu-btn-settings"
+                onClick={() => handleMenuClick('settings')}
+                whileHover={{ x: 8 }}
+                className="group p-2 rounded-xl bg-zinc-900/70 border border-zinc-800 hover:border-zinc-600 flex items-center justify-center gap-1.5 font-mono text-[11px] font-bold text-slate-300 hover:text-amber-400 transition-all cursor-pointer active:scale-95 md:p-0 md:bg-transparent md:border-0 md:justify-start md:text-base md:sm:text-lg md:tracking-[0.2em]"
+              >
+                <span className="hidden md:inline-block w-1.5 h-1.5 rounded-full bg-amber-500 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+                <span className="truncate">НАСТРОЙКИ</span>
+              </motion.button>
 
-            {/* 4. OPEN STANDALONE TAB BUTTON */}
-            <motion.a
-              id="menu-btn-standalone"
-              href={window.location.href}
-              target="_blank"
-              rel="noopener noreferrer"
-              whileHover={{ x: 8 }}
-              className="group flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-emerald-400 hover:text-emerald-300 transition-all duration-300 cursor-pointer"
-              title="Відкрити гру в окремій вкладці браузера без інтерфейсу Google AI Studio"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
-              <ExternalLink className="w-4 h-4 text-emerald-400 mr-[-2px] group-hover:rotate-12 transition-transform" />
-              ОКРЕМА ВКЛАДКА
-            </motion.a>
+              {/* 5. OPEN STANDALONE TAB BUTTON */}
+              <motion.a
+                id="menu-btn-standalone"
+                href={window.location.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                whileHover={{ x: 8 }}
+                className="group p-2 rounded-xl bg-emerald-950/40 border border-emerald-800/60 hover:border-emerald-500/80 flex items-center justify-center gap-1.5 font-mono text-[11px] font-bold text-emerald-300 hover:text-emerald-200 transition-all cursor-pointer active:scale-95 md:p-0 md:bg-transparent md:border-0 md:justify-start md:text-base md:sm:text-lg md:tracking-[0.2em]"
+                title="Відкрити гру в окремій вкладці браузера без інтерфейсу Google AI Studio"
+              >
+                <span className="hidden md:inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+                <ExternalLink className="w-3.5 h-3.5 text-emerald-400 group-hover:rotate-12 transition-transform shrink-0" />
+                <span className="truncate">ВКЛАДКА</span>
+              </motion.a>
+            </div>
           </div>
 
-          <hr className="border-zinc-800/40 w-full" />
+          <hr className="hidden md:block border-zinc-800/40 w-full" />
 
-          {/* Notification dynamic feedback */}
-          <div className="min-h-[40px] w-full">
+          {/* Notification dynamic feedback (Desktop only to keep mobile clean) */}
+          <div className="hidden md:block min-h-[40px] w-full">
             <AnimatePresence mode="wait">
               {activeFeedback ? (
                 <motion.div
