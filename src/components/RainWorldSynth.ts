@@ -49,9 +49,6 @@ class RainWorldSynth {
 
       // Create Rain noise
       this.setupRainSynth();
-      
-      // Create Ambient Drone Player
-      this.setupAmbientDrone();
 
       this.isMuted = false;
     } catch (e) {
@@ -330,6 +327,24 @@ class RainWorldSynth {
     }
   }
 
+  public playCreatureHurt() {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(380, now);
+    osc.frequency.exponentialRampToValueAtTime(75, now + 0.35);
+
+    gain.gain.setValueAtTime(0.25, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.4);
+  }
+
   public playPickup() {
     if (!this.ctx || !this.masterGain || this.isMuted) return;
     const now = this.ctx.currentTime;
@@ -414,41 +429,14 @@ class RainWorldSynth {
     });
   }
 
-  // ---------------- Adaptive PvP Combat Sound Engine ----------------
-  // Triggered on first aggression (throw near or hit)
+  // ---------------- Adaptive Combat Sound Engine ----------------
+  // Real MP3 soundtracks from /Music/In_battle are now authoritatively managed by MusicManager.
   public startCombatMusic() {
-    if (!this.ctx || !this.concussionFilter || this.isMuted) return;
-    if (this.combatFadeTimeout) {
-      clearTimeout(this.combatFadeTimeout);
-      this.combatFadeTimeout = null;
-    }
-    if (this.isCombatActive) return;
-    this.isCombatActive = true;
-
-    if (!this.combatGain) {
-      this.combatGain = this.ctx.createGain();
-      this.combatGain.connect(this.concussionFilter);
-    }
-    const now = this.ctx.currentTime;
-    this.combatGain.gain.cancelScheduledValues(now);
-    this.combatGain.gain.setValueAtTime(0.001, now);
-    this.combatGain.gain.linearRampToValueAtTime(0.25, now + 1.0);
-
-    this.runCombatTensionLoop();
+    // Legacy procedural combat synth disabled to prevent overlapping with user MP3 tracks
   }
 
-  // Escape through pipe: 10-second fade out
-  public startCombatFadeOut(durationSeconds = 10) {
-    if (!this.ctx || !this.combatGain || !this.isCombatActive) return;
-    const now = this.ctx.currentTime;
-    this.combatGain.gain.cancelScheduledValues(now);
-    this.combatGain.gain.setValueAtTime(this.combatGain.gain.value, now);
-    this.combatGain.gain.linearRampToValueAtTime(0.0001, now + durationSeconds);
-
-    if (this.combatFadeTimeout) clearTimeout(this.combatFadeTimeout);
-    this.combatFadeTimeout = setTimeout(() => {
-      this.stopCombatMusic();
-    }, durationSeconds * 1000);
+  public startCombatFadeOut(_durationSeconds = 10) {
+    // Managed by MusicManager
   }
 
   public stopCombatMusic() {
@@ -456,9 +444,6 @@ class RainWorldSynth {
     if (this.combatLoopInterval) {
       clearInterval(this.combatLoopInterval);
       this.combatLoopInterval = null;
-    }
-    if (this.combatGain && this.ctx) {
-      this.combatGain.gain.setValueAtTime(0.0001, this.ctx.currentTime);
     }
   }
 

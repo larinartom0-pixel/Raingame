@@ -8,6 +8,9 @@ import OutskirtsLocation from './components/OutskirtsLocation';
 import LocationEditor from './components/LocationEditor';
 import { soundEngine } from './components/RainWorldSynth';
 import MultiplayerLobbyModal from './components/MultiplayerLobbyModal';
+import LoadingScreen from './components/LoadingScreen';
+import { musicManager } from './audio/MusicManager';
+import { webRTCManager } from './network/WebRTCManager';
 
 export default function App() {
   const [hasEntered, setHasEntered] = useState(false);
@@ -17,6 +20,10 @@ export default function App() {
   const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
   const [isSoundMuted, setIsSoundMuted] = useState(true);
   const [activeFeedback, setActiveFeedback] = useState<string | null>(null);
+
+  // Loading Screen state
+  const [isLoadingWorld, setIsLoadingWorld] = useState<boolean>(false);
+  const [loadingTitle, setLoadingTitle] = useState<string>('ЗАВАНТАЖЕННЯ СВІТУ');
   
   // Ambient weather settings
   const [weather, setWeather] = useState<WeatherState>({
@@ -33,6 +40,8 @@ export default function App() {
     // Unmute and start the rich audio backdrop
     soundEngine.toggleMute(false);
     setIsSoundMuted(false);
+    musicManager.setMuted(false);
+    musicManager.playCategory('menu');
     
     // Set enter state
     setHasEntered(true);
@@ -42,6 +51,19 @@ export default function App() {
     soundEngine.init();
     const nextState = soundEngine.toggleMute();
     setIsSoundMuted(nextState);
+    musicManager.setMuted(nextState);
+  };
+
+  const handleStartSingleplayer = () => {
+    if (!isSoundMuted) soundEngine.playThunder();
+    webRTCManager.disconnect();
+    setLoadingTitle('ОДИНОЧНА ГРА // ОКРАЇНИ');
+    setIsLoadingWorld(true);
+    setTimeout(() => {
+      setIsGameplayActive(true);
+      setIsLoadingWorld(false);
+      musicManager.playCategory('game');
+    }, 1100);
   };
 
   const handleMenuClick = (actionName: string) => {
@@ -50,10 +72,7 @@ export default function App() {
       soundEngine.playThunder(); 
     }
     if (actionName === 'play') {
-      setTimeout(() => {
-        setIsGameplayActive(true);
-        setActiveFeedback(null);
-      }, 500);
+      handleStartSingleplayer();
     } else {
       setTimeout(() => {
         setActiveFeedback(null);
@@ -160,31 +179,45 @@ export default function App() {
               <span className="hidden md:inline">MAIN MENU</span>
               <span className="md:hidden text-amber-400 font-mono text-xs">RAIN GAME // МЕНЮ</span>
             </h2>
-            {/* Solo disabled indicator on mobile header */}
-            <span className="md:hidden px-2 py-0.5 rounded text-[8px] font-mono font-bold bg-amber-950/90 border border-amber-500/40 text-amber-400">
-              [ОДИНОЧНА: ТИМЧАСОВО ОФЛАЙН]
-            </span>
           </div>
 
           {/* Interactive Options list: Grid/Row on mobile, Vertical stack on PC */}
           <div className="flex flex-col gap-2 md:gap-4 w-full">
             {/* 1. PLAY BUTTON (SOLO) - Desktop view */}
-            <div className="hidden md:flex flex-col items-start gap-1 select-none">
-              <button
-                id="menu-btn-play"
-                disabled={true}
-                className="flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-zinc-500 cursor-not-allowed opacity-60"
-                title="Одиночна гра тимчасово недоступна. Використовуйте Мережеву гру!"
+            <motion.button
+              id="menu-btn-play"
+              onClick={handleStartSingleplayer}
+              whileHover={{ x: 8 }}
+              className="group hidden md:flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-amber-400 hover:text-amber-300 transition-all duration-300 cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+              <Play className="w-4 h-4 fill-amber-400 text-amber-400 mr-[-2px] group-hover:scale-110 transition-transform" />
+              <span>ОДИНОЧНА ГРА</span>
+            </motion.button>
+
+            {/* Mobile Top Row: 2 Primary Launch Buttons (Solo & Multiplayer) */}
+            <div className="grid grid-cols-2 gap-2 w-full md:hidden">
+              <motion.button
+                onClick={handleStartSingleplayer}
+                className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-amber-950/90 to-amber-900/60 border border-amber-500/60 shadow-[0_0_12px_rgba(245,158,11,0.25)] flex items-center justify-center gap-1.5 text-amber-300 font-mono font-bold text-xs tracking-wider cursor-pointer active:scale-98"
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-zinc-700" />
-                <span className="line-through decoration-zinc-600">ОДИНОЧНА ГРА</span>
-              </button>
-              <span className="ml-5 px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-amber-950/90 border border-amber-500/50 text-amber-400 tracking-wider shadow-sm">
-                [ТИМЧАСОВО НЕДОСТУПНО]
-              </span>
+                <Play className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                <span>ОДИНОЧНА</span>
+              </motion.button>
+
+              <motion.button
+                onClick={() => {
+                  if (!isSoundMuted) soundEngine.playThunder();
+                  setShowMultiplayerModal(true);
+                }}
+                className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-cyan-950/90 to-cyan-900/60 border border-cyan-500/60 shadow-[0_0_12px_rgba(6,182,212,0.25)] flex items-center justify-center gap-1.5 text-cyan-200 font-mono font-bold text-xs tracking-wider cursor-pointer active:scale-98"
+              >
+                <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                <span>МЕРЕЖА [P2P]</span>
+              </motion.button>
             </div>
 
-            {/* 2. MULTIPLAYER P2P BUTTON (Highlighted on mobile as primary launch button) */}
+            {/* 2. MULTIPLAYER P2P BUTTON (Desktop view) */}
             <motion.button
               id="menu-btn-multiplayer"
               onClick={() => {
@@ -192,9 +225,9 @@ export default function App() {
                 setShowMultiplayerModal(true);
               }}
               whileHover={{ x: 8 }}
-              className="group w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-950/90 via-cyan-900/60 to-emerald-950/90 border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.25)] flex items-center justify-center gap-2 text-cyan-200 font-mono font-bold text-sm tracking-wider cursor-pointer active:scale-98 transition-all md:w-auto md:bg-transparent md:border-0 md:p-0 md:shadow-none md:justify-start md:text-base md:sm:text-lg md:text-cyan-300 md:hover:text-cyan-200 md:tracking-[0.2em]"
+              className="group hidden md:flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-cyan-300 hover:text-cyan-200 transition-all duration-300 cursor-pointer"
             >
-              <span className="hidden md:inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
               <Globe className="w-4 h-4 text-cyan-400 mr-[-2px] group-hover:rotate-45 transition-transform" />
               <span>МЕРЕЖА [P2P]</span>
             </motion.button>
@@ -348,7 +381,10 @@ export default function App() {
             className="absolute inset-0 z-50"
           >
             <OutskirtsLocation 
-              onBack={() => setIsGameplayActive(false)} 
+              onBack={() => {
+                setIsGameplayActive(false);
+                musicManager.playCategory('menu');
+              }} 
               isSoundMuted={isSoundMuted}
               toggleSound={toggleSound}
               customLocation={activeCustomLocation ?? undefined}
@@ -375,7 +411,13 @@ export default function App() {
               onPlayLocation={(loc) => {
                 setActiveCustomLocation(loc);
                 setIsEditorActive(false);
-                setIsGameplayActive(true);
+                setLoadingTitle('КАСТОМНА ЛОКАЦІЯ // ЗАПУСК');
+                setIsLoadingWorld(true);
+                setTimeout(() => {
+                  setIsGameplayActive(true);
+                  setIsLoadingWorld(false);
+                  musicManager.playCategory('game');
+                }, 900);
               }}
             />
           </motion.div>
@@ -387,10 +429,19 @@ export default function App() {
         isOpen={showMultiplayerModal}
         onClose={() => setShowMultiplayerModal(false)}
         onConnectedToRoom={() => {
-          setIsGameplayActive(true);
+          setLoadingTitle('МУЛЬТИПЛЕЄР P2P // ПІДКЛЮЧЕНО');
+          setIsLoadingWorld(true);
           setShowMultiplayerModal(false);
+          setTimeout(() => {
+            setIsGameplayActive(true);
+            setIsLoadingWorld(false);
+            musicManager.playCategory('game');
+          }, 1100);
         }}
       />
+
+      {/* 8. ATMOSPHERIC KARMA LOADING SCREEN */}
+      <LoadingScreen isLoading={isLoadingWorld} title={loadingTitle} />
 
     </div>
   );

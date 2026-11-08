@@ -54,6 +54,7 @@ export interface CustomLocationData {
   isShelterRoom?: boolean; // Dedicated shelter hibernation bunker room
   playerSpawn: { x: number; y: number };
   npcSpawn: { x: number; y: number };
+  lizardDen?: { x: number; y: number; w: number; h: number; spawnX: number; spawnY: number };
   platforms: EditorPlatform[];
   poles: EditorPole[];
   transitPipes: EditorTransitPipe[];
@@ -92,6 +93,7 @@ export const DEFAULT_OUTSKIRTS_LOCATION: CustomLocationData = {
   height: 580,
   playerSpawn: { x: 180, y: 450 },
   npcSpawn: { x: 620, y: 520 },
+  lizardDen: { x: 860, y: 110, w: 75, h: 65, spawnX: 840, spawnY: 130 },
   platforms: [
     // Ground floor
     { id: 'p-ground', x: 0, y: 520, w: 1000, h: 60, type: 'concrete', label: 'Окраїни' },
@@ -500,6 +502,7 @@ export const CHIMNEY_CANOPY_LOCATION: CustomLocationData = {
   height: 950,
   playerSpawn: { x: 160, y: 800 },
   npcSpawn: { x: 1100, y: 420 },
+  lizardDen: { x: 1120, y: 380, w: 80, h: 70, spawnX: 1100, spawnY: 410 },
   platforms: [
     // Bottom foundation with abyssal gaps
     { id: 'cc-ground-left', x: 0, y: 870, w: 420, h: 80, type: 'concrete', label: 'НИЖНІЙ ПІЛОН' },
@@ -597,6 +600,7 @@ export const SHADED_CITADEL_LOCATION: CustomLocationData = {
   height: 750,
   playerSpawn: { x: 120, y: 220 },
   npcSpawn: { x: 1250, y: 620 },
+  lizardDen: { x: 1260, y: 580, w: 80, h: 70, spawnX: 1230, spawnY: 610 },
   platforms: [
     // Subterranean temple floor
     { id: 'sh-ground', x: 0, y: 670, w: 1500, h: 80, type: 'concrete', label: 'СКЛЕП ЦИТАДЕЛІ' },

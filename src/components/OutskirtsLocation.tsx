@@ -1,14 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
-  ArrowLeft, Sparkles, Volume2, VolumeX, Zap, Bug, Heart, 
-  Skull, RotateCcw, AlertTriangle, Activity, X, Terminal, 
+  ArrowLeft, Sparkles, Volume2, VolumeX, Zap, Heart, 
+  Skull, RotateCcw, AlertTriangle, Activity, X, 
   Sword, CircleDot, User, PlusCircle, Trash2, Crosshair,
   ZoomIn, ZoomOut, Gamepad2, Eye, EyeOff, Maximize2, Minimize2,
   Map, Compass, Globe, Users, Clock, Wifi, ExternalLink,
   Shield, Home, Lock, Unlock, CloudRain, Layers, Moon
 } from 'lucide-react';
 import { soundEngine } from './RainWorldSynth';
+import { musicManager } from '../audio/MusicManager';
+import { PinkLizard } from '../entities/PinkLizard';
 import { webRTCManager } from '../network/WebRTCManager';
 import { distributedSimulation } from '../network/DistributedSimulation';
 import { RemotePlayer, NetworkPacket } from '../network/types';
@@ -154,13 +156,19 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   // Notifications and actions
   const [spawnNotification, setSpawnNotification] = useState(true);
   const [lastAction, setLastAction] = useState<string>('Слимакокіт готовий! Спис і камінь на карті.');
-  
-  // Debug Menu UI state
-  const [showDebugMenu, setShowDebugMenu] = useState(false);
-  const showDebugMenuRef = useRef(false);
+
+  // Sync music mute state with global sound toggle
   useEffect(() => {
-    showDebugMenuRef.current = showDebugMenu;
-  }, [showDebugMenu]);
+    musicManager.setMuted(isSoundMuted);
+  }, [isSoundMuted]);
+
+  // Start exploration in-game music on location enter, transition to menu on exit
+  useEffect(() => {
+    musicManager.playCategory('game');
+    return () => {
+      musicManager.playCategory('menu');
+    };
+  }, []);
 
   // Fullscreen container and state ("Також додай кнопку яка открива гру на повний екран")
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -566,147 +574,59 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       ragdollAngle: 0,
     };
 
-    // NPC Slugcat: "він нічого не робе просто стоїть у нього таже моделька шо у игрока но у нього 3 хп"
-    const startNpcX = currentLocation.npcSpawn?.x ?? 640;
-    const startNpcY = currentLocation.npcSpawn?.y ?? (worldHeight - 60 - 38);
-    const npc = {
-      x: startNpcX,
-      y: startNpcY,
-      vx: 0,
-      vy: 0,
-      width: 24,
-      height: 38,
-      isGrounded: true,
-      state: 'normal' as SlugcatState,
-      hp: 3,        // Hidden NPC HP (3 HP)
-      maxHp: 3,
-      stunTimer: 0, // Hidden NPC Stun timer
-      heldItem: null as WorldItem | null,
-
-      head: { x: startNpcX, y: startNpcY - 20, vx: 0, vy: 0 },
-      chest: { x: startNpcX, y: startNpcY - 6, vx: 0, vy: 0 },
-      hips: { x: startNpcX, y: startNpcY + 10, vx: 0, vy: 0 },
-      tail: Array.from({ length: 9 }, (_, i) => ({ x: startNpcX, y: startNpcY + 10 + i * 5 })),
-
-      facingRight: false, // Facing towards the player
-      earSway: 0,
-      crouching: false,
-      blinkTimer: 1.2,
-      ragdollAngle: 0,
+    // Pink Lizard: First bot creature!
+    // "добав перше существо яке буде под контролем бота це розовий ящер... Він ходе не 4 лапах може лазить по стінах і шестах у нього 3.5 хп він чуть бистріший за слизне кота наносить укусом от 0.5 до 1.5 хп урона"
+    const denData = currentLocation.lizardDen ?? {
+      x: 860,
+      y: 110,
+      w: 75,
+      h: 65,
+      spawnX: 840,
+      spawnY: 130
     };
+    const lizardSpawnX = currentLocation.isShelterRoom ? -999 : (denData.spawnX || 840);
+    const lizardSpawnY = currentLocation.isShelterRoom ? -999 : (denData.spawnY || 130);
+    const pinkLizard: PinkLizard | null = currentLocation.isShelterRoom 
+      ? null 
+      : new PinkLizard('pink-lizard-1', lizardSpawnX, lizardSpawnY);
 
-    // Items list in the world (Spear, Rock, and Rain World Berries!)
+    // Items list in the world with Randomized Cyclic Spawning:
+    // "додать рандомний спавн вещей не типа деякі вещі не появляться а деякі появились на позиціях в началі Циклу"
     let itemIdCounter = 1;
-    const items: WorldItem[] = currentLocation.items && currentLocation.items.length > 0
-      ? currentLocation.items.map(it => ({
-          id: it.id || `item-${itemIdCounter++}`,
-          type: it.type,
-          x: it.x,
-          y: it.y,
+    const baseCandidateItems = currentLocation.items && currentLocation.items.length > 0
+      ? currentLocation.items
+      : [
+          { type: 'spear' as ItemType, x: 270, y: 295 },
+          { type: 'rock' as ItemType, x: 360, y: 512 },
+          { type: 'rock' as ItemType, x: 720, y: 512 },
+          { type: 'spear' as ItemType, x: 680, y: 260 },
+          { type: 'berry' as ItemType, x: 420, y: 125 },
+          { type: 'berry' as ItemType, x: 75, y: 265 },
+          { type: 'berry' as ItemType, x: 480, y: 295 },
+          { type: 'berry' as ItemType, x: 595, y: 265 },
+          { type: 'berry' as ItemType, x: 830, y: 508 },
+        ];
+
+    const items: WorldItem[] = [];
+    baseCandidateItems.forEach((cand, idx) => {
+      // First 2 items have high spawn chance (0.95) to ensure player finds arms, other items 0.65
+      const spawnChance = idx < 2 ? 0.95 : 0.65;
+      if (Math.random() <= spawnChance) {
+        items.push({
+          id: (cand as any).id || `item-${itemIdCounter++}`,
+          type: cand.type as ItemType,
+          x: cand.x,
+          y: cand.y,
           vx: 0,
           vy: 0,
-          rotation: it.type === 'spear' ? 0.1 : 0,
+          rotation: cand.type === 'spear' ? 0.1 : 0,
           isHeld: false,
           isStuck: false,
           isAirborne: false,
           sleeping: true,
-        }))
-      : [
-          // Initial spear on the middle platform
-          {
-            id: `item-${itemIdCounter++}`,
-            type: 'spear',
-            x: 270,
-            y: 295,
-            vx: 0,
-            vy: 0,
-            rotation: 0.1,
-            isHeld: false,
-            isStuck: false,
-            isAirborne: false,
-            sleeping: true,
-          },
-          // Initial stone on the ground
-          {
-            id: `item-${itemIdCounter++}`,
-            type: 'rock',
-            x: 360,
-            y: 512,
-            vx: 0,
-            vy: 0,
-            rotation: 0,
-            isHeld: false,
-            isStuck: false,
-            isAirborne: false,
-            sleeping: true,
-          },
-          // Initial Berries placed across platforms and girders (1 berry = 1 food pip, 3.5s eat time)
-          {
-            id: `item-${itemIdCounter++}`,
-            type: 'berry',
-            x: 420,
-            y: 125, // on top bridge girder
-            vx: 0,
-            vy: 0,
-            rotation: 0,
-            isHeld: false,
-            isStuck: false,
-            isAirborne: false,
-            sleeping: true,
-          },
-          {
-            id: `item-${itemIdCounter++}`,
-            type: 'berry',
-            x: 75,
-            y: 265, // on left metal shelf
-            vx: 0,
-            vy: 0,
-            rotation: 0,
-            isHeld: false,
-            isStuck: false,
-            isAirborne: false,
-            sleeping: true,
-          },
-          {
-            id: `item-${itemIdCounter++}`,
-            type: 'berry',
-            x: 480,
-            y: 295, // on central monolith slab
-            vx: 0,
-            vy: 0,
-            rotation: 0,
-            isHeld: false,
-            isStuck: false,
-            isAirborne: false,
-            sleeping: true,
-          },
-          {
-            id: `item-${itemIdCounter++}`,
-            type: 'berry',
-            x: 595,
-            y: 265, // on right monolith
-            vx: 0,
-            vy: 0,
-            rotation: 0,
-            isHeld: false,
-            isStuck: false,
-            isAirborne: false,
-            sleeping: true,
-          },
-          {
-            id: `item-${itemIdCounter++}`,
-            type: 'berry',
-            x: 830,
-            y: 508, // near the right exit on ground
-            vx: 0,
-            vy: 0,
-            rotation: 0,
-            isHeld: false,
-            isStuck: false,
-            isAirborne: false,
-            sleeping: true,
-          }
-        ];
+        });
+      }
+    });
 
     // If entering as a client in an existing multiplayer room, clear local static items
     // so we don't display starting positions before the host sends authoritative world items!
@@ -743,7 +663,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     // Damage & Stun application function according to exact user rules:
     // Spear: damage 1 HP, 1.8s stun. If already stunned: +0.8s stun.
     // Rock: damage 0.01 HP, 1.2s stun. If already stunned: +0.5s stun.
-    const applyHit = (target: typeof player | typeof npc, weapon: 'spear' | 'rock', isNpc: boolean) => {
+    const applyHit = (target: typeof player, weapon: 'spear' | 'rock') => {
       if (target.state === 'dead') return;
 
       const damage = weapon === 'spear' ? 1.0 : 0.01;
@@ -759,28 +679,26 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         target.state = 'dead';
         target.stunTimer = 0;
         target.vy = -3.5;
-        if (!isNpc) {
-          player.isClimbing = false;
-          setIsDead(true);
-          if (weapon === 'spear') {
-            soundEngine.triggerConcussionMuffle();
-          }
+        player.isClimbing = false;
+        setIsDead(true);
+        if (weapon === 'spear') {
+          soundEngine.triggerConcussionMuffle();
         }
         soundEngine.playHit(weapon);
         soundEngine.playThunder();
-        setLastAction(`${isNpc ? 'NPC' : 'Слимакокіт'} загинув від ${weapon === 'spear' ? 'списа' : 'каменя'}!`);
+        setLastAction(`Слимакокіт загинув від ${weapon === 'spear' ? 'списа' : 'каменя'}!`);
       } else {
         // Target alive, apply stun logic
         if (wasAlreadyStunned) {
           target.stunTimer += addedStun;
-          setLastAction(`${weapon === 'spear' ? 'Спис' : 'Камінь'} додав +${addedStun}с стану ${isNpc ? 'NPC' : 'гравцю'}!`);
+          setLastAction(`${weapon === 'spear' ? 'Спис' : 'Камінь'} додав +${addedStun}с стану гравцю!`);
         } else {
           target.state = 'stunned';
           target.stunTimer = initialStun;
-          setLastAction(`${isNpc ? 'NPC' : 'Слимакокіт'} оглушений ${weapon === 'spear' ? 'списом (1.8с)' : 'каменем (1.2с)'}!`);
+          setLastAction(`Слимакокіт оглушений ${weapon === 'spear' ? 'списом (1.8с)' : 'каменем (1.2с)'}!`);
         }
         target.vy = -2.0;
-        if (!isNpc) player.isClimbing = false;
+        player.isClimbing = false;
         soundEngine.playHit(weapon);
       }
     };
@@ -967,7 +885,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       player.heldItem = null;
       setHeldItemType(null);
       soundEngine.playThrow();
-      soundEngine.startCombatMusic(); // Adaptive combat music triggered upon aggression
       const typeLabel = item.type === 'spear' ? 'Спис' : item.type === 'rock' ? 'Камінь' : 'Ягоду';
       setLastAction(`Кинуто: ${typeLabel}!`);
 
@@ -1040,7 +957,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       items.length = 0;
       player.heldItem = null;
       setHeldItemType(null);
-      npc.heldItem = null;
       if (isEating) {
         isEating = false;
         eatingTimer = 0;
@@ -1066,46 +982,28 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     };
 
     triggerResetNpcRef.current = () => {
-      npc.x = 640;
-      npc.y = 520 - 38;
-      npc.vx = 0;
-      npc.vy = 0;
-      npc.hp = 3;
-      npc.state = 'normal';
-      npc.stunTimer = 0;
-      npc.ragdollAngle = 0;
-      // Detach any spears stuck in NPC and drop them to the floor
-      items.forEach(it => {
-        if (it.stuckTarget === 'npc') {
-          it.isStuck = false;
-          it.stuckTarget = undefined;
-          it.y = 512;
-          it.vx = (Math.random() - 0.5) * 2;
-          it.vy = -1;
-        }
-      });
-      setLastAction('NPC відроджено зі 100% здоров&apos;я (3 HP)!');
+      if (pinkLizard) {
+        pinkLizard.hp = 3.5;
+        pinkLizard.state = 'patrol';
+        pinkLizard.stunTimer = 0;
+        pinkLizard.x = lizardSpawnX;
+        pinkLizard.y = lizardSpawnY;
+        setLastAction('Ящера відновлено (3.5 HP)!');
+      }
     };
 
     triggerStunNpcRef.current = (duration: number) => {
-      if (npc.state === 'dead') return;
-      if (npc.state === 'stunned') {
-        npc.stunTimer += duration;
-      } else {
-        npc.state = 'stunned';
-        npc.stunTimer = duration;
+      if (pinkLizard) {
+        pinkLizard.stunTimer = Math.max(pinkLizard.stunTimer, duration);
+        pinkLizard.state = 'stunned';
+        setLastAction(`Ящер оглушений на ${duration.toFixed(1)}с!`);
       }
-      setLastAction(`NPC оглушений на ${duration.toFixed(1)}с!`);
     };
 
     triggerDamageNpcRef.current = (amount: number) => {
-      npc.hp = Math.max(0, npc.hp - amount);
-      if (npc.hp <= 0) {
-        npc.state = 'dead';
-        npc.stunTimer = 0;
-        setLastAction('NPC загинув! (0 / 3 HP)');
-      } else {
-        setLastAction(`Завдано ${amount} шкоди NPC. Скрите HP: ${npc.hp.toFixed(2)} / 3`);
+      if (pinkLizard) {
+        pinkLizard.takeDamage(amount, 1.5);
+        setLastAction(`Завдано ${amount} шкоди ящеру. HP: ${pinkLizard.hp.toFixed(1)} / 3.5`);
       }
     };
 
@@ -1261,11 +1159,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     const unregisterHit = distributedSimulation.onHitReceived((hit) => {
       if (player.state === 'dead') return;
       if (hit.weaponType === 'spear') {
-        applyHit(player, 'spear', false);
+        applyHit(player, 'spear');
       } else {
-        applyHit(player, 'rock', false);
+        applyHit(player, 'rock');
       }
-      soundEngine.startCombatMusic();
+      combatTensionTimer = 8.0;
+      musicManager.playCategory('battle');
     });
 
     // P2P DataChannel packet dispatcher
@@ -1318,7 +1217,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           }
 
           soundEngine.playThrow();
-          soundEngine.startCombatMusic();
           setLastAction(`Гравець кинув ${packet.itemType === 'spear' ? 'спис' : 'камінь'}!`);
         }
       } else if (packet.type === 'ITEM_PICKUP') {
@@ -1490,13 +1388,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
     // Key handlers
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Toggle debug menu on F3 or ~ or Backquote
-      if (e.key === 'F3' || e.key === '`' || e.key === '~') {
-        e.preventDefault();
-        setShowDebugMenu(prev => !prev);
-        return;
-      }
-
       // Toggle Holographic Map on 'M' or 'Tab'
       if (e.key.toLowerCase() === 'm' || e.key === 'Tab') {
         e.preventDefault();
@@ -1504,8 +1395,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         return;
       }
 
-      // Quick Respawn on 'R' if dead
-      if ((e.key === 'r' || e.key === 'R') && player.state === 'dead') {
+      // Quick Respawn on 'R' if dead (Singleplayer only!)
+      // "убери кнопку респавна в мультиплеєрі та остав цю кнопку в синг плеєрі"
+      if ((e.key === 'r' || e.key === 'R') && player.state === 'dead' && webRTCManager.connectionStatus !== 'connected') {
         triggerReviveRef.current?.();
         return;
       }
@@ -1591,6 +1483,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('blur', handleBlur);
 
+    let musicCheckTimer = 0;
+    let combatTensionTimer = 0;
+
     // Main animation loop
     const tick = () => {
       const now = performance.now();
@@ -1621,33 +1516,72 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         setLastAction('Слимакокіт загинув!');
       }
 
-      // ---------------- NPC State Updates ----------------
-      if (npc.state === 'stunned') {
-        npc.stunTimer -= delta;
-        if (npc.stunTimer <= 0) {
-          npc.stunTimer = 0;
-          npc.state = 'normal';
-          setLastAction('NPC прийшов до тями!');
-        }
-      }
+      // ---------------- Pink Lizard AI & Locomotion ----------------
+      // Quadruped bot creature: climbs walls/poles, 3.5 HP, bite 0.5-1.5, 20s stun on slugcat, drags to den
+      if (pinkLizard) {
+        const peersList = Array.from(webRTCManager.remotePlayers.values()).map(p => ({
+          id: p.id,
+          name: p.name || 'Слимакокіт',
+          x: p.x,
+          y: p.y,
+          hp: p.hp ?? 1,
+          state: p.state || 'normal',
+          room: p.room || currentLocation.id,
+        })).filter(p => p.room === currentLocation.id);
 
-      if (npc.hp <= 0 && npc.state !== 'dead') {
-        npc.state = 'dead';
-      }
-
-      // NPC gravity and ground settlement
-      if (!npc.isGrounded) {
-        npc.vy += 0.38;
-        npc.y += npc.vy;
-        for (const plat of platforms) {
-          if (npc.x + npc.width > plat.x && npc.x < plat.x + plat.w) {
-            if (npc.y + npc.height >= plat.y && npc.y + npc.height - npc.vy <= plat.y + 4) {
-              npc.y = plat.y - npc.height;
-              npc.vy = 0;
-              npc.isGrounded = true;
+        pinkLizard.update(
+          delta,
+          player,
+          peersList,
+          platforms,
+          poles,
+          denData,
+          (damage: number, willGrab: boolean) => {
+            // Lizard bite!
+            soundEngine.playCreatureHurt();
+            player.hp = Math.max(0, player.hp - damage);
+            player.state = player.hp <= 0 ? 'dead' : 'stunned';
+            player.stunTimer = 20.0; // 20 seconds of stun in lizard mouth!
+            if (player.hp <= 0) {
+              setIsDead(true);
+              setLastAction(`Розовий ящер вкусив на смерть (${damage.toFixed(2)} урону)!`);
+            } else {
+              setLastAction(`Розовий ящер вкусив (${damage.toFixed(2)} урону) і схопив у пащу! Стан 20с!`);
+            }
+          },
+          () => {
+            // Lizard dragged player to its den: instant game over!
+            if (player.state !== 'dead') {
+              player.hp = 0;
+              player.state = 'dead';
+              setIsDead(true);
+              setLastAction('Ящер затягнув вас у своє лігво! Смерть.');
+              soundEngine.playCreatureHurt();
             }
           }
+        );
+      }
+
+      // ---------------- Dynamic Music Category Switching with Hysteresis ----------------
+      musicCheckTimer += delta;
+      if (musicCheckTimer > 0.4) {
+        musicCheckTimer = 0;
+        let inThreatRange = false;
+        if (pinkLizard && pinkLizard.state !== 'dead') {
+          const distToLizard = Math.hypot((player.x + 12) - (pinkLizard.x + 26), (player.y + 19) - (pinkLizard.y + 12));
+          if (distToLizard < 380 || pinkLizard.grabbedTarget === 'player' || pinkLizard.state === 'hunt') {
+            inThreatRange = true;
+          }
         }
+
+        if (inThreatRange) {
+          combatTensionTimer = 6.0; // Sustain battle music for at least 6s once provoked
+        } else if (combatTensionTimer > 0) {
+          combatTensionTimer -= 0.4;
+        }
+
+        const targetCat = combatTensionTimer > 0 ? 'battle' : 'game';
+        musicManager.playCategory(targetCat);
       }
 
       // ---------------- Player Physics Updates ----------------
@@ -2116,11 +2050,11 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
         if (item.isStuck) {
           item.sleeping = true;
-          // Attached to stuck target (NPC or Player)
-          if (item.stuckTarget === 'npc') {
-            item.x = npc.chest.x + (item.stuckOffsetX ?? 0);
-            item.y = npc.chest.y + (item.stuckOffsetY ?? 0);
-            item.rotation = (item.stuckAngle ?? 0) + (npc.ragdollAngle ?? 0);
+          // Attached to stuck target (Lizard or Player)
+          if (item.stuckTarget === 'lizard' && pinkLizard) {
+            item.x = (pinkLizard.x + pinkLizard.width / 2) + (item.stuckOffsetX ?? 0);
+            item.y = (pinkLizard.y + pinkLizard.height / 2) + (item.stuckOffsetY ?? 0);
+            item.rotation = item.stuckAngle ?? 0;
           } else if (item.stuckTarget === 'player') {
             item.x = player.chest.x + (item.stuckOffsetX ?? 0);
             item.y = player.chest.y + (item.stuckOffsetY ?? 0);
@@ -2161,46 +2095,46 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         item.x += item.vx;
         item.y += item.vy;
 
-        // Airborne spear / rock hit test against characters
+        // Airborne spear / rock hit test against characters & creatures
         if (item.isAirborne) {
-          // Check collision with NPC
-          const npcDist = Math.hypot(item.x - (npc.x + npc.width / 2), item.y - (npc.y + npc.height / 2));
-          if (npcDist < 28) {
-            if (item.type === 'berry') {
-              // Thrown berry bounces softly off NPC without dealing damage
-              item.isAirborne = false;
-              item.vx = -item.vx * 0.25;
-              item.vy = -1.5;
-              soundEngine.playPickup();
+          // Check collision with Pink Lizard
+          if (pinkLizard && pinkLizard.state !== 'dead') {
+            const lizDist = Math.hypot(item.x - (pinkLizard.x + pinkLizard.width / 2), item.y - (pinkLizard.y + pinkLizard.height / 2));
+            if (lizDist < 36) {
+              if (item.type === 'berry') {
+                item.isAirborne = false;
+                item.vx = -item.vx * 0.25;
+                item.vy = -1.5;
+                soundEngine.playPickup();
+                continue;
+              }
+              if (item.type === 'spear') {
+                // Spear causes 1.0 damage and 2.5s stun to lizard, sticks into its side
+                soundEngine.playHit('spear');
+                pinkLizard.takeDamage(1.0, 2.5);
+                item.isAirborne = false;
+                item.isStuck = true;
+                item.stuckTarget = 'lizard';
+                item.stuckOffsetX = (pinkLizard.facingRight ? -1 : 1) * 8;
+                item.stuckOffsetY = (Math.random() - 0.5) * 6;
+                item.stuckAngle = item.rotation;
+                item.vx = 0;
+                item.vy = 0;
+                setLastAction(`Спис влучив у ящера! HP: ${pinkLizard.hp.toFixed(1)} / 3.5`);
+              } else {
+                // Rock causes 0.2 damage and 1.8s stun to lizard, bounces off
+                soundEngine.playHit('rock');
+                pinkLizard.takeDamage(0.2, 1.8);
+                item.isAirborne = false;
+                item.vx = -item.vx * 0.35;
+                item.vy = -1.8;
+                setLastAction(`Камінь влучив у ящера! Стан 1.8с (HP: ${pinkLizard.hp.toFixed(1)} / 3.5)`);
+              }
               continue;
             }
-            applyHit(npc, item.type, true);
-            if (item.type === 'spear') {
-              // Spear penetrates and STICKS into the NPC ("втикається, щоб не відпадав")
-              item.isAirborne = false;
-              item.isStuck = true;
-              item.stuckTarget = 'npc';
-              const hitDir = item.vx >= 0 ? 1 : -1;
-              item.stuckOffsetX = hitDir * 7;
-              item.stuckOffsetY = (Math.random() - 0.5) * 6;
-              item.stuckAngle = item.rotation;
-              item.vx = 0;
-              item.vy = 0;
-              // Impart impact stumble on NPC
-              npc.vx += hitDir * 2.8;
-              npc.vy = -2.0;
-              npc.isGrounded = false;
-            } else {
-              // Rock delivers blunt stun and bounces off
-              item.isAirborne = false;
-              item.vx = -item.vx * 0.35;
-              item.vy = -1.8;
-              npc.vx += (item.vx > 0 ? 1.5 : -1.5);
-            }
-            continue;
           }
 
-          // Check collision with Player (if thrown by NPC or bouncing self-hit)
+          // Check collision with Player (if bouncing self-hit or peer throw)
           const playerDist = Math.hypot(item.x - (player.x + player.width / 2), item.y - (player.y + player.height / 2));
           if (playerDist < 26 && item.thrownBy !== 'player') {
             if (item.type === 'berry') {
@@ -2210,7 +2144,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               soundEngine.playPickup();
               continue;
             }
-            applyHit(player, item.type, false);
+            applyHit(player, item.type);
             if (item.type === 'spear') {
               // Spear penetrates and STICKS into the player!
               item.isAirborne = false;
@@ -2247,7 +2181,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 }
                 // Attacker calculates hit with 100% authority!
                 distributedSimulation.registerClientSideHit(rp.id, item.type, item.x, item.y);
-                soundEngine.startCombatMusic();
+                combatTensionTimer = 8.0;
+                musicManager.playCategory('battle');
                 if (item.type === 'spear') {
                   item.isAirborne = false;
                   item.isStuck = true;
@@ -2411,9 +2346,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       // ---------------- Procedural Skeleton Physics (Player) ----------------
       updateSkeleton(player, t, delta);
 
-      // ---------------- Procedural Skeleton Physics (NPC) ----------------
-      updateSkeleton(npc, t, delta);
-
       // ---------------- Procedural Skeleton Physics (Remote Peers) ----------------
       for (const rp of webRTCManager.remotePlayers.values()) {
         if (rp.room === currentLocation.id || rp.room === distributedSimulation.currentRoom) {
@@ -2452,9 +2384,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         sendAuthoritativeItemsSync();
       }
 
-      // Sync state for React HUD telemetry periodically (Optimized: throttled when debug menu is closed)
+      // Sync state for React HUD telemetry periodically
       telemetryThrottleTimer += delta;
-      const throttleTarget = showDebugMenuRef.current ? 0.2 : 0.6;
+      const throttleTarget = 0.5;
       if (telemetryThrottleTimer > throttleTarget) {
         telemetryThrottleTimer = 0;
         const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
@@ -2485,12 +2417,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           stunTimer: Math.max(0, Math.round(player.stunTimer * 100) / 100),
           heldItem: player.heldItem ? player.heldItem.type : null,
 
-          npcState: npc.state,
-          npcHp: Math.round(npc.hp * 100) / 100,
-          npcMaxHp: npc.maxHp,
-          npcStunTimer: Math.max(0, Math.round(npc.stunTimer * 100) / 100),
-          npcX: Math.round(npc.x),
-          npcY: Math.round(npc.y),
+          npcState: pinkLizard ? (pinkLizard.state as SlugcatState) : 'normal',
+          npcHp: pinkLizard ? Math.round(pinkLizard.hp * 100) / 100 : 0,
+          npcMaxHp: 3.5,
+          npcStunTimer: pinkLizard ? Math.max(0, Math.round(pinkLizard.stunTimer * 100) / 100) : 0,
+          npcX: pinkLizard ? Math.round(pinkLizard.x) : 0,
+          npcY: pinkLizard ? Math.round(pinkLizard.y) : 0,
 
           spearsCount: spears,
           rocksCount: rocks,
@@ -2890,8 +2822,34 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         drawWorldItem(ctx, item);
       }
 
-      // 6. Draw NPC (Exact same model as Player, stands still, 3 HP)
-      renderSlugcatCharacter(ctx, npc, t, false, 'NPC Скаут');
+      // 6. Draw Lizard Den and Pink Lizard
+      if (denData && !currentLocation.isShelterRoom) {
+        ctx.save();
+        ctx.fillStyle = '#0a0a0d';
+        ctx.beginPath();
+        ctx.roundRect(denData.x, denData.y, denData.w, denData.h, 12);
+        ctx.fill();
+        ctx.strokeStyle = '#831843';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        // Biological entrance glow
+        const glowRad = 16 + Math.sin(t * 3) * 3;
+        const glowGrad = ctx.createRadialGradient(
+          denData.x + denData.w / 2, denData.y + denData.h / 2, 2,
+          denData.x + denData.w / 2, denData.y + denData.h / 2, glowRad
+        );
+        glowGrad.addColorStop(0, 'rgba(244, 114, 182, 0.45)');
+        glowGrad.addColorStop(1, 'rgba(244, 114, 182, 0)');
+        ctx.fillStyle = glowGrad;
+        ctx.beginPath();
+        ctx.arc(denData.x + denData.w / 2, denData.y + denData.h / 2, glowRad, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      if (pinkLizard) {
+        pinkLizard.render(ctx, t);
+      }
 
       // 7. Draw Player OR Traveling Slugcat Silhouette in Pipe
       if (pipeTransit) {
@@ -4051,19 +4009,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             <Gamepad2 className="w-3.5 h-3.5" />
           </button>
 
-          {/* Debug Menu Toggle Button (Visible on all screen sizes) */}
-          <button
-            onClick={() => setShowDebugMenu(prev => !prev)}
-            className={`flex px-2 py-1 rounded-lg border text-xs font-mono tracking-wider items-center gap-1 transition-all cursor-pointer ${
-              showDebugMenu 
-                ? 'border-emerald-600 bg-emerald-950/80 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.3)]' 
-                : 'border-zinc-800 bg-zinc-950/80 text-zinc-400 hover:text-white hover:border-zinc-700'
-            }`}
-            title="Відкрити Дебаг Меню (F3 або ~)"
-          >
-            <Bug className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="font-bold">ДЕБАГ</span>
-          </button>
 
           {/* Mute toggle */}
           <button
@@ -4412,7 +4357,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
           {/* DEAD STATE NOTIFICATION BAR - Minimalist bottom black strip */}
           <AnimatePresence>
-            {isDead && (
+            {isDead && networkStatus !== 'connected' && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -4423,394 +4368,25 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
                   <span className="truncate text-zinc-300 text-[11px] sm:text-xs">
-                    Очікуйте кінця циклу або зареспавніться спомощу дебаг меню{' '}
-                    <button
-                      onClick={() => setShowDebugMenu(true)}
-                      className="text-amber-400 font-bold hover:underline cursor-pointer ml-0.5"
-                    >
-                      [F3]
-                    </button>
+                    {networkStatus === 'connected' 
+                      ? 'Ви загинули. Очікуйте завершення поточного циклу або початку наступного.' 
+                      : 'Ви загинули в дикому світі.'}
                   </span>
                 </div>
-                <button
-                  onClick={() => triggerReviveRef.current?.()}
-                  className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white font-bold text-[10px] shrink-0 cursor-pointer transition-colors active:scale-95"
-                  title="Швидкий респавн (R)"
-                >
-                  Респавн (R)
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* ---------------- DEBUG MENU (ДЕБАГ МЕНЮ) ---------------- */}
-          <AnimatePresence>
-            {showDebugMenu && (
-              <motion.div
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 20 }}
-                transition={{ duration: 0.15 }}
-                className="absolute top-3 right-3 z-40 w-84 max-h-[92%] bg-black/94 border border-emerald-800/60 rounded-xl shadow-2xl backdrop-blur-md flex flex-col overflow-hidden text-left font-mono text-[11px]"
-              >
-                {/* Header */}
-                <div className="flex items-center justify-between px-3 py-2 bg-emerald-950/40 border-b border-emerald-800/40">
-                  <div className="flex items-center gap-2 text-emerald-400 font-bold tracking-wider text-xs">
-                    <Terminal className="w-4 h-4" />
-                    <span>ДЕБАГ-МЕНЮ // SLUGCAT ENGINE</span>
-                  </div>
+                {/* Respawn button only in singleplayer! */}
+                {networkStatus !== 'connected' && (
                   <button
-                    onClick={() => setShowDebugMenu(false)}
-                    className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 cursor-pointer"
+                    onClick={() => triggerReviveRef.current?.()}
+                    className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white font-bold text-[10px] shrink-0 cursor-pointer transition-colors active:scale-95"
+                    title="Швидкий респавн (R)"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    Респавн (R)
                   </button>
-                </div>
-
-                {/* Content body */}
-                <div className="p-3 overflow-y-auto space-y-3 max-h-[75vh]">
-                  
-                  {/* 1. PLAYER TELEMETRY & HIDDEN STATS */}
-                  <div className="space-y-1.5 bg-zinc-950/70 p-2.5 rounded-lg border border-zinc-800/80">
-                    <div className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider flex items-center justify-between border-b border-zinc-800 pb-1">
-                      <span className="flex items-center gap-1 text-emerald-400">
-                        <Activity className="w-3 h-3 text-emerald-400" />
-                        ГРАВЕЦЬ (SLUGCAT)
-                      </span>
-                      <span className="text-emerald-500 font-mono text-[9px]">
-                        {telemetry.fps} FPS
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-x-2 gap-y-1 pt-1 text-[10px]">
-                      <div>
-                        <span className="text-zinc-500">Стан: </span>
-                        <span className={`font-bold ${
-                          telemetry.state === 'dead' ? 'text-red-400' :
-                          telemetry.state === 'stunned' ? 'text-amber-400' : 'text-emerald-400'
-                        }`}>
-                          {telemetry.state.toUpperCase()}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-1">
-                        <span className="text-zinc-500">HP (скрите): </span>
-                        <span className={`font-bold flex items-center gap-0.5 ${telemetry.hp > 0 ? 'text-rose-400' : 'text-zinc-500'}`}>
-                          <Heart className="w-2.5 h-2.5 fill-current" />
-                          {telemetry.hp.toFixed(2)} / {telemetry.maxHp}
-                        </span>
-                      </div>
-
-                      <div className="col-span-2">
-                        <span className="text-zinc-500">Час стану (скритий): </span>
-                        <span className={`font-bold ${telemetry.stunTimer > 0 ? 'text-amber-300' : 'text-zinc-400'}`}>
-                          {telemetry.stunTimer.toFixed(2)} с
-                        </span>
-                      </div>
-
-                      <div>
-                        <span className="text-zinc-500">У лапах: </span>
-                        <span className="text-amber-300 font-bold">
-                          {telemetry.heldItem === 'spear' ? 'Спис' : telemetry.heldItem === 'rock' ? 'Камінь' : telemetry.heldItem === 'berry' ? 'Ягода' : 'Нічого'}
-                        </span>
-                      </div>
-
-                      <div>
-                        <span className="text-zinc-500">Позиція: </span>
-                        <span className="text-slate-200">{telemetry.x}, {telemetry.y}</span>
-                      </div>
-
-                      <div className="col-span-2 pt-1 border-t border-zinc-800/80 text-[10px]">
-                        <span className="text-zinc-500">Прихований цикл: </span>
-                        <span className="text-cyan-300 font-bold">{Math.floor(cycleSecondsLeft / 60)}хв {String(cycleSecondsLeft % 60).padStart(2, '0')}с</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 2. NPC TELEMETRY & HIDDEN STATS */}
-                  <div className="space-y-1.5 bg-zinc-950/70 p-2.5 rounded-lg border border-cyan-900/40">
-                    <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider flex items-center justify-between border-b border-zinc-800 pb-1">
-                      <span className="flex items-center gap-1">
-                        <User className="w-3 h-3 text-cyan-400" />
-                        NPC (ТА САМА МОДЕЛЬКА)
-                      </span>
-                      <span className="text-zinc-500 text-[9px]">IDLE</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-x-2 gap-y-1 pt-1 text-[10px]">
-                      <div>
-                        <span className="text-zinc-500">Стан: </span>
-                        <span className={`font-bold ${
-                          telemetry.npcState === 'dead' ? 'text-red-400' :
-                          telemetry.npcState === 'stunned' ? 'text-amber-400' : 'text-cyan-400'
-                        }`}>
-                          {telemetry.npcState.toUpperCase()}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-1">
-                        <span className="text-zinc-500">HP (скрите): </span>
-                        <span className={`font-bold flex items-center gap-0.5 ${telemetry.npcHp > 0 ? 'text-rose-400' : 'text-zinc-500'}`}>
-                          <Heart className="w-2.5 h-2.5 fill-current" />
-                          {telemetry.npcHp.toFixed(2)} / {telemetry.npcMaxHp}
-                        </span>
-                      </div>
-
-                      <div className="col-span-2">
-                        <span className="text-zinc-500">Час стану (скритий): </span>
-                        <span className={`font-bold ${telemetry.npcStunTimer > 0 ? 'text-amber-300' : 'text-zinc-400'}`}>
-                          {telemetry.npcStunTimer.toFixed(2)} с
-                        </span>
-                      </div>
-
-                      <div className="col-span-2">
-                        <span className="text-zinc-500">Позиція NPC: </span>
-                        <span className="text-slate-200">X: {telemetry.npcX}, Y: {telemetry.npcY}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 3. ITEM SPAWNS & FOOD CONTROLS (СПИС, КАМІНЬ ТА ЯГОДИ) */}
-                  <div className="space-y-2 bg-amber-950/20 p-2.5 rounded-lg border border-amber-800/40">
-                    <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                      <span className="flex items-center gap-1">
-                        <Sword className="w-3 h-3 text-amber-400" />
-                        СПАВН ПРЕДМЕТІВ ТА ЇЖА
-                      </span>
-                      <span className="text-[9px] text-zinc-400">
-                        {telemetry.spearsCount} сп. / {telemetry.rocksCount} кам. / {telemetry.berriesCount} ягід
-                      </span>
-                    </div>
-
-                    <div className="text-[9px] text-zinc-400 leading-normal">
-                      • <b>Спис:</b> 1 HP, 1.8с стану (+0.8с якщо застанений)<br/>
-                      • <b>Камінь:</b> 0.01 HP, 1.2с стану (+0.5с якщо застанений)<br/>
-                      • <b>Ягода:</b> 1 ягода = 1 ячейка їжі
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-1.5 pt-1">
-                      <button
-                        onClick={() => triggerSpawnSpearRef.current?.()}
-                        className="p-1.5 rounded bg-amber-950/60 hover:bg-amber-900/80 border border-amber-700/60 text-amber-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <Sword className="w-2.5 h-2.5 text-amber-400" />
-                        + Спис
-                      </button>
-
-                      <button
-                        onClick={() => triggerSpawnRockRef.current?.()}
-                        className="p-1.5 rounded bg-slate-900/80 hover:bg-slate-800 border border-slate-700/80 text-slate-200 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <CircleDot className="w-2.5 h-2.5 text-slate-300" />
-                        + Камінь
-                      </button>
-
-                      <button
-                        onClick={() => triggerSpawnBerryRef.current?.()}
-                        className="p-1.5 rounded bg-sky-950/80 hover:bg-sky-900 border border-sky-600/80 text-sky-200 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <CircleDot className="w-2.5 h-2.5 text-sky-300" />
-                        + Ягода
-                      </button>
-
-                      {/* Food slots debug shortcuts */}
-                      <button
-                        onClick={() => triggerAddFoodRef.current?.()}
-                        className="p-1.5 rounded bg-amber-950/70 hover:bg-amber-900 border border-amber-600/70 text-amber-200 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        +1 Їжа ({foodCount}/7)
-                      </button>
-
-                      <button
-                        onClick={() => triggerResetFoodRef.current?.()}
-                        className="p-1.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-400 font-mono text-[9px] flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        Скинути їжу
-                      </button>
-
-                      <button
-                        onClick={() => setShowMapOverlay(true)}
-                        className="p-1.5 rounded bg-amber-900/60 hover:bg-amber-800 border border-amber-700 text-amber-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <Map className="w-2.5 h-2.5 text-amber-400" />
-                        Карта
-                      </button>
-
-                      <button
-                        onClick={() => triggerClearItemsRef.current?.()}
-                        className="col-span-3 p-1 rounded bg-zinc-900/70 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-white font-mono text-[9px] flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        Очистити всі предмети з карти
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* 4. NPC DEBUG CONTROLS */}
-                  <div className="space-y-2 bg-cyan-950/20 p-2.5 rounded-lg border border-cyan-800/40">
-                    <div className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                      <span className="flex items-center gap-1">
-                        <User className="w-3 h-3 text-cyan-400" />
-                        ДЕБАГ NPC (3 HP)
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <button
-                        onClick={() => triggerStunNpcRef.current?.(1.8)}
-                        className="p-1.5 rounded bg-amber-950/60 hover:bg-amber-900/80 border border-amber-700/60 text-amber-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <AlertTriangle className="w-3 h-3" />
-                        Оглушити NPC (1.8с)
-                      </button>
-
-                      <button
-                        onClick={() => triggerDamageNpcRef.current?.(1)}
-                        className="p-1.5 rounded bg-red-950/60 hover:bg-red-900/80 border border-red-700/60 text-red-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <Skull className="w-3 h-3" />
-                        Завдати 1 шкоди NPC
-                      </button>
-
-                      <button
-                        onClick={() => triggerResetNpcRef.current?.()}
-                        className="col-span-2 p-1.5 rounded bg-cyan-950/60 hover:bg-cyan-900/80 border border-cyan-700/60 text-cyan-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                        Відродити / Скинути NPC (3 HP)
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* 5. PLAYER DEBUG CONTROLS */}
-                  <div className="space-y-2 bg-emerald-950/20 p-2.5 rounded-lg border border-emerald-800/40">
-                    <div className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                      <span className="flex items-center gap-1">
-                        <Activity className="w-3 h-3 text-emerald-400" />
-                        ДЕБАГ ГРАВЦЯ (1 HP)
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <button
-                        onClick={() => triggerStunRef.current?.(3.0)}
-                        className="p-1.5 rounded bg-amber-950/60 hover:bg-amber-900/80 border border-amber-700/60 text-amber-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <AlertTriangle className="w-3 h-3" />
-                        Оглушити (3с)
-                      </button>
-
-                      <button
-                        onClick={() => triggerDamageRef.current?.(1)}
-                        className="p-1.5 rounded bg-red-950/60 hover:bg-red-900/80 border border-red-700/60 text-red-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <Skull className="w-3 h-3" />
-                        Завдати 1 шкоди
-                      </button>
-
-                      <button
-                        onClick={() => triggerReviveRef.current?.()}
-                        className="p-1.5 rounded bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-700/60 text-emerald-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                        Відродити (1 HP)
-                      </button>
-
-                      <button
-                        onClick={() => triggerResetPosRef.current?.()}
-                        className="p-1.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        Телепорт на старт
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* 6. CAMERA & ZOOM CONTROLS */}
-                  <div className="space-y-2 bg-amber-950/20 p-2.5 rounded-lg border border-amber-800/40">
-                    <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                      <span className="flex items-center gap-1">
-                        <ZoomIn className="w-3 h-3 text-amber-400" />
-                        КАМЕРА ТА МАСШТАБ ({zoomLevel}x)
-                      </span>
-                    </div>
-
-                    <div className="text-[9px] text-zinc-400">
-                      Динамічна камера плавно стежить за слимакокотом з випередженням погляду.
-                    </div>
-
-                    <div className="grid grid-cols-4 gap-1.5 pt-1">
-                      {[
-                        { label: '1.0x', val: 1.0 },
-                        { label: '1.35x', val: 1.35 },
-                        { label: '1.65x ★', val: 1.65 },
-                        { label: '2.0x', val: 2.0 },
-                      ].map((preset) => (
-                        <button
-                          key={preset.val}
-                          onClick={() => setZoomLevel(preset.val)}
-                          className={`py-1 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
-                            zoomLevel === preset.val
-                              ? 'bg-amber-600 text-black shadow-md'
-                              : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700'
-                          }`}
-                        >
-                          {preset.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Smooth Zoom Slider */}
-                    <div className="pt-1.5 flex items-center gap-2 text-[9px] font-mono">
-                      <span className="text-zinc-500">1.0x</span>
-                      <input
-                        type="range"
-                        min="1.0"
-                        max="2.2"
-                        step="0.05"
-                        value={zoomLevel}
-                        onChange={(e) => setZoomLevel(parseFloat(e.target.value))}
-                        className="flex-1 accent-amber-500 cursor-pointer"
-                      />
-                      <span className="text-amber-400 font-bold w-9 text-right">{zoomLevel.toFixed(2)}x</span>
-                    </div>
-                  </div>
-
-                  {/* 7. TOUCH CONTROLS CONFIGURATION */}
-                  <div className="space-y-2 bg-indigo-950/20 p-2.5 rounded-lg border border-indigo-800/40">
-                    <div className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                      <span className="flex items-center gap-1">
-                        <Gamepad2 className="w-3 h-3 text-indigo-400" />
-                        СЕНСОРНЕ КЕРУВАННЯ
-                      </span>
-                      <button
-                        onClick={() => setShowTouchControls(p => !p)}
-                        className="text-[9px] text-zinc-400 hover:text-white underline cursor-pointer"
-                      >
-                        {showTouchControls ? 'Приховати' : 'Увімкнути'}
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <button
-                        onClick={() => setButtonScale(p => p === 'normal' ? 'large' : 'normal')}
-                        className="p-1.5 rounded bg-indigo-950/60 hover:bg-indigo-900/80 border border-indigo-700/60 text-indigo-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        Розмір кнопок: {buttonScale === 'large' ? 'Великі (★)' : 'Звичайні'}
-                      </button>
-
-                      <button
-                        onClick={() => setShowTouchControls(p => !p)}
-                        className="p-1.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono text-[9px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
-                      >
-                        {showTouchControls ? 'Сховати кнопки' : 'Показати кнопки'}
-                      </button>
-                    </div>
-                  </div>
-
-                </div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
+
 
         </div>
       </div>
@@ -4823,13 +4399,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 15 }}
             transition={{ duration: 0.15 }}
-            style={{ touchAction: 'none', paddingBottom: 'max(2.25rem, env(safe-area-inset-bottom, 2.25rem))' }}
-            className="w-full max-w-5xl flex items-end justify-between px-3 sm:px-6 pt-1 z-40 select-none pointer-events-none touch-none pb-8 sm:pb-12 mb-2 sm:mb-4"
+            style={{ touchAction: 'none', paddingBottom: 'max(4.5rem, env(safe-area-inset-bottom, 4.5rem))' }}
+            className="w-full max-w-5xl flex items-end justify-between px-4 sm:px-8 pt-1 z-40 select-none pointer-events-none touch-none pb-16 sm:pb-20 mb-6 sm:mb-8"
           >
             {/* LEFT COMPARTMENT: HORIZONTAL NAVIGATION PAD */}
             <div 
               style={{ touchAction: 'none' }}
-              className="flex items-center gap-2 sm:gap-3 pointer-events-auto bg-black/60 backdrop-blur-md p-1.5 sm:p-2.5 rounded-3xl border border-zinc-800/80 shadow-2xl touch-none select-none"
+              className="flex items-center gap-2 sm:gap-3 pointer-events-auto bg-black/75 backdrop-blur-md p-2 sm:p-3 rounded-3xl border border-zinc-700/80 shadow-2xl touch-none select-none mb-3 sm:mb-5 ml-2 sm:ml-4"
             >
               {/* MOVE LEFT BUTTON */}
               <button
@@ -5182,9 +4758,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         <span className="text-amber-400 font-bold">Z / E — взяти / покласти</span>
         <span>•</span>
         <span className="text-red-400 font-bold">X / Q — кинути спис / камінь</span>
-        <span>•</span>
-        <span className="text-emerald-400 font-bold">F3 або ` — дебаг-меню</span>
-        {isDead && (
+                {isDead && networkStatus !== 'connected' && (
           <>
             <span>•</span>
             <span className="text-red-400 font-bold">R — відродитися</span>
