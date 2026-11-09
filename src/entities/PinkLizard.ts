@@ -39,6 +39,20 @@ export class PinkLizard {
   public isGrounded: boolean = false;
   public biteCooldown: number = 0;
 
+  // Pipe Transit crawling navigation ("улучшить ии ящера щоб он міг перемещаться по локациях по трубах")
+  public pipeTransit: {
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+    progress: number;
+    duration: number;
+    targetLocationId?: string;
+    targetSpawnX?: number;
+    targetSpawnY?: number;
+  } | null = null;
+  public pipeCooldown: number = 0;
+
   // Carried target: living player or dead corpse
   public grabbedTarget: 'player' | 'corpse' | 'peer' | null = null;
   public grabbedPeerId: string | null = null;
@@ -102,6 +116,8 @@ export class PinkLizard {
     player: {
       x: number;
       y: number;
+      vx?: number;
+      vy?: number;
       width: number;
       height: number;
       hp: number;
@@ -123,7 +139,10 @@ export class PinkLizard {
     den: LizardDen | null,
     onPlayerBitten: (damage: number, grabbed: boolean) => void,
     onPlayerEatenInDen: () => void,
-    onPeerBitten?: (peerId: string, damage: number) => void
+    onPeerBitten?: (peerId: string, damage: number) => void,
+    pipes?: Array<{ id: string; startX: number; startY: number; endX: number; endY: number; targetLocationId?: string; targetSpawnX?: number; targetSpawnY?: number }>,
+    onLizardChangedRoom?: (targetRoomId: string, spawnX?: number, spawnY?: number) => void,
+    onPreyDepositedInDen?: () => void
   ) {
     if (this.state === 'dead') {
       // Dead ragdoll physics
@@ -143,6 +162,56 @@ export class PinkLizard {
       }
       this.updateProceduralBody();
       return;
+    }
+
+    // Pipe Conduit Transit: Lizard sliding through shortcuts and inter-room pipes
+    // "улучшить ии ящера щоб он міг перемещаться по локациях по трубах"
+    if (this.pipeTransit) {
+      this.pipeTransit.progress += delta / this.pipeTransit.duration;
+      const p = Math.min(1, this.pipeTransit.progress);
+      const curX = this.pipeTransit.fromX + (this.pipeTransit.toX - this.pipeTransit.fromX) * p;
+      const curY = this.pipeTransit.fromY + (this.pipeTransit.toY - this.pipeTransit.fromY) * p;
+
+      this.x = curX - this.width / 2;
+      this.y = curY - this.height / 2;
+      this.vx = 0;
+      this.vy = 0;
+      this.isClimbing = true;
+
+      // If dragging player, pull them through the pipe as well
+      if (this.grabbedTarget === 'player') {
+        player.x = curX - player.width / 2;
+        player.y = curY - player.height / 2;
+      }
+
+      if (p >= 1) {
+        if (this.pipeTransit.targetLocationId) {
+          // Inter-room transition into adjacent location room!
+          const targetRoom = this.pipeTransit.targetLocationId;
+          const spX = this.pipeTransit.targetSpawnX;
+          const spY = this.pipeTransit.targetSpawnY;
+          this.pipeTransit = null;
+          this.pipeCooldown = 5.0;
+          onLizardChangedRoom?.(targetRoom, spX, spY);
+          return;
+        }
+
+        // Intraroom pipe exit
+        const exitDir = this.pipeTransit.toX > this.pipeTransit.fromX ? 1 : -1;
+        this.x = this.pipeTransit.toX - this.width / 2 + exitDir * 8;
+        this.y = this.pipeTransit.toY - this.height / 2;
+        this.vx = exitDir * 4.2;
+        this.vy = -2.5;
+        this.pipeTransit = null;
+        this.pipeCooldown = 4.0;
+      }
+
+      this.updateProceduralBody();
+      return;
+    }
+
+    if (this.pipeCooldown > 0) {
+      this.pipeCooldown -= delta;
     }
 
     // Stun recovery
@@ -179,13 +248,20 @@ export class PinkLizard {
       player.x = mouthX - player.width / 2;
       player.y = mouthY - player.height / 2;
 
-      // Check if lizard reached its den with the living player!
-      // "і він може постараться затягнуть його в свою убержку де уже щитатиметься игроку проігриш ну смерть"
+      // Check if lizard reached its den with prey:
+      // "і зроби ящеру свою убержку ну видиму куда даже зайти можна но игрока якого заніс туда ящер буде медлено получать урон 0.01 урон в 3 сикунди та стан ставитиметься на паузу поки він там"
       if (den) {
         const distToDen = Math.hypot((this.x + this.width / 2) - (den.x + den.w / 2), (this.y + this.height / 2) - (den.y + den.h / 2));
-        if (distToDen < 40) {
-          onPlayerEatenInDen();
-          return;
+        if (distToDen < 44) {
+          // Lizard deposits prey inside den instead of instant death
+          this.grabbedTarget = null;
+          player.x = den.x + den.w / 2 - player.width / 2;
+          player.y = den.y + den.h / 2 - player.height / 2;
+          player.vx = 0;
+          player.vy = 0;
+          this.biteCooldown = 3.0;
+          this.state = 'patrol';
+          onPreyDepositedInDen?.();
         }
       }
     }
@@ -242,6 +318,45 @@ export class PinkLizard {
     const distToTarget = Math.hypot(dx, dy);
 
     this.facingRight = dx > 0;
+
+    // Check Transit Pipe crawling entry ("перемещаться по локациях по трубах")
+    if (pipes && pipes.length > 0 && this.pipeCooldown <= 0) {
+      for (const pipe of pipes) {
+        const dStart = Math.hypot((this.x + this.width / 2) - pipe.startX, (this.y + this.height / 2) - pipe.startY);
+        const dEnd = Math.hypot((this.x + this.width / 2) - pipe.endX, (this.y + this.height / 2) - pipe.endY);
+
+        if (dStart < 32) {
+          this.pipeTransit = {
+            fromX: pipe.startX,
+            fromY: pipe.startY,
+            toX: pipe.endX,
+            toY: pipe.endY,
+            progress: 0,
+            duration: 1.6,
+            targetLocationId: pipe.targetLocationId,
+            targetSpawnX: pipe.targetSpawnX,
+            targetSpawnY: pipe.targetSpawnY
+          };
+          this.vx = 0;
+          this.vy = 0;
+          this.updateProceduralBody();
+          return;
+        } else if (dEnd < 32 && !pipe.targetLocationId) {
+          this.pipeTransit = {
+            fromX: pipe.endX,
+            fromY: pipe.endY,
+            toX: pipe.startX,
+            toY: pipe.startY,
+            progress: 0,
+            duration: 1.6
+          };
+          this.vx = 0;
+          this.vy = 0;
+          this.updateProceduralBody();
+          return;
+        }
+      }
+    }
 
     // Pink Lizard Speed: slightly faster than slugcat ("чуть бистріший за слизне кота")
     // Slugcat max base speed is 4.8. Lizard speed is 5.5!
@@ -445,6 +560,25 @@ export class PinkLizard {
   }
 
   public render(ctx: CanvasRenderingContext2D, t: number) {
+    if (this.pipeTransit) {
+      // Glow and crawl silhouette inside pipe conduit
+      ctx.save();
+      const cx = this.x + this.width / 2;
+      const cy = this.y + this.height / 2;
+      ctx.fillStyle = 'rgba(236, 72, 153, 0.75)';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 14, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Gleaming Cyan Reptile Eye in dark pipe
+      ctx.fillStyle = '#22d3ee';
+      ctx.beginPath();
+      ctx.arc(cx + (this.facingRight ? 6 : -6), cy - 2, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
     ctx.save();
 
     // 1. Draw Tail

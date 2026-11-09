@@ -25,6 +25,7 @@ const TRACKS: Record<'menu' | 'game' | 'battle', string[]> = {
 class MusicManager {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private hpFilter: BiquadFilterNode | null = null;
 
   // Active audio nodes
   private currentSource: AudioBufferSourceNode | null = null;
@@ -37,6 +38,7 @@ class MusicManager {
   private isMuted: boolean = false;
   private volume: number = 0.65;
   private isUnlocked: boolean = false;
+  private currentHpRatio: number = 1.0;
 
   // Monotonic token to cancel out-of-order asynchronous loads
   private requestToken: number = 0;
@@ -90,9 +92,20 @@ class MusicManager {
     if (!this.ctx) {
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       this.ctx = new AudioCtxClass();
+      
+      // Dynamic low-pass filter for HP-based underwater / concussive muffled effect
+      // "чим менше хп тип приглушоней звук ну ніби під водою"
+      this.hpFilter = this.ctx.createBiquadFilter();
+      this.hpFilter.type = 'lowpass';
+      this.hpFilter.frequency.setValueAtTime(20000, this.ctx.currentTime);
+      this.hpFilter.Q.setValueAtTime(1.0, this.ctx.currentTime);
+
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.setValueAtTime(this.isMuted ? 0 : this.volume, this.ctx.currentTime);
-      this.masterGain.connect(this.ctx.destination);
+
+      // Audio route: currentSource -> currentGain -> masterGain -> hpFilter -> destination
+      this.masterGain.connect(this.hpFilter);
+      this.hpFilter.connect(this.ctx.destination);
     }
     return this.ctx;
   }
@@ -106,6 +119,21 @@ class MusicManager {
     if (this.currentCategory !== 'none' && !this.currentSource) {
       this.playCategory(this.currentCategory, true);
     }
+  }
+
+  public setHealthFilter(hpRatio: number) {
+    this.currentHpRatio = Math.max(0, Math.min(1, Number.isFinite(hpRatio) ? hpRatio : 1));
+    const ctx = this.getAudioContext();
+    if (!ctx || !this.hpFilter) return;
+
+    // Exponential frequency curve from 380 Hz (muffled underwater) to 20,000 Hz (crystal clear full health)
+    const minFreq = 380;
+    const maxFreq = 20000;
+    const targetFreq = minFreq * Math.pow(maxFreq / minFreq, this.currentHpRatio);
+
+    const now = ctx.currentTime;
+    this.hpFilter.frequency.cancelScheduledValues(now);
+    this.hpFilter.frequency.setTargetAtTime(targetFreq, now, 0.2);
   }
 
   public setMuted(muted: boolean) {

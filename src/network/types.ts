@@ -9,7 +9,7 @@ export interface RemotePlayer {
   vx: number;
   vy: number;
   facingRight: boolean;
-  state: 'normal' | 'stunned' | 'dead';
+  state: 'normal' | 'stunned' | 'dead' | 'sleeping';
   stunTimer: number;
   hp: number;
   maxHp: number;
@@ -19,6 +19,10 @@ export interface RemotePlayer {
   isGrounded: boolean;
   lastUpdateTimestamp: number;
   pingMs: number;
+
+  // Piggyback carrying mechanic
+  carriedBy?: string | null;
+  carryingPeerId?: string | null;
 
   // Visual skeleton positions for smooth procedural rendering
   width?: number;
@@ -55,13 +59,15 @@ export type NetworkPacket =
       vx: number;
       vy: number;
       facingRight: boolean;
-      state: 'normal' | 'stunned' | 'dead';
+      state: 'normal' | 'stunned' | 'dead' | 'sleeping';
       stunTimer: number;
       hp: number;
       heldItem: 'spear' | 'rock' | 'berry' | null;
       crouching: boolean;
       isClimbing: boolean;
       isGrounded: boolean;
+      carriedBy?: string | null;
+      carryingPeerId?: string | null;
       head: { x: number; y: number };
       chest: { x: number; y: number };
       hips: { x: number; y: number };

@@ -318,7 +318,38 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   useEffect(() => {
     inShelterChamberRef.current = inShelterChamber;
   }, [inShelterChamber]);
+
   const [isHibernating, setIsHibernating] = useState<boolean>(false);
+
+  // Persisted held item across room changes
+  // "пофікси пропажі предметів з рук коли переходиш между локациями"
+  const persistedHeldItemRef = useRef<ItemType | null>(null);
+
+  // Piggyback carrying mechanic
+  // "додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз..."
+  const [carriedPlayerId, setCarriedPlayerId] = useState<string | null>(null);
+  const carriedPlayerIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    carriedPlayerIdRef.current = carriedPlayerId;
+  }, [carriedPlayerId]);
+
+  const [nearbyPickupCandidate, setNearbyPickupCandidate] = useState<{ id: string; name: string } | null>(null);
+  const triggerPiggybackRef = useRef<(() => void) | null>(null);
+
+  // Sleep indicator and multiplayer Spectator Mode
+  // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя... наблюдатель"
+  const [sleepProgress, setSleepProgress] = useState<number>(0);
+  const [isSpectating, setIsSpectating] = useState<boolean>(false);
+  const isSpectatingRef = useRef(false);
+  useEffect(() => {
+    isSpectatingRef.current = isSpectating;
+  }, [isSpectating]);
+
+  const [spectatedPeerId, setSpectatedPeerId] = useState<string | null>(null);
+  const spectatedPeerIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    spectatedPeerIdRef.current = spectatedPeerId;
+  }, [spectatedPeerId]);
 
   // GitHub Version Polling & 5-minute Auto-Restart State
   // "додай щоб гра на клієнті кожні 20 сикунд провіряла версіЮ фАйла на гит хабі єслі там новіша чим та що на клієнті..."
@@ -584,11 +615,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       spawnX: 840,
       spawnY: 130
     };
-    const lizardSpawnX = currentLocation.isShelterRoom ? -999 : (denData.spawnX || 840);
-    const lizardSpawnY = currentLocation.isShelterRoom ? -999 : (denData.spawnY || 130);
-    const pinkLizard: PinkLizard | null = currentLocation.isShelterRoom 
-      ? null 
-      : new PinkLizard('pink-lizard-1', lizardSpawnX, lizardSpawnY);
+    // Randomized Lizard Spawn per room ("розмісти для кожної локації спавн ящера рамдомним...")
+    const lizardShouldSpawn = !currentLocation.isShelterRoom && (Math.random() < 0.70);
+    const lizardSpawnX = !lizardShouldSpawn ? -999 : (denData.spawnX || 840);
+    const lizardSpawnY = !lizardShouldSpawn ? -999 : (denData.spawnY || 130);
+    const pinkLizard: PinkLizard | null = lizardShouldSpawn 
+      ? new PinkLizard(`pink-lizard-${currentLocation.id}`, lizardSpawnX, lizardSpawnY)
+      : null;
 
     // Items list in the world with Randomized Cyclic Spawning:
     // "додать рандомний спавн вещей не типа деякі вещі не появляться а деякі появились на позиціях в началі Циклу"
@@ -608,6 +641,30 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         ];
 
     const items: WorldItem[] = [];
+
+    // Restore persisted held item across room transitions
+    // "пофікси пропажі предметів з рук коли переходиш между локациями"
+    if (persistedHeldItemRef.current) {
+      const persistedType = persistedHeldItemRef.current;
+      const restoredItem: WorldItem = {
+        id: `held-${Date.now()}`,
+        type: persistedType,
+        x: player.x + (player.facingRight ? 18 : -18),
+        y: player.y + 10,
+        vx: 0,
+        vy: 0,
+        rotation: persistedType === 'spear' ? 0.1 : 0,
+        isHeld: true,
+        heldBy: 'player',
+        isStuck: false,
+        isAirborne: false,
+        sleeping: false,
+      };
+      player.heldItem = restoredItem;
+      items.push(restoredItem);
+      setHeldItemType(persistedType);
+      persistedHeldItemRef.current = null;
+    }
     baseCandidateItems.forEach((cand, idx) => {
       // First 2 items have high spawn chance (0.95) to ensure player finds arms, other items 0.65
       const spawnChance = idx < 2 ? 0.95 : 0.65;
@@ -948,6 +1005,34 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     triggerGrabRef.current = handleGrab;
     triggerThrowRef.current = handleThrow;
     triggerEatRef.current = handleToggleEat;
+
+    // Piggyback carrying mechanic:
+    // "додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз то його можна взять на спину..."
+    const handleTogglePiggyback = () => {
+      if (carriedPlayerIdRef.current) {
+        carriedPlayerIdRef.current = null;
+        setCarriedPlayerId(null);
+        soundEngine.playPickup();
+        setLastAction('Ви скинули гравця зі спини.');
+        return;
+      }
+
+      // Check nearby eligible peer (crouching or stunned, within 44px in same room)
+      const cand = Array.from(webRTCManager.remotePlayers.values()).find(rp => 
+        rp.room === currentLocation.id &&
+        (rp.stunTimer > 0 || rp.crouching) &&
+        Math.hypot((player.x + 12) - (rp.x + 12), (player.y + 19) - (rp.y + 19)) < 44
+      );
+
+      if (cand) {
+        carriedPlayerIdRef.current = cand.id;
+        setCarriedPlayerId(cand.id);
+        soundEngine.playPickup();
+        setLastAction(`Ви взяли гравця ${cand.name} на спину! (-10% швидкості та стрибка)`);
+      }
+    };
+
+    triggerPiggybackRef.current = handleTogglePiggyback;
 
     // Debug trigger assignments
     triggerSpawnSpearRef.current = () => spawnItem('spear');
@@ -1371,6 +1456,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     let localStormSeconds = 0;
     let pounceChargeTimer = 0;
     let prevJumpPressed = false;
+    let denDamageTimer = 0;
 
     // Worm grass elements along the ground floor
     const wormGrasses: WormGrass[] = [];
@@ -1420,6 +1506,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       if (['x', 'q'].includes(e.key.toLowerCase())) {
         e.preventDefault();
         triggerThrowRef.current?.();
+        return;
+      }
+
+      // Piggyback / carry action on 'G' ("додай кнопку підйома...")
+      if (e.key.toLowerCase() === 'g') {
+        e.preventDefault();
+        triggerPiggybackRef.current?.();
         return;
       }
 
@@ -1550,17 +1643,62 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             }
           },
           () => {
-            // Lizard dragged player to its den: instant game over!
-            if (player.state !== 'dead') {
-              player.hp = 0;
-              player.state = 'dead';
-              setIsDead(true);
-              setLastAction('Ящер затягнув вас у своє лігво! Смерть.');
-              soundEngine.playCreatureHurt();
+            // Lizard reached den with corpse or prey
+            soundEngine.playCreatureHurt();
+          },
+          undefined,
+          transitPipes,
+          (targetRoomId: string, spawnX?: number, spawnY?: number) => {
+            // Lizard crawled through pipe into another room!
+            // "улучшить ии ящера щоб он міг перемещаться по локациях по трубах"
+            const targetLoc = BUILTIN_LOCATIONS.find(l => l.id === targetRoomId);
+            if (targetLoc) {
+              setLastAction(`Ящер проліз через трубу у кімнату: ${targetLoc.name}!`);
+              // Move lizard out of current room view
+              pinkLizard.x = -999;
+              pinkLizard.y = -999;
             }
+          },
+          () => {
+            // Prey deposited in lizard den!
+            setLastAction("Ящер затягнув здобич у своє лігво та залишив там!");
           }
         );
       }
+
+      // ---------------- Visible Lizard Den Mechanics ----------------
+      // "і зроби ящеру свою убержку ну видиму куда даже зайти можна но игрока якого заніс туда ящер буде медлено получать урон 0.01 урон в 3 сикунди та стан ставитиметься на паузу поки він там"
+      const isInsideLizardDen = !currentLocation.isShelterRoom && denData && (
+        player.x + 12 >= denData.x &&
+        player.x + 12 <= denData.x + denData.w &&
+        player.y + 19 >= denData.y &&
+        player.y + 19 <= denData.y + denData.h
+      );
+
+      if (isInsideLizardDen && player.state !== 'dead') {
+        // Stun timer is paused while inside lizard den!
+        if (player.stunTimer > 0) {
+          player.stunTimer += delta;
+        }
+
+        denDamageTimer += delta;
+        if (denDamageTimer >= 3.0) {
+          denDamageTimer = 0;
+          player.hp = Math.max(0, player.hp - 0.01);
+          soundEngine.playCreatureHurt();
+          setLastAction("Лігво ящера повільно роз'їдає слимакокота (-0.01 HP / 3с, стан на паузі)");
+          if (player.hp <= 0) {
+            player.state = 'dead';
+            setIsDead(true);
+          }
+        }
+      } else {
+        denDamageTimer = 0;
+      }
+
+      // Dynamic Health Filter for Music:
+      // "чим менше хп тип приглушоней звук ну ніби під водою"
+      musicManager.setHealthFilter(player.hp / player.maxHp);
 
       // ---------------- Dynamic Music Category Switching with Hysteresis ----------------
       musicCheckTimer += delta;
@@ -1651,6 +1789,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               
               soundEngine.playPickup();
               distributedSimulation.enterRoom(targetLoc.id);
+              if (player.heldItem) {
+                persistedHeldItemRef.current = player.heldItem.type;
+              }
               setCurrentLocation(targetLoc);
               setInShelterChamber(!!targetLoc.isShelterRoom);
               pipeTransit = null;
@@ -1783,10 +1924,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           if (Math.abs(player.vx) < 0.05) player.vx = 0;
         } else if (canControl) {
           // Ground & Airborne Locomotion with eatingSlowdownTimer effect
+          const isCarrying = !!carriedPlayerIdRef.current;
+          const carryDebuff = isCarrying ? 0.90 : 1.0; // 10% debuff to speed and jump height!
           const isSlowed = eatingSlowdownTimer > 0;
-          const accel = isSlowed ? 0.22 : 0.55;
-          const baseWalkSpeed = player.crouching ? 2.2 : 4.8;
-          const maxWalkSpeed = isSlowed ? Math.min(baseWalkSpeed, 2.0) : baseWalkSpeed;
+          const accel = (isSlowed ? 0.22 : 0.55) * carryDebuff;
+          const baseWalkSpeed = (player.crouching ? 2.2 : 4.8) * carryDebuff;
+          const maxWalkSpeed = (isSlowed ? Math.min(baseWalkSpeed, 2.0) : baseWalkSpeed);
           const friction = player.isGrounded ? (isSlowed ? 0.74 : 0.82) : 0.98;
 
           // 1. Persistent Crawl / Crouch State Transitions
@@ -1818,8 +1961,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             // Auto-launch if held past 2.0s
             if (pounceChargeTimer >= 2.0) {
               const dir = player.facingRight ? 1 : -1;
-              player.vx = dir * 11.5;
-              player.vy = -7.6;
+              player.vx = dir * 11.5 * carryDebuff;
+              player.vy = -7.6 * carryDebuff;
               player.isGrounded = false;
               player.crouching = false;
               pounceChargeTimer = 0;
@@ -1831,8 +1974,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             if (pounceChargeTimer >= 1.8) {
               // Successfully charged for >= 1.8 seconds: unleash high pounce leap!
               const dir = player.facingRight ? 1 : -1;
-              player.vx = dir * 11.5;
-              player.vy = -7.6;
+              player.vx = dir * 11.5 * carryDebuff;
+              player.vy = -7.6 * carryDebuff;
               player.isGrounded = false;
               player.crouching = false;
               pounceChargeTimer = 0;
@@ -1840,7 +1983,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               setLastAction('Високий ривок Слимакокота (Pounce)!');
             } else if (pounceChargeTimer > 0 && pounceChargeTimer < 1.8 && !ctrl.jump && prevJumpPressed) {
               // Quick tap of jump from crawl: stand up and perform normal jump
-              player.vy = isSlowed ? -6.8 : -8.5;
+              player.vy = (isSlowed ? -6.8 : -8.5) * carryDebuff;
               player.isGrounded = false;
               player.crouching = false;
               pounceChargeTimer = 0;
@@ -1860,12 +2003,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 player.vx *= friction;
               }
 
-              // Normal Jump when standing
+              // Normal Jump when standing (with 10% carry penalty if carrying peer)
               if (ctrl.jump && !prevJumpPressed && player.isGrounded) {
-                player.vy = isSlowed ? -6.8 : -8.5;
+                player.vy = (isSlowed ? -6.8 : -8.5) * carryDebuff;
                 player.isGrounded = false;
                 player.crouching = false;
-                setLastAction(isSlowed ? 'Важкий стрибок...' : 'Класичний стрибок Слимакокота!');
+                setLastAction(isSlowed ? 'Важкий стрибок...' : (isCarrying ? 'Стрибок із гравцем на спині (-10%)' : 'Класичний стрибок Слимакокота!'));
                 if (!isSoundMuted) {
                   soundEngine.playThunder();
                 }
@@ -1875,6 +2018,38 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
           if (player.vx > maxWalkSpeed) player.vx = maxWalkSpeed;
           if (player.vx < -maxWalkSpeed) player.vx = -maxWalkSpeed;
+
+          // Pin carried player to carrier's back
+          if (carriedPlayerIdRef.current) {
+            const carriedPeer = webRTCManager.remotePlayers.get(carriedPlayerIdRef.current);
+            if (carriedPeer) {
+              carriedPeer.x = player.x + (player.facingRight ? -4 : 4);
+              carriedPeer.y = player.y - 14;
+            }
+          }
+
+          // If local player is being carried by remote player:
+          const carrier = Array.from(webRTCManager.remotePlayers.values()).find(rp => rp.carryingPeerId === webRTCManager.localPlayerId);
+          if (carrier) {
+            if (ctrl.jump && !prevJumpPressed) {
+              player.vy = -7.5;
+              player.vx = player.facingRight ? 4.5 : -4.5;
+              player.isGrounded = false;
+              soundEngine.playThunder();
+              setLastAction('Ви зістрибнули зі спини гравця!');
+            } else {
+              player.x = carrier.x + (carrier.facingRight ? -4 : 4);
+              player.y = carrier.y - 14;
+            }
+          }
+
+          // Find nearby candidate for piggyback pickup prompt
+          const pickupCand = Array.from(webRTCManager.remotePlayers.values()).find(rp => 
+            rp.room === currentLocation.id &&
+            (rp.stunTimer > 0 || rp.crouching) &&
+            Math.hypot((player.x + 12) - (rp.x + 12), (player.y + 19) - (rp.y + 19)) < 44
+          );
+          setNearbyPickupCandidate(pickupCand ? { id: pickupCand.id, name: pickupCand.name } : null);
 
           prevJumpPressed = ctrl.jump;
         } else {
@@ -1948,30 +2123,30 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           player.vx = 0;
         }
 
-        // Dedicated Shelter Room physical crouching hibernation:
-        // "типа ти должен там досидіть до конца цикла коли наївся(только коли в мультиплеєрі) ну і або коли всі играки нажали кнопку вниз і типа не долєно на екрані менюшка появляться де можна нажать кнопку і тебе засейве там"
-        if (currentLocation.isShelterRoom && canControl && !isHibernating && !pipeTransit) {
-          const isHoldingDown = ctrl.down || player.crouching;
-          if (isHoldingDown && player.isGrounded && Math.abs(player.vx) < 1.0) {
-            if (foodCount >= 4) {
-              shelterSleepTimer += delta;
-              if (shelterSleepTimer >= 2.0) {
-                shelterSleepTimer = 0;
-                triggerHibernateRef.current?.();
-              }
-            } else {
+        // Dedicated Shelter Room physical hibernation:
+        // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя..."
+        if ((currentLocation.isShelterRoom || inShelterChamber) && canControl && !isHibernating && !pipeTransit) {
+          const isHoldingSleep = ctrl.jump || ctrl.down || player.crouching;
+          if (isHoldingSleep && player.isGrounded && Math.abs(player.vx) < 1.8) {
+            shelterSleepTimer += delta;
+            setSleepProgress(Math.min(1, shelterSleepTimer / 1.5));
+            if (shelterSleepTimer >= 1.5) {
               shelterSleepTimer = 0;
+              setSleepProgress(0);
+              triggerHibernateRef.current?.();
             }
           } else {
             shelterSleepTimer = Math.max(0, shelterSleepTimer - delta * 2.5);
+            setSleepProgress(Math.min(1, shelterSleepTimer / 1.5));
           }
 
-          // Cycle timer ended while inside shelter with required food
-          if (cycleSecondsLeftRef.current <= 0 && foodCount >= 4) {
+          // Cycle timer ended while inside shelter
+          if (cycleSecondsLeftRef.current <= 0) {
             triggerHibernateRef.current?.();
           }
         } else {
           shelterSleepTimer = 0;
+          setSleepProgress(0);
         }
 
         // Rain World shortcut transit pipes check (delayed 1.2s conduit travel instead of instant teleport)
@@ -2347,8 +2522,10 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       updateSkeleton(player, t, delta);
 
       // ---------------- Procedural Skeleton Physics (Remote Peers) ----------------
+      // Strict room isolation: only update skeleton for peers physically in this location
+      // "кожна локація це був окремий одб'єкт тоєсть щоб в просторі находились вони всі окрумо..."
       for (const rp of webRTCManager.remotePlayers.values()) {
-        if (rp.room === currentLocation.id || rp.room === distributedSimulation.currentRoom) {
+        if (rp.room === currentLocation.id) {
           updateSkeleton(rp, t, delta);
         }
       }
@@ -2365,12 +2542,14 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           crouching: player.crouching,
           isGrounded: player.isGrounded,
           isClimbing: player.isClimbing,
-          state: player.state,
-          hp: player.hp,
+          state: isSpectatingRef.current ? 'sleeping' : player.state,
+          hp: isSpectatingRef.current ? player.maxHp : player.hp,
           maxHp: player.maxHp,
           stunTimer: player.stunTimer,
           heldItem: player.heldItem ? player.heldItem.type : null,
           room: currentLocation.id,
+          carriedBy: null,
+          carryingPeerId: carriedPlayerIdRef.current,
           head: player.head,
           chest: player.chest,
           hips: player.hips,
@@ -2442,12 +2621,30 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       const viewW = CANVAS_WIDTH / currentZoom;
       const viewH = CANVAS_HEIGHT / currentZoom;
 
-      // Camera smoothly follows player with organic lead in direction of travel
-      const leadX = (player.state === 'normal' && (ctrl.left || ctrl.right))
+      // Camera smoothly follows player (or spectated peer in spectator mode)
+      let focusX = player.x + player.width / 2;
+      let focusY = player.y + player.height / 2;
+      let leadX = (player.state === 'normal' && (ctrl.left || ctrl.right))
         ? (player.facingRight ? 40 : -40)
         : 0;
-      const targetCamX = (player.x + player.width / 2 + leadX) - viewW / 2;
-      const targetCamY = (player.y + player.height / 2) - viewH / 2;
+
+      if (isSpectatingRef.current && spectatedPeerIdRef.current) {
+        const specPeer = webRTCManager.remotePlayers.get(spectatedPeerIdRef.current);
+        if (specPeer) {
+          focusX = specPeer.x + 12;
+          focusY = specPeer.y + 19;
+          leadX = specPeer.facingRight ? 30 : -30;
+          if (specPeer.room && specPeer.room !== currentLocation.id) {
+            const loc = BUILTIN_LOCATIONS.find(l => l.id === specPeer.room);
+            if (loc) {
+              setCurrentLocation(loc);
+            }
+          }
+        }
+      }
+
+      const targetCamX = (focusX + leadX) - viewW / 2;
+      const targetCamY = focusY - viewH / 2;
 
       // Clamp camera within the bounds of the map [0..worldWidth, 0..worldHeight]
       const maxCamX = Math.max(0, worldWidth - viewW);
@@ -2822,28 +3019,51 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         drawWorldItem(ctx, item);
       }
 
-      // 6. Draw Lizard Den and Pink Lizard
+      // 6. Draw Visible Lizard Den and Pink Lizard
+      // "і зроби ящеру свою убержку ну видиму куда даже зайти можна но игрока якого заніс туда ящер буде медлено получать урон 0.01 урон в 3 сикунди..."
       if (denData && !currentLocation.isShelterRoom) {
         ctx.save();
-        ctx.fillStyle = '#0a0a0d';
+        // Deep organic cavern cavity
+        ctx.fillStyle = '#0f0514';
         ctx.beginPath();
-        ctx.roundRect(denData.x, denData.y, denData.w, denData.h, 12);
+        ctx.roundRect(denData.x, denData.y, denData.w, denData.h, 14);
         ctx.fill();
-        ctx.strokeStyle = '#831843';
-        ctx.lineWidth = 3;
+
+        // Stalactites / organic bony arches hanging from ceiling of the den
+        ctx.fillStyle = '#2d0a35';
+        for (let i = 0; i < 5; i++) {
+          const toothX = denData.x + 8 + i * (denData.w / 5);
+          ctx.beginPath();
+          ctx.moveTo(toothX - 6, denData.y);
+          ctx.lineTo(toothX, denData.y + 16);
+          ctx.lineTo(toothX + 6, denData.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        // Biological cavern outline & entrance rim
+        ctx.strokeStyle = '#ec4899';
+        ctx.lineWidth = 2.5;
         ctx.stroke();
-        // Biological entrance glow
-        const glowRad = 16 + Math.sin(t * 3) * 3;
+
+        // Ambient pulsating bioluminescent spores/mist inside the den
+        const glowRad = 22 + Math.sin(t * 3) * 5;
         const glowGrad = ctx.createRadialGradient(
-          denData.x + denData.w / 2, denData.y + denData.h / 2, 2,
+          denData.x + denData.w / 2, denData.y + denData.h / 2, 4,
           denData.x + denData.w / 2, denData.y + denData.h / 2, glowRad
         );
-        glowGrad.addColorStop(0, 'rgba(244, 114, 182, 0.45)');
-        glowGrad.addColorStop(1, 'rgba(244, 114, 182, 0)');
+        glowGrad.addColorStop(0, 'rgba(236, 72, 153, 0.45)');
+        glowGrad.addColorStop(1, 'rgba(236, 72, 153, 0)');
         ctx.fillStyle = glowGrad;
         ctx.beginPath();
         ctx.arc(denData.x + denData.w / 2, denData.y + denData.h / 2, glowRad, 0, Math.PI * 2);
         ctx.fill();
+
+        // Den Entrance Sign
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = '#f472b6';
+        ctx.textAlign = 'center';
+        ctx.fillText('⛊ ЛІГВО ЯЩЕРА', denData.x + denData.w / 2, denData.y - 6);
         ctx.restore();
       }
 
@@ -2872,41 +3092,38 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       }
 
       // 7.05 Draw Shelter Hibernation Sleep Meter and In-World Prompts
-      if (currentLocation.isShelterRoom && !pipeTransit && !isHibernating) {
+      // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить"
+      if ((currentLocation.isShelterRoom || inShelterChamber) && !pipeTransit && !isHibernating) {
         ctx.save();
         const px = player.x + player.width / 2;
         const py = player.y - 18;
 
-        if (shelterSleepTimer > 0 && foodCount >= 4) {
-          const sleepProgress = Math.min(1, shelterSleepTimer / 2.0);
+        if (shelterSleepTimer > 0) {
+          const sleepP = Math.min(1, shelterSleepTimer / 1.5);
           ctx.strokeStyle = '#38bdf8';
           ctx.lineWidth = 3;
           ctx.beginPath();
-          ctx.arc(px, py, 11, -Math.PI / 2, -Math.PI / 2 + sleepProgress * Math.PI * 2);
+          ctx.arc(px, py - 4, 11, -Math.PI / 2, -Math.PI / 2 + sleepP * Math.PI * 2);
           ctx.stroke();
 
-          ctx.fillStyle = '#ffffff';
+          ctx.fillStyle = '#38bdf8';
           ctx.font = 'bold 9px monospace';
           ctx.textAlign = 'center';
-          ctx.fillText('Zzz...', px, py - 15);
-        } else if (player.crouching && player.isGrounded && foodCount < 4) {
-          ctx.fillStyle = '#f87171';
-          ctx.font = 'bold 8px monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(`ПОТРІБНО 4 ЇЖІ (${foodCount}/4)`, px, py - 8);
-        } else if (foodCount >= 4) {
+          ctx.fillText(`СНУ: ${Math.round(sleepP * 100)}%`, px, py - 18);
+        } else {
           const pulseAlpha = 0.5 + Math.sin(t * 3.5) * 0.35;
           ctx.fillStyle = `rgba(56, 189, 248, ${pulseAlpha})`;
           ctx.font = 'bold 8px monospace';
           ctx.textAlign = 'center';
-          ctx.fillText('⛊ ЗАТИСНІТЬ [ВНИЗ] ДЛЯ СПЛЯЧКИ', px, py - 8);
+          ctx.fillText('⛊ ЗАТИСНІТЬ [ПРИЖОК] АБО [ВНИЗ] ДЛЯ СНУ', px, py - 8);
         }
         ctx.restore();
       }
 
-      // 7.1 Draw Remote P2P Players in current location room
+      // 7.1 Draw Remote P2P Players strictly in current location room
+      // Fixes: "кожна локація це був окремий одб'єкт тоєсть щоб в просторі находились вони всі окрумо кожна в свойому місці просто не рендерились поки игрок не залізе в трубу"
       for (const rp of webRTCManager.remotePlayers.values()) {
-        if (rp.room === currentLocation.id || rp.room === distributedSimulation.currentRoom) {
+        if (rp.room === currentLocation.id) {
           renderSlugcatCharacter(ctx, rp, t, false, rp.name);
         }
       }
@@ -3634,6 +3851,26 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         ctx.fill();
       }
 
+    } else if (entity.state === 'sleeping') {
+      // Peaceful sleeping curved eyes '‿ ‿' & floating zZz
+      ctx.strokeStyle = '#0f0b12';
+      ctx.lineWidth = 2.0;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(faceX - 3.5, faceY - 1, 2.8, 0.1 * Math.PI, 0.9 * Math.PI);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(faceX + 3.5, faceY - 1, 2.8, 0.1 * Math.PI, 0.9 * Math.PI);
+      ctx.stroke();
+
+      // Floating gentle zZz
+      const zOffset = (t * 1.8) % 3;
+      ctx.font = 'bold 7px monospace';
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillText('z', headX + 8 + zOffset * 2, headY - 8 - zOffset * 4);
+      ctx.font = 'bold 9px monospace';
+      ctx.fillText('Z', headX + 12 + zOffset * 2, headY - 14 - zOffset * 4);
+
     } else {
       // Normal beady vertical eyes with blinking
       const blinkTimer = Number.isFinite(entity.blinkTimer) ? entity.blinkTimer : 0;
@@ -3812,8 +4049,43 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   };
 
   // Hibernation & Progress Persistence handler:
-  // "убержки це не просто якийсь блок а окрема локация куда нада залісти для гібернації щоб піднять карму і сохраниться (у кожного игрока свій прогрес він сохраняється только після гібернації)"
+  // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя і нічого більше тоєсть він сохранился а той игрок який ліг спать він до конца цикла наблюдатель..."
   const handleHibernate = () => {
+    // In multiplayer: player falls asleep, becomes invulnerable, saves progress, and enters spectator mode
+    if (networkStatus === 'connected' || webRTCManager.connectionStatus === 'connected') {
+      soundEngine.playKarmaAscend();
+      const newKarma = Math.min(5, playerSave.karma + 1);
+      const newCycle = playerSave.cycle + 1;
+      const newFood = Math.max(0, foodCount - 4);
+
+      const updatedSave: PlayerSaveData = {
+        karma: newKarma,
+        maxKarma: 5,
+        cycle: newCycle,
+        food: newFood,
+        lastLocationId: currentLocation.id,
+        playerSpawnX: Math.round(telemetry.x),
+        playerSpawnY: Math.round(telemetry.y),
+        hibernated: true
+      };
+
+      setPlayerSave(updatedSave);
+      setFoodCount(newFood);
+      try {
+        localStorage.setItem('rain_world_player_progress', JSON.stringify(updatedSave));
+      } catch (e) {
+        console.warn('Failed to save multiplayer sleep progress:', e);
+      }
+
+      setIsSpectating(true);
+      const living = Array.from(webRTCManager.remotePlayers.values()).filter(p => p.state !== 'dead');
+      if (living.length > 0) {
+        setSpectatedPeerId(living[0].id);
+      }
+      setLastAction("😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано.");
+      return;
+    }
+
     if (foodCount < 4) {
       setLastAction("Недостатньо їжі для гібернації! Потрібно щонайменше 4 ячейки.");
       return;
@@ -3866,6 +4138,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
   const handleSelectLocation = (loc: CustomLocationData) => {
     distributedSimulation.enterRoom(loc.id);
+    if (heldItemType) {
+      persistedHeldItemRef.current = heldItemType;
+    }
     setCurrentLocation(loc);
     setShowLocationModal(false);
     setInShelterChamber(false);
@@ -4387,6 +4662,62 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             )}
           </AnimatePresence>
 
+          {/* SPECTATOR MODE HUD - For sleeping/hibernated multiplayer observer */}
+          <AnimatePresence>
+            {isSpectating && (
+              <motion.div
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="absolute top-3 inset-x-3 sm:max-w-xl sm:mx-auto z-40 bg-black/95 border border-sky-800 text-zinc-200 px-4 py-2.5 rounded-2xl shadow-2xl flex items-center justify-between gap-3 font-mono text-xs backdrop-blur-md"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-2.5 h-2.5 rounded-full bg-sky-400 animate-ping shrink-0" />
+                  <div className="truncate text-left">
+                    <span className="text-[10px] text-sky-400 uppercase tracking-widest block font-bold">
+                      😴 СПЛЯЧКА В УКРИТТІ • РЕЖИМ СПОСТЕРІГАЧА
+                    </span>
+                    <span className="text-[11px] text-zinc-300 font-semibold truncate block">
+                      {spectatedPeerId && webRTCManager.remotePlayers.get(spectatedPeerId)
+                        ? `Спостереження: ${webRTCManager.remotePlayers.get(spectatedPeerId)?.name} (${webRTCManager.remotePlayers.get(spectatedPeerId)?.room})`
+                        : 'Очікування активних гравців у циклі...'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Player cycle buttons */}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    onClick={() => {
+                      const living = Array.from(webRTCManager.remotePlayers.values()).filter(p => p.state !== 'dead');
+                      if (living.length === 0) return;
+                      const curIdx = living.findIndex(p => p.id === spectatedPeerId);
+                      const prevIdx = (curIdx - 1 + living.length) % living.length;
+                      setSpectatedPeerId(living[prevIdx].id);
+                    }}
+                    className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-sky-300 font-bold text-[10px] cursor-pointer"
+                    title="Попередній гравець"
+                  >
+                    ←
+                  </button>
+                  <button
+                    onClick={() => {
+                      const living = Array.from(webRTCManager.remotePlayers.values()).filter(p => p.state !== 'dead');
+                      if (living.length === 0) return;
+                      const curIdx = living.findIndex(p => p.id === spectatedPeerId);
+                      const nextIdx = (curIdx + 1) % living.length;
+                      setSpectatedPeerId(living[nextIdx].id);
+                    }}
+                    className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-sky-300 font-bold text-[10px] cursor-pointer"
+                    title="Наступний гравець"
+                  >
+                    →
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
 
         </div>
       </div>
@@ -4477,6 +4808,27 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                     </div>
                     <span className="text-[8px] tracking-tight whitespace-nowrap">
                       {isEating ? 'ЇСТЬ...' : 'ЇСТИ'}
+                    </span>
+                  </button>
+                )}
+
+                {/* PIGGYBACK CARRY / DROP BUTTON ("додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз...") */}
+                {(carriedPlayerId || nearbyPickupCandidate) && (
+                  <button
+                    id="touch-ctrl-piggyback"
+                    type="button"
+                    style={{ touchAction: 'none' }}
+                    {...getActionTouchHandlers(triggerPiggybackRef)}
+                    className={`h-13 sm:h-15 px-2.5 rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
+                      carriedPlayerId
+                        ? 'bg-purple-950/90 border-purple-400 text-purple-200 animate-pulse shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                        : 'bg-indigo-950/90 hover:bg-indigo-900 border-indigo-400 text-indigo-200 shadow-[0_0_12px_rgba(129,140,248,0.3)]'
+                    }`}
+                    title={carriedPlayerId ? 'Скинути гравця зі спини (G)' : 'Взяти гравця на спину (G)'}
+                  >
+                    <User className="w-3.5 h-3.5 mb-0.5" />
+                    <span className="text-[7.5px] tracking-tight whitespace-nowrap">
+                      {carriedPlayerId ? 'СКИНУТИ' : 'НА СПИНУ'}
                     </span>
                   </button>
                 )}

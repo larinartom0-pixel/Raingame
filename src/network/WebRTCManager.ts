@@ -519,6 +519,8 @@ export class WebRTCManager {
           crouching: !!packet.crouching,
           isClimbing: !!packet.isClimbing,
           isGrounded: !!packet.isGrounded,
+          carriedBy: packet.carriedBy ?? null,
+          carryingPeerId: packet.carryingPeerId ?? null,
           lastUpdateTimestamp: Date.now(),
           pingMs: 25,
           head: safeHead,
@@ -544,6 +546,8 @@ export class WebRTCManager {
         rp.crouching = !!packet.crouching;
         rp.isClimbing = !!packet.isClimbing;
         rp.isGrounded = !!packet.isGrounded;
+        rp.carriedBy = packet.carriedBy ?? null;
+        rp.carryingPeerId = packet.carryingPeerId ?? null;
         rp.head = safeHead;
         rp.chest = safeChest;
         rp.hips = safeHips;
