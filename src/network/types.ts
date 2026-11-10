@@ -187,4 +187,10 @@ export type NetworkPacket =
       type: 'PONG';
       senderId: string;
       originalTimestamp: number;
+    }
+  | {
+      type: 'PVP_COMBAT_TRIGGER';
+      senderId: string;
+      targetId: string;
+      room: string;
     };

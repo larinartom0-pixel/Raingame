@@ -5,7 +5,7 @@ import {
   Skull, RotateCcw, AlertTriangle, Activity, X, 
   Sword, CircleDot, User, PlusCircle, Trash2, Crosshair,
   ZoomIn, ZoomOut, Gamepad2, Eye, EyeOff, Maximize2, Minimize2,
-  Map, Compass, Globe, Users, Clock, Wifi, ExternalLink,
+  Map as MapIcon, Compass, Globe, Users, Clock, Wifi, ExternalLink,
   Shield, Home, Lock, Unlock, CloudRain, Layers, Moon
 } from 'lucide-react';
 import { soundEngine } from './RainWorldSynth';
@@ -134,6 +134,12 @@ interface DebugTelemetry {
   eatingProgress: number;
   fps: number;
   particles: number;
+}
+
+export interface LizardStoreEntry {
+  id: string;
+  roomId: string;
+  lizard: PinkLizard;
 }
 
 export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, customLocation }: OutskirtsLocationProps) {
@@ -324,6 +330,20 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   // Persisted held item across room changes
   // "пофікси пропажі предметів з рук коли переходиш между локациями"
   const persistedHeldItemRef = useRef<ItemType | null>(null);
+
+  // Cycle items persistence cache across room switches
+  // "комнати ресетаються коли заходиш в них ну наприклад я ї'ів ягоду і ушол пришол а вона чогось вернулась на місце"
+  const cycleRoomItemsCache = useRef<Map<string, WorldItem[]>>(new Map());
+
+  // Cycle world lizards persistence and ambient simulation across rooms
+  // "ящери чогось нічого не роблять пока в тій комнаті нема игрока хоча всі комнати должні работать даже єслі нема игрока просто в упрощоном виді"
+  const cycleLizardsRef = useRef<Map<string, LizardStoreEntry>>(new Map());
+
+  // 60-second Combat Music timers: Lizard proximity & PvP throw trajectory
+  // "Також єслі ящер рядом то стартує 60 сикундний таймер боя... а з игроками лиге тоді єслі хтото з них кинул придмет в другого єслі гра замітила що по такій траекторії всеодно буде попадания тогда в двох гравців музика боя з таймером 60 сикунд... в разних комнатах в 3 раза бистреє"
+  const lizardCombatTimerRef = useRef<number>(0);
+  const pvpCombatTimerRef = useRef<number>(0);
+  const pvpTargetPeerIdRef = useRef<string | null>(null);
 
   // Piggyback carrying mechanic
   // "додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз..."
@@ -615,16 +635,41 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       spawnX: 840,
       spawnY: 130
     };
-    // Randomized Lizard Spawn per room ("розмісти для кожної локації спавн ящера рамдомним...")
-    const lizardShouldSpawn = !currentLocation.isShelterRoom && (Math.random() < 0.70);
-    const lizardSpawnX = !lizardShouldSpawn ? -999 : (denData.spawnX || 840);
-    const lizardSpawnY = !lizardShouldSpawn ? -999 : (denData.spawnY || 130);
-    const pinkLizard: PinkLizard | null = lizardShouldSpawn 
-      ? new PinkLizard(`pink-lizard-${currentLocation.id}`, lizardSpawnX, lizardSpawnY)
-      : null;
 
-    // Items list in the world with Randomized Cyclic Spawning:
-    // "додать рандомний спавн вещей не типа деякі вещі не появляться а деякі появились на позиціях в началі Циклу"
+    // Cycle world lizards initialization across all rooms:
+    // "розмісти для кожної локації спавн ящера рамдомним типа десь він не появился десь він появился"
+    if (cycleLizardsRef.current.size === 0) {
+      for (const loc of BUILTIN_LOCATIONS) {
+        if (!loc.isShelterRoom && Math.random() < 0.70) {
+          const locDen = loc.lizardDen ?? {
+            x: 860,
+            y: 110,
+            w: 75,
+            h: 65,
+            spawnX: 840,
+            spawnY: 130
+          };
+          const liz = new PinkLizard(`pink-lizard-${loc.id}`, locDen.spawnX, locDen.spawnY);
+          cycleLizardsRef.current.set(loc.id, {
+            id: `pink-lizard-${loc.id}`,
+            roomId: loc.id,
+            lizard: liz
+          });
+        }
+      }
+    }
+
+    // Active lizard currently inhabiting this room (may have migrated via pipes!):
+    let currentLizardEntry: LizardStoreEntry | null = null;
+    cycleLizardsRef.current.forEach(entry => {
+      if (entry.roomId === currentLocation.id) {
+        currentLizardEntry = entry;
+      }
+    });
+    const pinkLizard: PinkLizard | null = currentLizardEntry ? (currentLizardEntry as LizardStoreEntry).lizard : null;
+
+    // Items list in the world with Randomized Cyclic Spawning and Inter-Room Persistence:
+    // "комнати ресетаються коли заходиш в них ну наприклад я ї'ів ягоду і ушол пришол а вона чогось вернулась на місце"
     let itemIdCounter = 1;
     const baseCandidateItems = currentLocation.items && currentLocation.items.length > 0
       ? currentLocation.items
@@ -665,25 +710,45 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       setHeldItemType(persistedType);
       persistedHeldItemRef.current = null;
     }
-    baseCandidateItems.forEach((cand, idx) => {
-      // First 2 items have high spawn chance (0.95) to ensure player finds arms, other items 0.65
-      const spawnChance = idx < 2 ? 0.95 : 0.65;
-      if (Math.random() <= spawnChance) {
-        items.push({
-          id: (cand as any).id || `item-${itemIdCounter++}`,
-          type: cand.type as ItemType,
-          x: cand.x,
-          y: cand.y,
-          vx: 0,
-          vy: 0,
-          rotation: cand.type === 'spear' ? 0.1 : 0,
-          isHeld: false,
-          isStuck: false,
-          isAirborne: false,
-          sleeping: true,
-        });
+
+    if (cycleRoomItemsCache.current.has(currentLocation.id)) {
+      // Room items have already been spawned during this cycle - load existing state
+      const cached = cycleRoomItemsCache.current.get(currentLocation.id)!;
+      for (const cit of cached) {
+        items.push({ ...cit });
       }
-    });
+    } else {
+      // First visit in this cycle: randomly spawn items based on candidate locations
+      baseCandidateItems.forEach((cand, idx) => {
+        const spawnChance = idx < 2 ? 0.95 : 0.65;
+        if (Math.random() <= spawnChance) {
+          items.push({
+            id: (cand as any).id || `item-${itemIdCounter++}`,
+            type: cand.type as ItemType,
+            x: cand.x,
+            y: cand.y,
+            vx: 0,
+            vy: 0,
+            rotation: cand.type === 'spear' ? 0.1 : 0,
+            isHeld: false,
+            isStuck: false,
+            isAirborne: false,
+            sleeping: true,
+          });
+        }
+      });
+      cycleRoomItemsCache.current.set(
+        currentLocation.id,
+        items.filter(it => !it.isHeld || it.heldBy !== 'player').map(it => ({ ...it }))
+      );
+    }
+
+    const syncRoomItemsCache = () => {
+      cycleRoomItemsCache.current.set(
+        currentLocation.id,
+        items.filter(it => !it.isHeld || it.heldBy !== 'player').map(it => ({ ...it }))
+      );
+    };
 
     // If entering as a client in an existing multiplayer room, clear local static items
     // so we don't display starting positions before the host sends authoritative world items!
@@ -709,6 +774,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         sleeping: false,
       };
       items.push(newItem);
+      syncRoomItemsCache();
       soundEngine.playPickup();
       const typeLabel = type === 'spear' ? 'Спис' : type === 'rock' ? 'Камінь' : 'Ягоду';
       setLastAction(`Заспавнено: ${typeLabel} на (${Math.round(sx)}, ${Math.round(sy)})`);
@@ -888,6 +954,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         } else {
           setLastAction(`Підібрано: ${typeLabel} (Клавіша X або кнопка КИД)`);
         }
+        syncRoomItemsCache();
       }
     };
 
@@ -939,8 +1006,48 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         item.rotation = 0;
       }
 
+      // PvP Threat Detection via Trajectory Prediction:
+      // "а з игроками лиге тоді єслі хтото з них кинул придмет в другого єслі гра замітила що по такій траекторії всеодно буде попадания тогда в двох гравців музика боя з таймером 60 сикунд який ресетається при кожном броскі"
+      if (item.type === 'spear' || item.type === 'rock') {
+        const speed = Math.hypot(item.vx, item.vy);
+        if (speed > 1) {
+          const dirX = item.vx / speed;
+          const dirY = item.vy / speed;
+
+          for (const rp of webRTCManager.remotePlayers.values()) {
+            if (rp.state === 'dead' || rp.room !== currentLocation.id) continue;
+            const tx = rp.x + 12;
+            const ty = rp.y + 19;
+            const dx = tx - item.x;
+            const dy = ty - item.y;
+
+            // Projection onto throw direction
+            const proj = dx * dirX + dy * dirY;
+            if (proj > 10 && proj < 750) {
+              const closestX = item.x + dirX * proj;
+              const closestY = item.y + dirY * proj;
+              const perpDist = Math.hypot(tx - closestX, ty - closestY);
+              // Hitbox threshold
+              if (perpDist < 38) {
+                // Trajectory predicted hit!
+                pvpCombatTimerRef.current = 60.0;
+                pvpTargetPeerIdRef.current = rp.id;
+                webRTCManager.broadcastPacket({
+                  type: 'PVP_COMBAT_TRIGGER',
+                  senderId: webRTCManager.localPlayerId,
+                  targetId: rp.id,
+                  room: currentLocation.id
+                });
+                break;
+              }
+            }
+          }
+        }
+      }
+
       player.heldItem = null;
       setHeldItemType(null);
+      syncRoomItemsCache();
       soundEngine.playThrow();
       const typeLabel = item.type === 'spear' ? 'Спис' : item.type === 'rock' ? 'Камінь' : 'Ягоду';
       setLastAction(`Кинуто: ${typeLabel}!`);
@@ -1071,8 +1178,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         pinkLizard.hp = 3.5;
         pinkLizard.state = 'patrol';
         pinkLizard.stunTimer = 0;
-        pinkLizard.x = lizardSpawnX;
-        pinkLizard.y = lizardSpawnY;
+        pinkLizard.x = denData.spawnX || 840;
+        pinkLizard.y = denData.spawnY || 130;
         setLastAction('Ящера відновлено (3.5 HP)!');
       }
     };
@@ -1157,6 +1264,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           it.vy = -1;
         }
       });
+      // Reset cycle items and creatures upon death respawn
+      cycleRoomItemsCache.current.clear();
+      cycleLizardsRef.current.clear();
+      lizardCombatTimerRef.current = 0;
+      pvpCombatTimerRef.current = 0;
+      pvpTargetPeerIdRef.current = null;
       setLastAction('Слимакокіт відродився! Карма знизилась через загибель у циклі.');
       setIsDead(false);
       soundEngine.resetConcussion();
@@ -1248,7 +1361,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       } else {
         applyHit(player, 'rock');
       }
-      combatTensionTimer = 8.0;
+      pvpCombatTimerRef.current = 60.0;
+      pvpTargetPeerIdRef.current = hit.attackerId;
       musicManager.playCategory('battle');
     });
 
@@ -1295,12 +1409,34 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             items.push(remoteItem);
           }
 
+          // Check if remote throw trajectory aims at local player
+          const speed = Math.hypot(packet.vx, packet.vy);
+          if (speed > 1 && player.state !== 'dead') {
+            const dirX = packet.vx / speed;
+            const dirY = packet.vy / speed;
+            const tx = player.x + 12;
+            const ty = player.y + 19;
+            const dx = tx - packet.x;
+            const dy = ty - packet.y;
+            const proj = dx * dirX + dy * dirY;
+            if (proj > 10 && proj < 750) {
+              const closestX = packet.x + dirX * proj;
+              const closestY = packet.y + dirY * proj;
+              const perpDist = Math.hypot(tx - closestX, ty - closestY);
+              if (perpDist < 38) {
+                pvpCombatTimerRef.current = 60.0;
+                pvpTargetPeerIdRef.current = packet.senderId;
+              }
+            }
+          }
+
           // Clear held item in remote player's paws
           const rp = webRTCManager.remotePlayers.get(packet.senderId);
           if (rp) {
             rp.heldItem = null;
           }
 
+          syncRoomItemsCache();
           soundEngine.playThrow();
           setLastAction(`Гравець кинув ${packet.itemType === 'spear' ? 'спис' : 'камінь'}!`);
         }
@@ -1324,6 +1460,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           if (rp) {
             rp.heldItem = packet.itemType;
           }
+          syncRoomItemsCache();
           soundEngine.playPickup();
         }
       } else if (packet.type === 'ITEM_DROP') {
@@ -1359,6 +1496,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           if (rp) {
             rp.heldItem = null;
           }
+          syncRoomItemsCache();
           soundEngine.playPickup();
         }
       } else if (packet.type === 'ITEM_CONSUMED') {
@@ -1371,6 +1509,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           if (rp) {
             rp.heldItem = null;
           }
+          syncRoomItemsCache();
+        }
+      } else if (packet.type === 'PVP_COMBAT_TRIGGER') {
+        // Opponent threw aimed projectile at us or we are the intended target!
+        if (packet.targetId === webRTCManager.localPlayerId || packet.senderId === pvpTargetPeerIdRef.current) {
+          pvpCombatTimerRef.current = 60.0;
+          pvpTargetPeerIdRef.current = packet.senderId;
         }
       } else if (packet.type === 'ITEMS_SYNC') {
         if (packet.room === distributedSimulation.currentRoom && !webRTCManager.isRoomHost) {
@@ -1652,11 +1797,16 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             // Lizard crawled through pipe into another room!
             // "улучшить ии ящера щоб он міг перемещаться по локациях по трубах"
             const targetLoc = BUILTIN_LOCATIONS.find(l => l.id === targetRoomId);
-            if (targetLoc) {
+            if (targetLoc && currentLizardEntry) {
               setLastAction(`Ящер проліз через трубу у кімнату: ${targetLoc.name}!`);
-              // Move lizard out of current room view
-              pinkLizard.x = -999;
-              pinkLizard.y = -999;
+              currentLizardEntry.roomId = targetRoomId;
+              if (spawnX !== undefined && spawnY !== undefined) {
+                pinkLizard.x = spawnX;
+                pinkLizard.y = spawnY;
+              } else {
+                pinkLizard.x = targetLoc.playerSpawn?.x ?? 200;
+                pinkLizard.y = targetLoc.playerSpawn?.y ?? 300;
+              }
             }
           },
           () => {
@@ -1665,6 +1815,55 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           }
         );
       }
+
+      // ---------------- Ambient World Simulation for Lizards in Other Rooms ----------------
+      // "ящери чогось нічого не роблять пока в тій комнаті нема игрока хоча всі комнати должні работать даже єслі нема игрока просто в упрощоном виді"
+      cycleLizardsRef.current.forEach((entry: LizardStoreEntry) => {
+        if (entry.roomId === currentLocation.id) return;
+        const ambLiz = entry.lizard;
+        if (ambLiz.state === 'dead') return;
+
+        if (ambLiz.stunTimer > 0) {
+          ambLiz.stunTimer = Math.max(0, ambLiz.stunTimer - delta);
+          if (ambLiz.stunTimer === 0 && ambLiz.state === 'stunned') {
+            ambLiz.state = 'patrol';
+          }
+          return;
+        }
+
+        if (ambLiz.pipeCooldown > 0) {
+          ambLiz.pipeCooldown -= delta;
+        }
+
+        // Ambient patrol locomotion
+        ambLiz.x += (ambLiz.facingRight ? 1 : -1) * (delta * 95);
+        const roomDef = BUILTIN_LOCATIONS.find(l => l.id === entry.roomId);
+        const roomWidth = roomDef ? roomDef.width : 1200;
+        if (ambLiz.x < 60) {
+          ambLiz.x = 60;
+          ambLiz.facingRight = true;
+        } else if (ambLiz.x > roomWidth - 80) {
+          ambLiz.x = roomWidth - 80;
+          ambLiz.facingRight = false;
+        }
+
+        // Ambient inter-room pipe transit
+        if (ambLiz.pipeCooldown <= 0 && roomDef && roomDef.transitPipes && roomDef.transitPipes.length > 0) {
+          const interPipes = roomDef.transitPipes.filter(p => !!p.targetLocationId);
+          if (interPipes.length > 0 && Math.random() < 0.0035) {
+            const chosenPipe = interPipes[Math.floor(Math.random() * interPipes.length)];
+            if (chosenPipe.targetLocationId) {
+              entry.roomId = chosenPipe.targetLocationId;
+              ambLiz.pipeCooldown = 12.0;
+              const destRoom = BUILTIN_LOCATIONS.find(l => l.id === chosenPipe.targetLocationId);
+              ambLiz.x = chosenPipe.targetSpawnX ?? (destRoom?.playerSpawn?.x ?? 200);
+              ambLiz.y = chosenPipe.targetSpawnY ?? (destRoom?.playerSpawn?.y ?? 300);
+              ambLiz.vx = 0;
+              ambLiz.vy = 0;
+            }
+          }
+        }
+      });
 
       // ---------------- Visible Lizard Den Mechanics ----------------
       // "і зроби ящеру свою убержку ну видиму куда даже зайти можна но игрока якого заніс туда ящер буде медлено получать урон 0.01 урон в 3 сикунди та стан ставитиметься на паузу поки він там"
@@ -1700,26 +1899,34 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       // "чим менше хп тип приглушоней звук ну ніби під водою"
       musicManager.setHealthFilter(player.hp / player.maxHp);
 
-      // ---------------- Dynamic Music Category Switching with Hysteresis ----------------
+      // ---------------- Dynamic Music Category Switching with Exact 60s Timers ----------------
+      // Lizard Proximity Combat Timer:
+      // "Також єслі ящер рядом то стартує 60 сикундний таймер боя даже єслі він не агресивний поки цей таймер іде музика боя не завершається"
+      if (pinkLizard && pinkLizard.state !== 'dead') {
+        const distToLizard = Math.hypot((player.x + 12) - (pinkLizard.x + 26), (player.y + 19) - (pinkLizard.y + 12));
+        if (distToLizard < 480 || pinkLizard.grabbedTarget === 'player' || pinkLizard.state === 'hunt') {
+          lizardCombatTimerRef.current = 60.0;
+        }
+      }
+
+      if (lizardCombatTimerRef.current > 0) {
+        lizardCombatTimerRef.current = Math.max(0, lizardCombatTimerRef.current - delta);
+      }
+
+      // PvP Combat Timer (drains 3x faster if players are in different rooms):
+      // "єслі вони находяться в разних комнатах воно таймер іде в 3 раза бистреє"
+      if (pvpCombatTimerRef.current > 0) {
+        const targetPeer = pvpTargetPeerIdRef.current ? webRTCManager.remotePlayers.get(pvpTargetPeerIdRef.current) : null;
+        const inSameRoom = targetPeer && targetPeer.room === currentLocation.id;
+        const drainRate = inSameRoom ? 1.0 : 3.0;
+        pvpCombatTimerRef.current = Math.max(0, pvpCombatTimerRef.current - delta * drainRate);
+      }
+
       musicCheckTimer += delta;
-      if (musicCheckTimer > 0.4) {
+      if (musicCheckTimer > 0.3) {
         musicCheckTimer = 0;
-        let inThreatRange = false;
-        if (pinkLizard && pinkLizard.state !== 'dead') {
-          const distToLizard = Math.hypot((player.x + 12) - (pinkLizard.x + 26), (player.y + 19) - (pinkLizard.y + 12));
-          if (distToLizard < 380 || pinkLizard.grabbedTarget === 'player' || pinkLizard.state === 'hunt') {
-            inThreatRange = true;
-          }
-        }
-
-        if (inThreatRange) {
-          combatTensionTimer = 6.0; // Sustain battle music for at least 6s once provoked
-        } else if (combatTensionTimer > 0) {
-          combatTensionTimer -= 0.4;
-        }
-
-        const targetCat = combatTensionTimer > 0 ? 'battle' : 'game';
-        musicManager.playCategory(targetCat);
+        const inCombat = (lizardCombatTimerRef.current > 0) || (pvpCombatTimerRef.current > 0);
+        musicManager.playCategory(inCombat ? 'battle' : 'game');
       }
 
       // ---------------- Player Physics Updates ----------------
@@ -2356,7 +2563,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 }
                 // Attacker calculates hit with 100% authority!
                 distributedSimulation.registerClientSideHit(rp.id, item.type, item.x, item.y);
-                combatTensionTimer = 8.0;
+                pvpCombatTimerRef.current = 60.0;
+                pvpTargetPeerIdRef.current = rp.id;
                 musicManager.playCategory('battle');
                 if (item.type === 'spear') {
                   item.isAirborne = false;
@@ -2495,6 +2703,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             if (bIdx >= 0) {
               items.splice(bIdx, 1);
             }
+            syncRoomItemsCache();
 
             // Broadcast berry consumption across WebRTC
             if (consumedBerry) {
@@ -3190,6 +3399,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     tick();
 
     return () => {
+      syncRoomItemsCache();
       cancelAnimationFrame(animId);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
@@ -4127,6 +4337,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       setStormSeconds(0);
       soundEngine.setStormVolume(0);
 
+      // Reset cycle items and creatures for the new fresh cycle!
+      cycleRoomItemsCache.current.clear();
+      cycleLizardsRef.current.clear();
+      lizardCombatTimerRef.current = 0;
+      pvpCombatTimerRef.current = 0;
+      pvpTargetPeerIdRef.current = null;
+
       setTimeout(() => {
         setIsHibernating(false);
         setInShelterChamber(false);
@@ -4217,7 +4434,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             className="px-2 py-1.5 rounded-lg border border-amber-800/60 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 text-xs font-mono tracking-wider shadow-sm active:scale-95"
             title="Переглянути та обрати готові локації Rain World"
           >
-            <Map className="w-3.5 h-3.5 text-amber-400" />
+            <MapIcon className="w-3.5 h-3.5 text-amber-400" />
             <span className="font-bold hidden sm:inline">{currentLocation.name.split(' (')[0]}</span>
             <span className="text-[10px] text-zinc-500">▾</span>
           </button>

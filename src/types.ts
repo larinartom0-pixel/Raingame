@@ -185,6 +185,7 @@ export const DRAINAGE_SYSTEM_LOCATION: CustomLocationData = {
   height: 800,
   playerSpawn: { x: 100, y: 400 },
   npcSpawn: { x: 1350, y: 700 },
+  lizardDen: { x: 1380, y: 640, w: 80, h: 70, spawnX: 1350, spawnY: 670 },
   platforms: [
     // Bottom reservoir floor
     { id: 'ds-ground-1', x: 0, y: 740, w: 600, h: 60, type: 'concrete', label: 'Дренаж-Захід' },
@@ -285,6 +286,7 @@ export const INDUSTRIAL_COMPLEX_LOCATION: CustomLocationData = {
   height: 900,
   playerSpawn: { x: 150, y: 650 },
   npcSpawn: { x: 1400, y: 650 },
+  lizardDen: { x: 1420, y: 590, w: 80, h: 70, spawnX: 1400, spawnY: 620 },
   platforms: [
     // Bottom foundation
     { id: 'hi-ground', x: 0, y: 820, w: 1800, h: 80, type: 'concrete', label: 'ПРОМ-ЗОНА' },
@@ -412,6 +414,7 @@ export const GARBAGE_WASTES_LOCATION: CustomLocationData = {
   height: 700,
   playerSpawn: { x: 140, y: 550 },
   npcSpawn: { x: 1150, y: 580 },
+  lizardDen: { x: 1180, y: 520, w: 80, h: 70, spawnX: 1150, spawnY: 550 },
   platforms: [
     // Scrap floor
     { id: 'gw-ground', x: 0, y: 620, w: 1400, h: 80, type: 'concrete', label: 'КУПИ МЕТАЛОБРУХТУ' },
