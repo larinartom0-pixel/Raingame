@@ -359,6 +359,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   // Sleep indicator and multiplayer Spectator Mode
   // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя... наблюдатель"
   const [sleepProgress, setSleepProgress] = useState<number>(0);
+  const [isHoldingSleepBtn, setIsHoldingSleepBtn] = useState<boolean>(false);
+  const isHoldingSleepBtnRef = useRef<boolean>(false);
   const [isSpectating, setIsSpectating] = useState<boolean>(false);
   const isSpectatingRef = useRef(false);
   useEffect(() => {
@@ -476,6 +478,16 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   const [networkPing, setNetworkPing] = useState<number>(0);
   const [networkStatus, setNetworkStatus] = useState<'disconnected' | 'signaling' | 'connected' | 'error'>('disconnected');
 
+  // Unified multiplayer check across room participation, signaling, connected peers, and host
+  // "убери кнопку респавна в мультиплеєрі та остав цю кнопку в синг плеєрі"
+  const isMultiplayerActive = Boolean(
+    webRTCManager.currentRoomId ||
+    networkStatus === 'connected' ||
+    networkStatus === 'signaling' ||
+    webRTCManager.connectionStatus === 'connected' ||
+    connectedPeersCount > 0
+  );
+
   // Camera Zoom & Dynamic Tracking state
   const [zoomLevel, setZoomLevel] = useState<number>(1.65);
   const zoomRef = useRef<number>(1.65);
@@ -523,6 +535,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   const triggerThrowRef = useRef<(() => void) | null>(null);
   const triggerEatRef = useRef<(() => void) | null>(null);
   const triggerHibernateRef = useRef<(() => void) | null>(null);
+  const triggerChangeLocationRef = useRef<((loc: CustomLocationData) => void) | null>(null);
 
   const worldWidth = currentLocation.width || 1000;
   const worldHeight = currentLocation.height || 580;
@@ -659,14 +672,23 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       }
     }
 
-    // Active lizard currently inhabiting this room (may have migrated via pipes!):
+    // Active lizard currently inhabiting this room (dynamically tracks pipe migration!):
+    // "ящери щоб могли по трубам перемещаться і между комнатами"
     let currentLizardEntry: LizardStoreEntry | null = null;
-    cycleLizardsRef.current.forEach(entry => {
-      if (entry.roomId === currentLocation.id) {
-        currentLizardEntry = entry;
+    let pinkLizard: PinkLizard | null = null;
+
+    const refreshActiveRoomLizard = () => {
+      currentLizardEntry = null;
+      pinkLizard = null;
+      for (const entry of cycleLizardsRef.current.values()) {
+        if (entry.roomId === currentLocation.id) {
+          currentLizardEntry = entry;
+          pinkLizard = entry.lizard;
+          break;
+        }
       }
-    });
-    const pinkLizard: PinkLizard | null = currentLizardEntry ? (currentLizardEntry as LizardStoreEntry).lizard : null;
+    };
+    refreshActiveRoomLizard();
 
     // Items list in the world with Randomized Cyclic Spawning and Inter-Room Persistence:
     // "комнати ресетаються коли заходиш в них ну наприклад я ї'ів ягоду і ушол пришол а вона чогось вернулась на місце"
@@ -1628,7 +1650,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
       // Quick Respawn on 'R' if dead (Singleplayer only!)
       // "убери кнопку респавна в мультиплеєрі та остав цю кнопку в синг плеєрі"
-      if ((e.key === 'r' || e.key === 'R') && player.state === 'dead' && webRTCManager.connectionStatus !== 'connected') {
+      if ((e.key === 'r' || e.key === 'R') && player.state === 'dead' && !isMultiplayerActive) {
         triggerReviveRef.current?.();
         return;
       }
@@ -1735,7 +1757,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       if (frameCounter % 30 === 0) {
         currentFps = Math.round(1 / delta);
       }
-
+      refreshActiveRoomLizard();
       const ctrl = controlsRef.current;
 
       // ---------------- Player State Updates ----------------
@@ -1800,18 +1822,26 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             if (targetLoc && currentLizardEntry) {
               setLastAction(`Ящер проліз через трубу у кімнату: ${targetLoc.name}!`);
               currentLizardEntry.roomId = targetRoomId;
-              if (spawnX !== undefined && spawnY !== undefined) {
-                pinkLizard.x = spawnX;
-                pinkLizard.y = spawnY;
-              } else {
-                pinkLizard.x = targetLoc.playerSpawn?.x ?? 200;
-                pinkLizard.y = targetLoc.playerSpawn?.y ?? 300;
+              const lizX = spawnX ?? (targetLoc.playerSpawn?.x ?? 200);
+              const lizY = spawnY ?? (targetLoc.playerSpawn?.y ?? 300);
+              pinkLizard.x = lizX;
+              pinkLizard.y = lizY;
+
+              if (pinkLizard.grabbedTarget === 'player') {
+                player.x = lizX;
+                player.y = lizY;
+                if (triggerChangeLocationRef.current) {
+                  triggerChangeLocationRef.current(targetLoc);
+                } else {
+                  handleSelectLocation(targetLoc);
+                }
               }
             }
           },
           () => {
             // Prey deposited in lizard den!
-            setLastAction("Ящер затягнув здобич у своє лігво та залишив там!");
+            // "залазив туда з играком оставлял його там вилазил і уходил дальше полювать"
+            setLastAction("Ящер заліз у лігво, залишив здобич, виліз назовні та пішов далі полювати!");
           }
         );
       }
@@ -1867,11 +1897,14 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
       // ---------------- Visible Lizard Den Mechanics ----------------
       // "і зроби ящеру свою убержку ну видиму куда даже зайти можна но игрока якого заніс туда ящер буде медлено получать урон 0.01 урон в 3 сикунди та стан ставитиметься на паузу поки він там"
-      const isInsideLizardDen = !currentLocation.isShelterRoom && denData && (
-        player.x + 12 >= denData.x &&
-        player.x + 12 <= denData.x + denData.w &&
-        player.y + 19 >= denData.y &&
-        player.y + 19 <= denData.y + denData.h
+      const isInsideLizardDen = Boolean(
+        currentLocation.isLizardDenRoom ||
+        (!currentLocation.isShelterRoom && denData && (
+          player.x + 12 >= denData.x &&
+          player.x + 12 <= denData.x + denData.w &&
+          player.y + 19 >= denData.y &&
+          player.y + 19 <= denData.y + denData.h + 24
+        ))
       );
 
       if (isInsideLizardDen && player.state !== 'dead') {
@@ -1943,8 +1976,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
         // Passive damage over time WITHOUT stun:
         // Strictly 60 seconds to kill full-health player (1.0 HP)
-        // Protected if inside shelter chamber or dedicated shelter room!
-        if (!inShelterChamberRef.current && !currentLocation.isShelterRoom && player.state === 'normal') {
+        // Protected if inside shelter chamber or dedicated shelter room or subterranean lizard den!
+        if (!inShelterChamberRef.current && !currentLocation.isShelterRoom && !currentLocation.isLizardDenRoom && player.state === 'normal') {
           const dps = 1.0 / 60.0;
           player.hp = Math.max(0, player.hp - dps * delta);
           if (player.hp <= 0) {
@@ -2333,13 +2366,16 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         // Dedicated Shelter Room physical hibernation:
         // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя..."
         if ((currentLocation.isShelterRoom || inShelterChamber) && canControl && !isHibernating && !pipeTransit) {
-          const isHoldingSleep = ctrl.jump || ctrl.down || player.crouching;
-          if (isHoldingSleep && player.isGrounded && Math.abs(player.vx) < 1.8) {
+          const isHoldingSleep = ctrl.jump || ctrl.down || player.crouching || isHoldingSleepBtnRef.current;
+          if (isHoldingSleep && player.isGrounded) {
+            player.vx *= 0.5; // settle into resting posture
             shelterSleepTimer += delta;
             setSleepProgress(Math.min(1, shelterSleepTimer / 1.5));
             if (shelterSleepTimer >= 1.5) {
               shelterSleepTimer = 0;
               setSleepProgress(0);
+              isHoldingSleepBtnRef.current = false;
+              setIsHoldingSleepBtn(false);
               triggerHibernateRef.current?.();
             }
           } else {
@@ -3060,15 +3096,16 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         ctx.save();
         const isInterRoom = !!pipe.targetLocationId;
         const isShelter = !!pipe.isShelterPipe;
+        const isDen = !!pipe.isDenPipe;
 
         // Helper to draw authentic Rain World pipe portal
-        const drawPipePortal = (x: number, y: number, shelter: boolean, targetX: number, targetY: number) => {
+        const drawPipePortal = (x: number, y: number, shelter: boolean, targetX: number, targetY: number, den?: boolean) => {
           // Outer rubber seal collar
           ctx.fillStyle = '#1e293b';
           ctx.beginPath();
           ctx.arc(x, y, 14, 0, Math.PI * 2);
           ctx.fill();
-          ctx.strokeStyle = shelter ? '#0284c7' : '#047857';
+          ctx.strokeStyle = shelter ? '#0284c7' : (den ? '#ec4899' : '#047857');
           ctx.lineWidth = 2.5;
           ctx.stroke();
 
@@ -3084,6 +3121,11 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             ctx.font = 'bold 10px monospace';
             ctx.textAlign = 'center';
             ctx.fillText('⛊', x, y + 3.5);
+          } else if (den) {
+            ctx.fillStyle = '#f472b6';
+            ctx.font = 'bold 11px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('▼', x, y + 3.5);
           } else {
             const angle = Math.atan2(targetY - y, targetX - x);
             const alpha = 0.5 + Math.sin(t * 5 + idx) * 0.45;
@@ -3096,7 +3138,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
         if (!isInterRoom) {
           // Internal room shortcut: draw full heavy conduit between both ends
-          ctx.strokeStyle = '#064e3b';
+          ctx.strokeStyle = isDen ? '#831843' : '#064e3b';
           ctx.lineWidth = 14;
           ctx.lineCap = 'round';
           ctx.beginPath();
@@ -3104,7 +3146,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           ctx.lineTo(pipe.endX, pipe.endY);
           ctx.stroke();
 
-          ctx.strokeStyle = '#022c22';
+          ctx.strokeStyle = isDen ? '#500724' : '#022c22';
           ctx.lineWidth = 8;
           ctx.stroke();
 
@@ -3112,18 +3154,18 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           const pulseRatio = (t * 1.5 + idx * 0.4) % 1;
           const pulseX = pipe.startX + (pipe.endX - pipe.startX) * pulseRatio;
           const pulseY = pipe.startY + (pipe.endY - pipe.startY) * pulseRatio;
-          ctx.fillStyle = '#34d399';
+          ctx.fillStyle = isDen ? '#f472b6' : '#34d399';
           ctx.beginPath();
           ctx.arc(pulseX, pulseY, 2.5, 0, Math.PI * 2);
           ctx.fill();
 
-          drawPipePortal(pipe.startX, pipe.startY, false, pipe.endX, pipe.endY);
-          drawPipePortal(pipe.endX, pipe.endY, false, pipe.startX, pipe.startY);
+          drawPipePortal(pipe.startX, pipe.startY, false, pipe.endX, pipe.endY, isDen);
+          drawPipePortal(pipe.endX, pipe.endY, false, pipe.startX, pipe.startY, isDen);
         } else {
-          // INTER-REGION TRANSIT PIPE OR SHELTER ENTRANCE
+          // INTER-REGION TRANSIT PIPE OR SHELTER ENTRANCE OR DEN ENTRANCE
           // Lead conduit off into the wall/perimeter
           const anchorDirX = pipe.startX > (worldWidth / 2) ? 1 : -1;
-          ctx.strokeStyle = isShelter ? '#0c4a6e' : '#064e3b';
+          ctx.strokeStyle = isShelter ? '#0c4a6e' : (isDen ? '#831843' : '#064e3b');
           ctx.lineWidth = 16;
           ctx.lineCap = 'round';
           ctx.beginPath();
@@ -3131,11 +3173,11 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           ctx.lineTo(pipe.startX + anchorDirX * 22, pipe.startY);
           ctx.stroke();
 
-          ctx.strokeStyle = isShelter ? '#0284c7' : '#047857';
+          ctx.strokeStyle = isShelter ? '#0284c7' : (isDen ? '#ec4899' : '#047857');
           ctx.lineWidth = 8;
           ctx.stroke();
 
-          drawPipePortal(pipe.startX, pipe.startY, isShelter, pipe.startX + anchorDirX * 30, pipe.startY);
+          drawPipePortal(pipe.startX, pipe.startY, isShelter, pipe.startX + anchorDirX * 30, pipe.startY, isDen);
 
           // HOLOGRAPHIC REGION SIGNBOARD: "щоб хотиби було понятиє куда тебе веде труба"
           const px = player.x + player.width / 2;
@@ -3143,7 +3185,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           const dist = Math.hypot(px - pipe.startX, py - pipe.startY);
           const isNearby = dist < 85;
 
-          const signText = pipe.label || (isShelter ? '⛊ УКРИТТЯ' : '➔ ПЕРЕХІД');
+          const signText = pipe.label || (isShelter ? '⛊ УКРИТТЯ' : (isDen ? '▼ ЛІГВО ЯЩЕРА' : '➔ ПЕРЕХІД'));
           ctx.font = 'bold 9px monospace';
           const metrics = ctx.measureText(signText);
           const padX = 7;
@@ -3154,11 +3196,11 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
           // Sign background
           ctx.fillStyle = isNearby 
-            ? (isShelter ? 'rgba(8, 47, 73, 0.95)' : 'rgba(6, 78, 59, 0.95)')
+            ? (isShelter ? 'rgba(8, 47, 73, 0.95)' : (isDen ? 'rgba(80, 7, 36, 0.95)' : 'rgba(6, 78, 59, 0.95)'))
             : 'rgba(3, 7, 18, 0.85)';
           ctx.strokeStyle = isNearby 
-            ? (isShelter ? '#38bdf8' : '#34d399')
-            : (isShelter ? '#0284c7' : '#059669');
+            ? (isShelter ? '#38bdf8' : (isDen ? '#f472b6' : '#34d399'))
+            : (isShelter ? '#0284c7' : (isDen ? '#ec4899' : '#059669'));
           ctx.lineWidth = isNearby ? 1.6 : 1.0;
           ctx.beginPath();
           ctx.roundRect(signX, signY, signW, signH, 3);
@@ -3168,7 +3210,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           // Sign text label
           ctx.fillStyle = isNearby 
             ? '#ffffff' 
-            : (isShelter ? '#7dd3fc' : '#a7f3d0');
+            : (isShelter ? '#7dd3fc' : (isDen ? '#fbcfe8' : '#a7f3d0'));
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(signText, signX + signW / 2, signY + signH / 2);
@@ -3176,9 +3218,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           // Nearby enter prompt
           if (isNearby) {
             const glow = 0.6 + Math.sin(t * 6) * 0.4;
-            ctx.fillStyle = isShelter ? `rgba(56, 189, 248, ${glow})` : `rgba(52, 211, 153, ${glow})`;
+            ctx.fillStyle = isShelter ? `rgba(56, 189, 248, ${glow})` : (isDen ? `rgba(244, 114, 182, ${glow})` : `rgba(52, 211, 153, ${glow})`);
             ctx.font = 'bold 8px monospace';
-            ctx.fillText('▼ ЗАЛІЗТИ В ТРУБУ', pipe.startX, pipe.startY - 13);
           }
         }
 
@@ -4261,12 +4302,14 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   // Hibernation & Progress Persistence handler:
   // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя і нічого більше тоєсть він сохранился а той игрок який ліг спать він до конца цикла наблюдатель..."
   const handleHibernate = () => {
+    const isStarvation = foodCount < 4;
+
     // In multiplayer: player falls asleep, becomes invulnerable, saves progress, and enters spectator mode
-    if (networkStatus === 'connected' || webRTCManager.connectionStatus === 'connected') {
+    if (isMultiplayerActive) {
       soundEngine.playKarmaAscend();
-      const newKarma = Math.min(5, playerSave.karma + 1);
+      const newKarma = isStarvation ? Math.max(1, playerSave.karma - 1) : Math.min(5, playerSave.karma + 1);
       const newCycle = playerSave.cycle + 1;
-      const newFood = Math.max(0, foodCount - 4);
+      const newFood = Math.max(0, foodCount - (isStarvation ? foodCount : 4));
 
       const updatedSave: PlayerSaveData = {
         karma: newKarma,
@@ -4292,23 +4335,24 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       if (living.length > 0) {
         setSpectatedPeerId(living[0].id);
       }
-      setLastAction("😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано.");
+      setLastAction(isStarvation 
+        ? "😴 Заснули від виснаження в укритті! (Голодний сон: карма -1). Режим спостерігача."
+        : "😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано.");
       return;
     }
 
-    if (foodCount < 4) {
-      setLastAction("Недостатньо їжі для гібернації! Потрібно щонайменше 4 ячейки.");
-      return;
-    }
-
+    // Single-player hibernation (including starvation hibernation if food < 4)
     setIsHibernating(true);
     soundEngine.playShelterDoor();
+    if (isStarvation) {
+      setLastAction("⚠️ Гібернація від виснаження! Карма знизилась через брак їжі (менше 4).");
+    }
 
     setTimeout(() => {
       soundEngine.playKarmaAscend();
-      const newKarma = Math.min(5, playerSave.karma + 1);
+      const newKarma = isStarvation ? Math.max(1, playerSave.karma - 1) : Math.min(5, playerSave.karma + 1);
       const newCycle = playerSave.cycle + 1;
-      const newFood = Math.max(0, foodCount - 4); // Keep surplus extra food up to 3!
+      const newFood = Math.max(0, foodCount - (isStarvation ? foodCount : 4));
 
       const updatedSave: PlayerSaveData = {
         karma: newKarma,
@@ -4348,10 +4392,14 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         setIsHibernating(false);
         setInShelterChamber(false);
         soundEngine.playShelterDoor();
-        setLastAction(`Успішна гібернація! Карма підвищена до ${newKarma}/5. Цикл ${newCycle} розпочато!`);
+        setLastAction(isStarvation 
+          ? `Цикл ${newCycle} розпочато ослабленим (карма ${newKarma}/5). Знайдіть їжу!`
+          : `Успішна гібернація! Карма підвищена до ${newKarma}/5. Цикл ${newCycle} розпочато!`);
       }, 1800);
     }, 1200);
   };
+
+  triggerHibernateRef.current = handleHibernate;
 
   const handleSelectLocation = (loc: CustomLocationData) => {
     distributedSimulation.enterRoom(loc.id);
@@ -4363,6 +4411,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     setInShelterChamber(false);
     setLastAction(`Перехід до локації: ${loc.name}`);
   };
+
+  triggerChangeLocationRef.current = handleSelectLocation;
 
   return (
     <div 
@@ -4849,7 +4899,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
           {/* DEAD STATE NOTIFICATION BAR - Minimalist bottom black strip */}
           <AnimatePresence>
-            {isDead && networkStatus !== 'connected' && (
+            {isDead && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -4860,13 +4910,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
                   <span className="truncate text-zinc-300 text-[11px] sm:text-xs">
-                    {networkStatus === 'connected' 
+                    {isMultiplayerActive 
                       ? 'Ви загинули. Очікуйте завершення поточного циклу або початку наступного.' 
                       : 'Ви загинули в дикому світі.'}
                   </span>
                 </div>
-                {/* Respawn button only in singleplayer! */}
-                {networkStatus !== 'connected' && (
+                {/* Respawn button strictly only in singleplayer! */}
+                {!isMultiplayerActive && (
                   <button
                     onClick={() => triggerReviveRef.current?.()}
                     className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white font-bold text-[10px] shrink-0 cursor-pointer transition-colors active:scale-95"
@@ -5149,6 +5199,59 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         )}
       </AnimatePresence>
 
+      {/* ---------------- DEDICATED SHELTER SLEEP BUTTON (TOUCH & DESKTOP) ---------------- */}
+      {/* "В убержкі досихпор не работає додай окрему кнопку яку нада зажать і буде сон" */}
+      <AnimatePresence>
+        {(currentLocation.isShelterRoom || inShelterChamber) && !isHibernating && !isDead && (
+          <motion.div
+            initial={{ opacity: 0, y: -15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -15 }}
+            transition={{ duration: 0.2 }}
+            className="absolute top-16 sm:top-20 left-1/2 -translate-x-1/2 z-40 pointer-events-auto"
+          >
+            <button
+              type="button"
+              style={{ touchAction: 'none' }}
+              onMouseDown={() => { isHoldingSleepBtnRef.current = true; setIsHoldingSleepBtn(true); }}
+              onMouseUp={() => { isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+              onMouseLeave={() => { isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+              onTouchStart={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = true; setIsHoldingSleepBtn(true); }}
+              onTouchEnd={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+              onTouchCancel={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+              className={`relative group overflow-hidden px-5 py-3 sm:px-6 sm:py-3.5 rounded-2xl border-2 flex items-center gap-3.5 font-mono font-bold shadow-2xl transition-all cursor-pointer select-none active:scale-95 ${
+                isHoldingSleepBtn || sleepProgress > 0
+                  ? 'bg-cyan-950/95 border-cyan-300 text-cyan-100 shadow-[0_0_30px_rgba(34,211,238,0.6)] scale-105'
+                  : 'bg-zinc-950/90 hover:bg-zinc-900 border-cyan-500/80 text-cyan-300 shadow-[0_0_20px_rgba(34,211,238,0.3)]'
+              }`}
+              title="Затисніть кнопку для засинання та гібернації"
+            >
+              {/* Progress background fill */}
+              <div 
+                className="absolute inset-0 bg-gradient-to-r from-cyan-600/40 via-cyan-400/50 to-cyan-300/60 transition-all pointer-events-none" 
+                style={{ width: `${Math.round(sleepProgress * 100)}%` }} 
+              />
+              <span className="text-2xl relative z-10">
+                {isHoldingSleepBtn || sleepProgress > 0 ? '💤' : '🛏️'}
+              </span>
+              <div className="flex flex-col text-left relative z-10">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs sm:text-sm tracking-widest font-black uppercase text-cyan-200">
+                    {sleepProgress > 0 ? `ЗАСИНАННЯ ${Math.round(sleepProgress * 100)}%` : 'ЗАТИСНІТЬ ДЛЯ СНУ'}
+                  </span>
+                  {sleepProgress > 0 && (
+                    <span className="inline-block w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                  )}
+                </div>
+                <span className="text-[9px] text-cyan-300/80 font-normal">
+                  {sleepProgress > 0 ? 'Утримуйте до 100% щоб зберегти цикл' : 'Затисніть кнопку або клавіші [ПРОБІЛ / ВНИЗ]'}
+                </span>
+              </div>
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ---------------- AUTHENTIC RAIN WORLD HIBERNATION CINEMATIC ---------------- */}
       {/* "типа не долєно на екрані менюшка появляться де можна нажать кнопку і тебе засейве там" */}
       <AnimatePresence>
@@ -5327,7 +5430,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         <span className="text-amber-400 font-bold">Z / E — взяти / покласти</span>
         <span>•</span>
         <span className="text-red-400 font-bold">X / Q — кинути спис / камінь</span>
-                {isDead && networkStatus !== 'connected' && (
+        {isDead && !isMultiplayerActive && (
           <>
             <span>•</span>
             <span className="text-red-400 font-bold">R — відродитися</span>

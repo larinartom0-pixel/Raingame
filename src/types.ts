@@ -32,6 +32,7 @@ export interface EditorTransitPipe {
   endY: number;
   label?: string;
   isShelterPipe?: boolean; // Entrance pipe to shelter hibernation chamber
+  isDenPipe?: boolean; // Entrance pipe to dedicated subterranean lizard lair chamber
   targetLocationId?: string; // Inter-room transit: leads to a DIFFERENT room/location
   targetSpawnX?: number; // Where slugcat spawns in target room
   targetSpawnY?: number; // Where slugcat spawns in target room
@@ -52,6 +53,7 @@ export interface CustomLocationData {
   width: number;
   height: number;
   isShelterRoom?: boolean; // Dedicated shelter hibernation bunker room
+  isLizardDenRoom?: boolean; // Dedicated subterranean lizard lair chamber
   playerSpawn: { x: number; y: number };
   npcSpawn: { x: number; y: number };
   lizardDen?: { x: number; y: number; w: number; h: number; spawnX: number; spawnY: number };
@@ -136,6 +138,20 @@ export const DEFAULT_OUTSKIRTS_LOCATION: CustomLocationData = {
       targetLocationId: 'shelter-outskirts',
       targetSpawnX: 100,
       targetSpawnY: 330
+    },
+    // Subterranean Transit Tunnel into dedicated Lizard Den chamber!
+    // "переход який буде переность на локацию яка і єсть лігво ящерів"
+    {
+      id: 'pipe-outskirts-to-den',
+      startX: 860,
+      startY: 130,
+      endX: 890,
+      endY: 130,
+      label: '⛊ ЛІГВО РОЖЕВОГО ЯЩЕРА',
+      isDenPipe: true,
+      targetLocationId: 'lizard-den-outskirts',
+      targetSpawnX: 130,
+      targetSpawnY: 340
     },
     // Inter-region pipe to Drainage System (East side -> Drainage West)
     {
@@ -941,6 +957,59 @@ export const SHELTER_SHADED_LOCATION: CustomLocationData = {
   ]
 };
 
+// 13. Dedicated Subterranean Lizard Den Location (Лігво Рожевого Ящера)
+// "переход який буде переность на локацию яка і єсть лігво ящерів"
+export const LIZARD_DEN_OUTSKIRTS_LOCATION: CustomLocationData = {
+  id: 'lizard-den-outskirts',
+  name: 'Лігво Рожевого Ящера (Lizard Den)',
+  region: 'SU-DEN',
+  version: 1,
+  width: 800,
+  height: 520,
+  isLizardDenRoom: true,
+  playerSpawn: { x: 140, y: 340 },
+  npcSpawn: { x: 450, y: 340 },
+  platforms: [
+    // Subterranean cavern bottom
+    { id: 'den-floor', x: 0, y: 440, w: 800, h: 80, type: 'concrete', label: 'ДНО ЛІГВА' },
+    // Solid organic cave perimeter
+    { id: 'den-wall-l', x: 0, y: 0, w: 70, h: 440, type: 'wall' },
+    { id: 'den-wall-r', x: 730, y: 0, w: 70, h: 440, type: 'wall' },
+    { id: 'den-ceiling', x: 0, y: 0, w: 800, h: 60, type: 'concrete' },
+    // Entrance ledge
+    { id: 'den-shelf-entry', x: 70, y: 360, w: 140, h: 22, type: 'pipe', label: 'ВХІДНИЙ ТУНЕЛЬ' },
+    // Primary predator nest altar
+    { id: 'den-nest-main', x: 300, y: 380, w: 260, h: 26, type: 'concrete', label: 'ГНІЗДО ХИЖАКА' },
+    // Upper bone ledges & overhangs
+    { id: 'den-upper-1', x: 200, y: 220, w: 180, h: 20, type: 'metal' },
+    { id: 'den-upper-2', x: 480, y: 200, w: 190, h: 20, type: 'concrete' }
+  ],
+  poles: [
+    { id: 'den-pole-1', x: 220, yMin: 60, yMax: 440 },
+    { id: 'den-pole-2', x: 520, yMin: 60, yMax: 440 }
+  ],
+  transitPipes: [
+    {
+      id: 'den-exit-pipe',
+      startX: 120,
+      startY: 340,
+      endX: 90,
+      endY: 340,
+      label: '➔ ВИХІД В ОКРАЇНИ',
+      isDenPipe: true,
+      targetLocationId: 'outskirts-default',
+      targetSpawnX: 840,
+      targetSpawnY: 170
+    }
+  ],
+  items: [
+    { id: 'den-spear-1', type: 'spear', x: 360, y: 360 },
+    { id: 'den-rock-1', type: 'rock', x: 460, y: 360 },
+    { id: 'den-berry-1', type: 'berry', x: 240, y: 200 },
+    { id: 'den-berry-2', type: 'berry', x: 550, y: 180 }
+  ]
+};
+
 export const BUILTIN_LOCATIONS: CustomLocationData[] = [
   DEFAULT_OUTSKIRTS_LOCATION,
   DRAINAGE_SYSTEM_LOCATION,
@@ -953,5 +1022,6 @@ export const BUILTIN_LOCATIONS: CustomLocationData[] = [
   SHELTER_INDUSTRIAL_LOCATION,
   SHELTER_GARBAGE_LOCATION,
   SHELTER_CHIMNEY_LOCATION,
-  SHELTER_SHADED_LOCATION
+  SHELTER_SHADED_LOCATION,
+  LIZARD_DEN_OUTSKIRTS_LOCATION
 ];

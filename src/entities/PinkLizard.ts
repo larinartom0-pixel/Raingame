@@ -19,7 +19,7 @@ export interface LizardDen {
   spawnY: number;
 }
 
-export type LizardState = 'patrol' | 'hunt' | 'drag_prey' | 'drag_corpse' | 'stunned' | 'dead';
+export type LizardState = 'patrol' | 'hunt' | 'drag_prey' | 'drag_corpse' | 'entering_den' | 'leaving_den' | 'stunned' | 'dead';
 
 export class PinkLizard {
   public id: string;
@@ -53,9 +53,18 @@ export class PinkLizard {
   } | null = null;
   public pipeCooldown: number = 0;
 
-  // Carried target: living player or dead corpse
   public grabbedTarget: 'player' | 'corpse' | 'peer' | null = null;
   public grabbedPeerId: string | null = null;
+
+  // Autonomous Territory Exploration & Senses
+  public patrolTargetX: number = 500;
+  public patrolTargetY: number = 300;
+  public patrolTimer: number = 0;
+  public stuckTimer: number = 0;
+  public lastX: number = 0;
+  public lastY: number = 0;
+  public hissTimer: number = 0;
+  public lostPlayerTimer: number = 0;
 
   // Procedural spine vertebrae (head to tail base)
   public spine: Array<{ x: number; y: number; angle: number }> = [];
@@ -134,13 +143,13 @@ export class PinkLizard {
       state: string;
       room: string;
     }>,
-    platforms: Array<{ x: number; y: number; w: number; h: number; type: string }>,
+    platforms: Array<{ x: number; y: number; w: number; h: number; type: string; id?: string; label?: string }>,
     poles: Array<{ x: number; yMin: number; yMax: number }>,
     den: LizardDen | null,
     onPlayerBitten: (damage: number, grabbed: boolean) => void,
     onPlayerEatenInDen: () => void,
     onPeerBitten?: (peerId: string, damage: number) => void,
-    pipes?: Array<{ id: string; startX: number; startY: number; endX: number; endY: number; targetLocationId?: string; targetSpawnX?: number; targetSpawnY?: number }>,
+    pipes?: Array<{ id: string; startX: number; startY: number; endX: number; endY: number; targetLocationId?: string; targetSpawnX?: number; targetSpawnY?: number; isDenPipe?: boolean; isShelterPipe?: boolean; label?: string }>,
     onLizardChangedRoom?: (targetRoomId: string, spawnX?: number, spawnY?: number) => void,
     onPreyDepositedInDen?: () => void
   ) {
@@ -191,7 +200,13 @@ export class PinkLizard {
           const spX = this.pipeTransit.targetSpawnX;
           const spY = this.pipeTransit.targetSpawnY;
           this.pipeTransit = null;
-          this.pipeCooldown = 5.0;
+          this.pipeCooldown = 3.5;
+          if (this.state === 'leaving_den') {
+            this.state = 'patrol';
+            this.patrolTimer = 8.0;
+            this.patrolTargetX = spX ? spX + 200 : 500;
+            this.patrolTargetY = spY ?? 450;
+          }
           onLizardChangedRoom?.(targetRoom, spX, spY);
           return;
         }
@@ -247,20 +262,33 @@ export class PinkLizard {
       const mouthY = this.y + 6;
       player.x = mouthX - player.width / 2;
       player.y = mouthY - player.height / 2;
+      this.jawOpen = 0.35;
 
       // Check if lizard reached its den with prey:
-      // "і зроби ящеру свою убержку ну видиму куда даже зайти можна но игрока якого заніс туда ящер буде медлено получать урон 0.01 урон в 3 сикунди та стан ставитиметься на паузу поки він там"
-      if (den) {
-        const distToDen = Math.hypot((this.x + this.width / 2) - (den.x + den.w / 2), (this.y + this.height / 2) - (den.y + den.h / 2));
-        if (distToDen < 44) {
-          // Lizard deposits prey inside den instead of instant death
+      // "переход який буде переность на локацию яка і єсть лігво ящерів... щоб ящер не просто стоял біля убержки а залазив туда з играком оставлял його там вилазил і уходил дальше полювать"
+      const isInsideDenRoom = platforms.some(p => p.id === 'den-floor' || p.label === 'ДНО ЛІГВА');
+      if (isInsideDenRoom) {
+        const nestX = 420;
+        const nestY = 380;
+        const distToNest = Math.hypot((this.x + this.width / 2) - nestX, (this.y + this.height / 2) - nestY);
+
+        if (distToNest < 45 || (this.x > 360 && this.isGrounded)) {
+          // Lizard has brought prey all the way to the predator nest altar inside the den!
           this.grabbedTarget = null;
-          player.x = den.x + den.w / 2 - player.width / 2;
-          player.y = den.y + den.h / 2 - player.height / 2;
+          this.grabbedPeerId = null;
+          player.x = nestX - player.width / 2;
+          player.y = nestY - player.height / 2;
           player.vx = 0;
           player.vy = 0;
-          this.biteCooldown = 3.0;
-          this.state = 'patrol';
+          this.jawOpen = 0.45;
+          this.state = 'leaving_den';
+          this.biteCooldown = 6.0; // Cooldown so it doesn't instantly re-bite!
+          this.pipeCooldown = 0; // Ready to enter the exit pipe!
+          this.patrolTimer = 6.0;
+          // Exit target towards the tunnel exit pipe
+          const exitPipe = pipes?.find(p => p.id === 'den-exit-pipe' || (p.targetLocationId && p.targetLocationId !== 'lizard-den-outskirts'));
+          this.patrolTargetX = exitPipe ? exitPipe.startX : 120;
+          this.patrolTargetY = exitPipe ? exitPipe.startY : 340;
           onPreyDepositedInDen?.();
         }
       }
@@ -270,69 +298,149 @@ export class PinkLizard {
       this.biteCooldown -= delta;
     }
 
-    // ---------------- AI TARGET SELECTION ----------------
-    // 1. "А і язер єслі увидит труп игрока у нього приоритетом буде забрать труп а не напасти"
-    let targetX = player.x + player.width / 2;
-    let targetY = player.y + player.height / 2;
+    // ---------------- AI TARGET SELECTION & SENSES ----------------
+    let targetX = this.patrolTargetX;
+    let targetY = this.patrolTargetY;
     let isTargetCorpse = false;
 
-    if (this.grabbedTarget === 'player' || this.grabbedTarget === 'corpse') {
-      // If already holding prey/corpse, target is the lizard den!
-      if (den) {
-        targetX = den.x + den.w / 2;
-        targetY = den.y + den.h / 2;
+    const denPipe = pipes?.find(p => p.targetLocationId === 'lizard-den-outskirts' || (p.isDenPipe && p.targetLocationId !== 'outskirts-default'));
+    const isInsideDenRoom = platforms.some(p => p.id === 'den-floor' || p.label === 'ДНО ЛІГВА');
+
+    if (this.state === 'leaving_den') {
+      // 1. Leaving the den after depositing prey: crawl out through exit tunnel pipe
+      const exitPipe = pipes?.find(p => p.id === 'den-exit-pipe' || (p.targetLocationId && p.targetLocationId !== 'lizard-den-outskirts'));
+      if (exitPipe) {
+        targetX = exitPipe.startX;
+        targetY = exitPipe.startY;
+      } else if (den) {
+        const exitX = den.spawnX ?? (den.x - 70);
+        const exitY = den.spawnY ?? (den.y + 20);
+        targetX = exitX;
+        targetY = exitY;
+        const distToExit = Math.hypot((this.x + this.width / 2) - exitX, (this.y + this.height / 2) - exitY);
+        if (distToExit < 35 || this.patrolTimer <= 0) {
+          // Lizard is outside the den: switch to patrol and go hunt elsewhere!
+          this.state = 'patrol';
+          this.patrolTargetX = this.x > 500 ? (100 + Math.random() * 350) : (680 + Math.random() * 280);
+          this.patrolTargetY = this.y;
+          this.patrolTimer = 8.0 + Math.random() * 4.0;
+        }
+      } else {
+        this.state = 'patrol';
+      }
+    } else if (this.grabbedTarget === 'player' || this.grabbedTarget === 'corpse') {
+      // 2. Dragging prey:
+      if (isInsideDenRoom) {
+        // Already inside den chamber: drag to the predator nest altar!
+        targetX = 420;
+        targetY = 380;
+      } else {
+        // Outside world: drag straight towards the lizard den tunnel entrance!
+        if (denPipe) {
+          targetX = denPipe.startX;
+          targetY = denPipe.startY;
+        } else if (den) {
+          targetX = den.x + den.w / 2;
+          targetY = den.y + den.h / 2;
+        }
       }
     } else {
-      // Scan for dead bodies (corpses have absolute priority!)
-      if (player.state === 'dead') {
+      // 3. Dead corpses have absolute priority ("А і язер єслі увидит труп игрока у нього приоритетом буде забрать труп")
+      const deadPeer = remotePeers.find(p => p.state === 'dead');
+      if (player.state === 'dead' && Math.hypot(player.x - this.x, player.y - this.y) < 750) {
         targetX = player.x + player.width / 2;
         targetY = player.y + player.height / 2;
         isTargetCorpse = true;
+        this.state = 'hunt';
+      } else if (deadPeer && Math.hypot(deadPeer.x - this.x, deadPeer.y - this.y) < 750) {
+        targetX = deadPeer.x + 12;
+        targetY = deadPeer.y + 19;
+        isTargetCorpse = true;
+        this.state = 'hunt';
       } else {
-        const deadPeer = remotePeers.find(p => p.state === 'dead');
-        if (deadPeer) {
-          targetX = deadPeer.x + 12;
-          targetY = deadPeer.y + 19;
-          isTargetCorpse = true;
-        } else {
-          // Living player or nearest living peer
-          let nearestDist = Math.hypot((player.x + 12) - (this.x + 26), (player.y + 19) - (this.y + 12));
+        // 4. Living player / Remote Peers Awareness & Line-of-sight Check
+        const distToPlayer = Math.hypot((player.x + 12) - (this.x + 26), (player.y + 19) - (this.y + 12));
+        const isPlayerInFront = (player.x > this.x) === this.facingRight;
+        const isPlayerLoud = Math.abs(player.vx || 0) > 1.8 || Math.abs(player.vy || 0) > 1.6;
+
+        // Player is detected if: close (within 220px), or in front vision cone (within 520px), or loud movement (within 380px), or already hunting and target not lost for 5s
+        const detected = distToPlayer < 220 ||
+          (distToPlayer < 520 && isPlayerInFront) ||
+          (distToPlayer < 380 && isPlayerLoud) ||
+          (this.state === 'hunt' && this.lostPlayerTimer < 5.0 && distToPlayer < 650);
+
+        if (detected) {
+          this.state = 'hunt';
+          this.lostPlayerTimer = 0;
           targetX = player.x + 12;
           targetY = player.y + 19;
+        } else {
+          // Player is NOT detected: Autonomous exploration and patrol!
+          this.lostPlayerTimer += delta;
+          this.state = 'patrol';
 
-          for (const peer of remotePeers) {
-            const d = Math.hypot(peer.x - this.x, peer.y - this.y);
-            if (d < nearestDist) {
-              nearestDist = d;
-              targetX = peer.x + 12;
-              targetY = peer.y + 19;
+          this.patrolTimer -= delta;
+          const distToPatrol = Math.hypot((this.x + this.width / 2) - this.patrolTargetX, (this.y + this.height / 2) - this.patrolTargetY);
+
+          if (this.patrolTimer <= 0 || distToPatrol < 48) {
+            // Pick a new interesting waypoint across pipes, platforms, poles, and den!
+            if (pipes && pipes.length > 0 && Math.random() < 0.45) {
+              // Actively choose a transit pipe entrance to crawl through!
+              const chosen = pipes[Math.floor(Math.random() * pipes.length)];
+              const useStart = Math.random() < 0.5;
+              this.patrolTargetX = useStart ? chosen.startX : chosen.endX;
+              this.patrolTargetY = useStart ? chosen.startY : chosen.endY;
+              this.patrolTimer = 6.0 + Math.random() * 4.0;
+            } else if (platforms.length > 0 && Math.random() < 0.6) {
+              const p = platforms[Math.floor(Math.random() * platforms.length)];
+              this.patrolTargetX = p.x + 20 + Math.random() * Math.max(10, p.w - 40);
+              this.patrolTargetY = p.y - 12;
+              this.patrolTimer = 4.0 + Math.random() * 4.0;
+            } else if (poles.length > 0 && Math.random() < 0.7) {
+              const pole = poles[Math.floor(Math.random() * poles.length)];
+              this.patrolTargetX = pole.x;
+              this.patrolTargetY = pole.yMin + 20 + Math.random() * Math.max(20, pole.yMax - pole.yMin - 40);
+              this.patrolTimer = 4.0 + Math.random() * 4.0;
+            } else if (den && Math.random() < 0.25) {
+              this.patrolTargetX = den.x + den.w / 2;
+              this.patrolTargetY = den.y + den.h / 2;
+              this.patrolTimer = 5.0;
+            } else {
+              this.patrolTargetX = Math.max(80, Math.min(1100, this.x + (Math.random() - 0.5) * 600));
+              this.patrolTargetY = this.y;
+              this.patrolTimer = 4.0 + Math.random() * 4.0;
             }
           }
+
+          targetX = this.patrolTargetX;
+          targetY = this.patrolTargetY;
         }
       }
     }
 
-    // Distance to target
+    // Distance to current target
     const dx = targetX - (this.x + this.width / 2);
     const dy = targetY - (this.y + this.height / 2);
-    const distToTarget = Math.hypot(dx, dy);
 
-    this.facingRight = dx > 0;
+    if (Math.abs(dx) > 10) {
+      this.facingRight = dx > 0;
+    }
 
-    // Check Transit Pipe crawling entry ("перемещаться по локациях по трубах")
+    // ---------------- SHORTCUT / TRANSIT PIPE CHECK ----------------
+    // "перемещаться по локациях по трубах"
     if (pipes && pipes.length > 0 && this.pipeCooldown <= 0) {
       for (const pipe of pipes) {
         const dStart = Math.hypot((this.x + this.width / 2) - pipe.startX, (this.y + this.height / 2) - pipe.startY);
         const dEnd = Math.hypot((this.x + this.width / 2) - pipe.endX, (this.y + this.height / 2) - pipe.endY);
 
-        if (dStart < 32) {
+        if (dStart < 55) {
           this.pipeTransit = {
             fromX: pipe.startX,
             fromY: pipe.startY,
             toX: pipe.endX,
             toY: pipe.endY,
             progress: 0,
-            duration: 1.6,
+            duration: 1.4,
             targetLocationId: pipe.targetLocationId,
             targetSpawnX: pipe.targetSpawnX,
             targetSpawnY: pipe.targetSpawnY
@@ -341,14 +449,17 @@ export class PinkLizard {
           this.vy = 0;
           this.updateProceduralBody();
           return;
-        } else if (dEnd < 32 && !pipe.targetLocationId) {
+        } else if (dEnd < 55 && !pipe.targetLocationId) {
           this.pipeTransit = {
             fromX: pipe.endX,
             fromY: pipe.endY,
             toX: pipe.startX,
             toY: pipe.startY,
             progress: 0,
-            duration: 1.6
+            duration: 1.4,
+            targetLocationId: pipe.targetLocationId,
+            targetSpawnX: pipe.targetSpawnX,
+            targetSpawnY: pipe.targetSpawnY
           };
           this.vx = 0;
           this.vy = 0;
@@ -358,21 +469,30 @@ export class PinkLizard {
       }
     }
 
-    // Pink Lizard Speed: slightly faster than slugcat ("чуть бистріший за слизне кота")
-    // Slugcat max base speed is 4.8. Lizard speed is 5.5!
-    const runSpeed = 5.5;
-    const accel = 0.45;
+    // ---------------- LOCOMOTION, SPEEDS & OBSTACLE NAVIGATION ----------------
+    // Pink Lizard Speed: faster when hunting (5.8), methodical when exploring (3.6)
+    const runSpeed = this.state === 'hunt' ? 5.8 : 3.6;
+    const accel = this.state === 'hunt' ? 0.55 : 0.35;
+
+    // Stuck Detection: if moving against a barrier, jump over it or climb
+    if (Math.abs(this.x - this.lastX) < 0.8 && Math.abs(this.y - this.lastY) < 0.8 && Math.abs(dx) > 15) {
+      this.stuckTimer += delta;
+    } else {
+      this.stuckTimer = 0;
+    }
+    this.lastX = this.x;
+    this.lastY = this.y;
 
     // Check Wall / Pole Climbing ("може лазить по стінах і шестах")
     let nearPole = false;
     for (const p of poles) {
-      if (Math.abs((this.x + this.width / 2) - p.x) < 28 && this.y + this.height >= p.yMin - 20 && this.y <= p.yMax + 20) {
+      if (Math.abs((this.x + this.width / 2) - p.x) < 32 && this.y + this.height >= p.yMin - 15 && this.y <= p.yMax + 15) {
         nearPole = true;
-        // If target is significantly higher or lower, climb pole!
-        if (Math.abs(dy) > 35) {
+        // Climb pole if target is above/below, or if stuck on ground
+        if (Math.abs(dy) > 25 || this.stuckTimer > 0.3) {
           this.isClimbing = true;
-          this.x += (p.x - (this.x + this.width / 2)) * 0.25;
-          this.vy = dy < 0 ? -4.2 : 4.2;
+          this.x += (p.x - (this.x + this.width / 2)) * 0.3;
+          this.vy = dy < 0 ? -4.5 : 4.5;
         }
         break;
       }
@@ -381,14 +501,16 @@ export class PinkLizard {
     // Check Wall Climbing on solid barriers / walls
     let nearWall = false;
     for (const plat of platforms) {
-      if (plat.type === 'wall' || plat.h >= 60) {
+      if (plat.type === 'wall' || plat.h >= 50) {
         const xDist = Math.abs((this.x + this.width / 2) - (plat.x + plat.w / 2));
         const yOverlap = this.y + this.height > plat.y && this.y < plat.y + plat.h;
-        if (xDist < plat.w / 2 + 20 && yOverlap && Math.abs(dy) > 30) {
+        if (xDist < plat.w / 2 + 22 && yOverlap) {
           nearWall = true;
-          this.isClimbing = true;
-          this.vy = dy < 0 ? -4.5 : 4.5;
-          break;
+          if (Math.abs(dy) > 25 || this.stuckTimer > 0.25) {
+            this.isClimbing = true;
+            this.vy = dy < 0 ? -4.8 : (this.stuckTimer > 0.25 ? -5.2 : 4.8);
+            break;
+          }
         }
       }
     }
@@ -409,16 +531,31 @@ export class PinkLizard {
         this.vx *= 0.8;
       }
 
-      // Jump over obstacles / gaps
-      if (this.isGrounded && Math.abs(dx) > 20) {
-        // Detect wall or ledge directly ahead
-        for (const plat of platforms) {
-          const aheadX = this.x + (this.facingRight ? this.width + 12 : -12);
-          if (aheadX >= plat.x && aheadX <= plat.x + plat.w) {
-            if (this.y + this.height > plat.y && this.y + this.height - plat.y < 55) {
-              this.vy = -7.2; // Leap over ledge!
-              this.isGrounded = false;
-              break;
+      // Obstacle leap & gap jumping
+      if (this.isGrounded) {
+        // If stuck for almost 1s: turn around and search another route!
+        if (this.stuckTimer > 0.85) {
+          this.facingRight = !this.facingRight;
+          this.patrolTargetX = this.x + (this.facingRight ? 450 : -450);
+          this.patrolTimer = 4.0;
+          this.stuckTimer = 0;
+          this.vx = (this.facingRight ? 1 : -1) * 3.5;
+          this.vy = -6.5;
+          this.isGrounded = false;
+        } else if (this.stuckTimer > 0.3) {
+          this.vy = -7.8;
+          this.vx = (this.facingRight ? 1 : -1) * 4.5;
+          this.isGrounded = false;
+        } else {
+          // Proactive ledge leap
+          for (const plat of platforms) {
+            const aheadX = this.x + (this.facingRight ? this.width + 16 : -16);
+            if (aheadX >= plat.x && aheadX <= plat.x + plat.w) {
+              if (this.y + this.height > plat.y && this.y + this.height - plat.y < 65) {
+                this.vy = -7.2;
+                this.isGrounded = false;
+                break;
+              }
             }
           }
         }
@@ -435,7 +572,7 @@ export class PinkLizard {
 
       // Check living player
       const distToPlayerMouth = Math.hypot(mouthX - (player.x + player.width / 2), mouthY - (player.y + player.height / 2));
-      if (distToPlayerMouth < 32) {
+      if (distToPlayerMouth < 34) {
         this.biteCooldown = 2.0;
         this.jawOpen = 0.5;
 
