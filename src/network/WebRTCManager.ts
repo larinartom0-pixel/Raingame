@@ -396,7 +396,7 @@ export class WebRTCManager {
         this.remotePlayers.set(wrapper.peerId, {
           id: wrapper.peerId,
           name: wrapper.peerName,
-          room: 'SU_A01',
+          room: 'outskirts-default',
           x: 220,
           y: 450,
           vx: 0,
@@ -427,14 +427,14 @@ export class WebRTCManager {
         this.sendPacketToPeer(wrapper.peerId, {
           type: 'REQUEST_ITEMS_SYNC',
           senderId: this.localPlayerId,
-          room: this.currentRoomId || 'SU_A01'
+          room: this.currentRoomId || 'outskirts-default'
         });
       } else {
         // As host, notify local packet listeners so OutskirtsLocation immediately transmits current items
         this.packetHandlers.forEach(h => h({
           type: 'REQUEST_ITEMS_SYNC',
           senderId: wrapper.peerId,
-          room: this.currentRoomId || 'SU_A01'
+          room: this.currentRoomId || 'outskirts-default'
         }));
       }
     };
@@ -503,7 +503,7 @@ export class WebRTCManager {
         rp = {
           id: packet.senderId,
           name: `Слимакокіт-${packet.senderId.slice(-4)}`,
-          room: packet.room || 'SU_A01',
+          room: packet.room || 'outskirts-default',
           x: safeX,
           y: safeY,
           vx: safeVx,

@@ -193,4 +193,59 @@ export type NetworkPacket =
       senderId: string;
       targetId: string;
       room: string;
+    }
+  | {
+      type: 'LIZARDS_SYNC';
+      senderId: string;
+      timestamp: number;
+      lizards: Array<{
+        id: string;
+        roomId: string;
+        x: number;
+        y: number;
+        vx: number;
+        vy: number;
+        hp: number;
+        maxHp: number;
+        state: string;
+        stunTimer: number;
+        facingRight: boolean;
+        grabbedTarget: 'player' | 'corpse' | 'peer' | null;
+        grabbedPeerId: string | null;
+        jawOpen: number;
+        isClimbing: boolean;
+        pipeTransit: {
+          fromX: number;
+          fromY: number;
+          toX: number;
+          toY: number;
+          progress: number;
+        } | null;
+      }>;
+    }
+  | {
+      type: 'LIZARD_HIT';
+      senderId: string;
+      lizardId: string;
+      room: string;
+      weaponType: 'spear' | 'rock';
+      damage: number;
+      stunDuration: number;
+      knockbackVx: number;
+      knockbackVy: number;
+    }
+  | {
+      type: 'LIZARD_BITE_PEER';
+      senderId: string;
+      targetId: string;
+      lizardId: string;
+      room: string;
+      damage: number;
+      stunDuration: number;
+      grabbed: boolean;
+    }
+  | {
+      type: 'REQUEST_WORLD_SYNC';
+      senderId: string;
+      room: string;
     };

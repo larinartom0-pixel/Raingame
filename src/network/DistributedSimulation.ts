@@ -18,7 +18,7 @@ export interface HitResult {
 export class DistributedSimulationManager {
   // Room code -> Host Player ID
   private roomHosts: Map<string, string> = new Map();
-  public currentRoom: string = 'SU_A01';
+  public currentRoom: string = 'outskirts-default';
   public isClientDummyMode: boolean = false;
 
   private onHitReceivedHandlers: Set<(hit: HitResult) => void> = new Set();
