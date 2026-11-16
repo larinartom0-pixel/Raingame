@@ -1,8 +1,10 @@
 // WebRTC Multiplayer Types and Protocols for Rain World P2P
+import type { SlugcatCharacterId } from '../types';
 
 export interface RemotePlayer {
   id: string;
   name: string;
+  characterId?: SlugcatCharacterId;
   room: string;
   x: number;
   y: number;
@@ -41,6 +43,7 @@ export interface RoomInfo {
   name: string;
   hostId: string;
   hostName: string;
+  version?: string;
   playerCount: number;
   maxPlayers: number;
   cycleDurationSeconds: number;
@@ -53,6 +56,8 @@ export type NetworkPacket =
   | {
       type: 'PLAYER_STATE';
       senderId: string;
+      clientVersion?: string;
+      characterId?: SlugcatCharacterId;
       room: string;
       x: number;
       y: number;
@@ -118,6 +123,7 @@ export type NetworkPacket =
       type: 'REQUEST_ITEMS_SYNC';
       senderId: string;
       room: string;
+      clientVersion?: string;
     }
   | {
       type: 'ITEMS_SYNC';
@@ -248,4 +254,11 @@ export type NetworkPacket =
       type: 'REQUEST_WORLD_SYNC';
       senderId: string;
       room: string;
+      clientVersion?: string;
+    }
+  | {
+      type: 'VERSION_REJECT';
+      senderId: string;
+      requiredVersion: string;
+      reason: string;
     };

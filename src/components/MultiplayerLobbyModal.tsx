@@ -6,19 +6,25 @@ import {
   Cpu, Clock, User
 } from 'lucide-react';
 import { RoomInfo } from '../network/types';
+import { SlugcatCharacterId, SLUGCAT_CHARACTERS } from '../types';
 import { signalingClient } from '../network/SignalingClient';
 import { webRTCManager } from '../network/WebRTCManager';
 import { distributedSimulation } from '../network/DistributedSimulation';
+import { APP_VERSION, compareVersions } from '../version';
 
 interface MultiplayerLobbyModalProps {
   isOpen: boolean;
   onClose: () => void;
+  selectedCharacter?: SlugcatCharacterId;
+  onSelectCharacter?: (charId: SlugcatCharacterId) => void;
   onConnectedToRoom?: (roomId: string, isHost: boolean) => void;
 }
 
 export default function MultiplayerLobbyModal({
   isOpen,
   onClose,
+  selectedCharacter = 'survivor',
+  onSelectCharacter,
   onConnectedToRoom
 }: MultiplayerLobbyModalProps) {
   const [activeTab, setActiveTab] = useState<'rooms' | 'create'>('rooms');
@@ -90,12 +96,12 @@ export default function MultiplayerLobbyModal({
     webRTCManager.setLocalIdentity(playerName);
   };
 
-  const handleJoinRoom = async (roomId: string) => {
+  const handleJoinRoom = async (roomId: string, roomVersion?: string) => {
     handleSaveProfile();
     setJoiningRoomId(roomId);
     setErrorMessage(null);
 
-    const success = await webRTCManager.joinRoom(roomId);
+    const success = await webRTCManager.joinRoom(roomId, roomVersion);
     setJoiningRoomId(null);
 
     if (success) {
@@ -142,6 +148,8 @@ export default function MultiplayerLobbyModal({
                     serverStatus === 'online' ? 'bg-emerald-500 animate-pulse' :
                     serverStatus === 'checking' ? 'bg-amber-500 animate-pulse' : 'bg-red-500'
                   }`} />
+                  <span className="text-zinc-600">•</span>
+                  <span className="font-mono text-amber-300">Версія клієнта: v{APP_VERSION}</span>
                 </div>
               </div>
             </div>
@@ -168,6 +176,36 @@ export default function MultiplayerLobbyModal({
                 placeholder="Слимакокіт"
               />
             </div>
+
+            {/* Character Switcher in Lobby */}
+            {onSelectCharacter && (
+              <div className="flex items-center gap-1.5">
+                {(['survivor', 'monk'] as SlugcatCharacterId[]).map((cid) => {
+                  const cfg = SLUGCAT_CHARACTERS[cid];
+                  const active = selectedCharacter === cid;
+                  return (
+                    <button
+                      key={cid}
+                      type="button"
+                      onClick={() => onSelectCharacter(cid)}
+                      className={`px-2 py-1 rounded border text-[10px] font-mono flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        active
+                          ? cid === 'monk'
+                            ? 'bg-yellow-950/70 border-yellow-400 text-yellow-200'
+                            : 'bg-zinc-800 border-white text-white'
+                          : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      <span
+                        className="w-2.5 h-2.5 rounded-full border border-black/40"
+                        style={{ backgroundColor: cfg.bodyColorMid }}
+                      />
+                      <span>{cfg.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Client Dummy Toggle for weak phones */}
             <button
@@ -273,21 +311,38 @@ export default function MultiplayerLobbyModal({
                     {rooms.map((room) => {
                       const isFull = room.playerCount >= room.maxPlayers;
                       const isJoining = joiningRoomId === room.id;
+                      const roomVer = room.version || '1.0.0';
+                      const isOutdatedClient = compareVersions(APP_VERSION, roomVer) < 0;
 
                       return (
                         <div
                           key={room.id}
-                          className="p-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 hover:bg-zinc-900 hover:border-zinc-700 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+                          className={`p-3 rounded-xl border transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
+                            isOutdatedClient
+                              ? 'border-red-900/60 bg-red-950/20 opacity-85'
+                              : 'border-zinc-800/80 bg-zinc-900/50 hover:bg-zinc-900 hover:border-zinc-700'
+                          }`}
                         >
                           <div className="space-y-1">
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <span className="font-bold text-sm text-white font-mono">{room.name}</span>
                               <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-zinc-800 text-zinc-400">
                                 {room.id}
                               </span>
+                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
+                                isOutdatedClient
+                                  ? 'bg-red-950/80 border-red-600/70 text-red-300'
+                                  : 'bg-cyan-950/60 border-cyan-700/60 text-cyan-300'
+                              }`}>
+                                v{roomVer}
+                              </span>
                             </div>
                             <div className="flex flex-wrap items-center gap-3 text-[10px] text-zinc-400 font-mono">
                               <span>Хост: <strong className="text-zinc-200">{room.hostName}</strong></span>
+                              <span>•</span>
+                              <span className={isOutdatedClient ? 'text-red-300 font-bold' : 'text-cyan-300'}>
+                                Версія кімнати: v{roomVer}
+                              </span>
                               <span>•</span>
                               <span className="flex items-center gap-1">
                                 <Clock className="w-3 h-3 text-cyan-400" />
@@ -298,21 +353,36 @@ export default function MultiplayerLobbyModal({
                                 {room.playerCount} / {room.maxPlayers} гравців
                               </span>
                             </div>
+                            {isOutdatedClient && (
+                              <p className="text-[10px] font-mono text-red-400">
+                                Несумісна версія: оновіть гру до v{roomVer}, щоб приєднатися.
+                              </p>
+                            )}
                           </div>
 
                           <button
-                            onClick={() => handleJoinRoom(room.id)}
-                            disabled={isFull || isJoining}
-                            className={`w-full sm:w-auto px-4 py-2 rounded-lg font-mono font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-md ${
-                              isFull
+                            onClick={() => handleJoinRoom(room.id, roomVer)}
+                            disabled={isFull || isJoining || isOutdatedClient}
+                            className={`w-full sm:w-auto px-4 py-2 rounded-lg font-mono font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md ${
+                              isOutdatedClient
+                                ? 'bg-red-950/80 border border-red-700/70 text-red-300 cursor-not-allowed'
+                                : isFull
                                 ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
                                 : isJoining
-                                ? 'bg-cyan-500 text-black animate-pulse'
-                                : 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white active:scale-95'
+                                ? 'bg-cyan-500 text-black animate-pulse cursor-pointer'
+                                : 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white active:scale-95 cursor-pointer'
                             }`}
                           >
                             <Play className="w-3.5 h-3.5 fill-current" />
-                            <span>{isJoining ? 'ПІДКЛЮЧЕННЯ...' : isFull ? 'ЗАПОВНЕНО' : 'УВІЙТИ'}</span>
+                            <span>
+                              {isOutdatedClient
+                                ? 'СТАРА ВЕРСІЯ'
+                                : isJoining
+                                ? 'ПІДКЛЮЧЕННЯ...'
+                                : isFull
+                                ? 'ЗАПОВНЕНО'
+                                : 'УВІЙТИ'}
+                            </span>
                           </button>
                         </div>
                       );

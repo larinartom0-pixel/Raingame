@@ -1,5 +1,6 @@
 // Signaling Client for PythonAnywhere Flask WebRTC Relay
 import { RoomInfo } from './types';
+import { APP_VERSION, extractRoomVersion, stripRoomVersionTag } from '../version';
 
 export interface SignalMessage {
   senderId: string;
@@ -55,7 +56,15 @@ export class SignalingClient {
         signal: AbortSignal.timeout(5000)
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
+      const raw: RoomInfo[] = await res.json();
+      return (Array.isArray(raw) ? raw : []).map((room) => {
+        const version = extractRoomVersion(room.name, room.version);
+        return {
+          ...room,
+          name: stripRoomVersionTag(room.name || 'Кімната Rain World'),
+          version,
+        };
+      });
     } catch (err) {
       console.warn('Signaling listRooms error:', err);
       return [];
@@ -67,15 +76,23 @@ export class SignalingClient {
     name: string;
     hostId: string;
     hostName: string;
+    version?: string;
     cycleDurationSeconds?: number;
     maxPlayers?: number;
     friendlyFire?: boolean;
   }): Promise<{ success: boolean; room?: RoomInfo; error?: string }> {
     try {
+      const roomVersion = params.version || APP_VERSION;
+      const cleanName = stripRoomVersionTag(params.name);
+      const wirePayload = {
+        ...params,
+        name: `${cleanName} [v${roomVersion}]`,
+        version: roomVersion,
+      };
       const res = await fetch(`${this.baseUrl}/api/rooms`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify(wirePayload),
         signal: AbortSignal.timeout(6000)
       });
       const data = await res.json();
@@ -85,7 +102,14 @@ export class SignalingClient {
       this.currentRoomId = data.room.id;
       this.localPlayerId = params.hostId;
       this.startHeartbeat();
-      return { success: true, room: data.room };
+      return {
+        success: true,
+        room: {
+          ...data.room,
+          name: cleanName,
+          version: extractRoomVersion(data.room.name, data.room.version || roomVersion),
+        },
+      };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Не вдалося створити кімнату на сервері' };
     }
@@ -93,8 +117,8 @@ export class SignalingClient {
 
   public async joinRoom(
     roomId: string,
-    player: { id: string; name: string }
-  ): Promise<{ success: boolean; hostId?: string; peers?: Array<{ id: string; name: string }>; error?: string }> {
+    player: { id: string; name: string; clientVersion?: string }
+  ): Promise<{ success: boolean; hostId?: string; roomVersion?: string; peers?: Array<{ id: string; name: string }>; error?: string }> {
     try {
       const res = await fetch(`${this.baseUrl}/api/rooms/${encodeURIComponent(roomId)}/join`, {
         method: 'POST',
@@ -102,6 +126,7 @@ export class SignalingClient {
         body: JSON.stringify({
           playerId: player.id,
           playerName: player.name,
+          clientVersion: player.clientVersion || APP_VERSION,
         }),
         signal: AbortSignal.timeout(6000)
       });
@@ -112,7 +137,12 @@ export class SignalingClient {
       this.currentRoomId = roomId;
       this.localPlayerId = player.id;
       this.startHeartbeat();
-      return { success: true, hostId: data.hostId, peers: data.peers || [] };
+      return {
+        success: true,
+        hostId: data.hostId,
+        roomVersion: data.roomVersion,
+        peers: data.peers || [],
+      };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Помилка підключення до кімнати' };
     }

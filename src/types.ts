@@ -63,11 +63,82 @@ export interface CustomLocationData {
   items: EditorSpawnItem[];
 }
 
+export type SlugcatCharacterId = 'survivor' | 'monk';
+
+export interface SlugcatCharacterConfig {
+  id: SlugcatCharacterId;
+  name: string;
+  subtitle: string;
+  maxHp: number;
+  incomingDamageMult: number;
+  incomingStunMult: number;
+  biteGrabImmunity: boolean;
+  attackerStunOnGrabAttempt: number;
+  outgoingDamageMult: number;
+  outgoingStunMult: number;
+  requiredFood: number;
+  extraFood: number;
+  maxFood: number;
+  bodyColorTop: string;
+  bodyColorMid: string;
+  bodyColorBottom: string;
+  contourColor: string;
+  earColor: string;
+  earInnerColor: string;
+}
+
+export const roundToOneDecimal = (val: number): number => Math.round(val * 10) / 10;
+
+export const SLUGCAT_CHARACTERS: Record<SlugcatCharacterId, SlugcatCharacterConfig> = {
+  survivor: {
+    id: 'survivor',
+    name: 'Виживший',
+    subtitle: '1 HP • Стандартний баланс • 4+3 їжі',
+    maxHp: 1,
+    incomingDamageMult: 1.0,
+    incomingStunMult: 1.0,
+    biteGrabImmunity: false,
+    attackerStunOnGrabAttempt: 0,
+    outgoingDamageMult: 1.0,
+    outgoingStunMult: 1.0,
+    requiredFood: 4,
+    extraFood: 3,
+    maxFood: 7,
+    bodyColorTop: '#ffffff',
+    bodyColorMid: '#f1f5f9',
+    bodyColorBottom: '#e2e8f0',
+    contourColor: '#855140',
+    earColor: '#fef08a',
+    earInnerColor: '#fbcfe8',
+  },
+  monk: {
+    id: 'monk',
+    name: 'Монах',
+    subtitle: '2 HP • -50% урону/стану • Імунітет до хвату (стан 5с) • -70% сили кидка • 2+4 їжі',
+    maxHp: 2,
+    incomingDamageMult: 0.5,
+    incomingStunMult: 0.5,
+    biteGrabImmunity: true,
+    attackerStunOnGrabAttempt: 5.0,
+    outgoingDamageMult: 0.3,
+    outgoingStunMult: 0.3,
+    requiredFood: 2,
+    extraFood: 4,
+    maxFood: 6,
+    bodyColorTop: '#fef9c3',
+    bodyColorMid: '#fde047',
+    bodyColorBottom: '#facc15',
+    contourColor: '#a16207',
+    earColor: '#fde047',
+    earInnerColor: '#fef9c3',
+  }
+};
+
 export interface PlayerSaveData {
   karma: number; // 1 to 5
   maxKarma: number; // 5
   cycle: number; // 1, 2, 3...
-  food: number; // 0 to 7 (4 required + 3 extra)
+  food: number; // 0 to maxFood
   lastLocationId: string;
   playerSpawnX?: number;
   playerSpawnY?: number;
@@ -102,5 +173,7 @@ export {
   BUILTIN_LOCATIONS,
   getLocationById,
   getLocationFloorY,
-  resolveSafeSpawn
+  resolveSafeSpawn,
+  resolveSafeEntitySpawn,
+  resolveSafeLizardSpawn
 } from './world/locations';

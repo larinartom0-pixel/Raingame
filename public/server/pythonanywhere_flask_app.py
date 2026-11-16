@@ -36,11 +36,25 @@ else:
         return response
 
 # In-memory storage for rooms and signaling mailboxes
-# rooms = { room_id: { id, name, hostId, hostName, players: { player_id: { name, lastSeen } }, cycleDuration, createdAt } }
+# rooms = { room_id: { id, name, hostId, hostName, version, players: { player_id: { name, lastSeen } }, cycleDuration, createdAt } }
 rooms = {}
 
 # signals = { target_player_id: [ { senderId, type, payload, timestamp } ] }
 signals = {}
+
+def parse_version(ver_str):
+    if not ver_str:
+        return (1, 0, 0)
+    clean = str(ver_str).strip().lstrip('vV')
+    parts = []
+    for p in clean.split('.'):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
 
 # Clean up stale rooms and players (> 60s timeout)
 def cleanup_stale_data():
@@ -109,6 +123,7 @@ def handle_rooms():
                 "name": r.get('name', 'Rain World Room'),
                 "hostId": r.get('hostId', ''),
                 "hostName": r.get('hostName', 'Slugcat Host'),
+                "version": r.get('version', '1.0.0'),
                 "playerCount": len(r.get('players', {})),
                 "maxPlayers": r.get('maxPlayers', 12),
                 "cycleDurationSeconds": cycle_duration,
@@ -124,6 +139,7 @@ def handle_rooms():
         host_id = data.get('hostId', 'host-1')
         host_name = data.get('hostName', 'Слимакокіт-Хост')
         room_name = data.get('name', f"Кімната {room_id}")
+        room_version = str(data.get('version', '1.0.0')).lstrip('vV')
         cycle_sec = int(data.get('cycleDurationSeconds', 300))
         max_players = min(12, int(data.get('maxPlayers', 12)))
 
@@ -133,6 +149,7 @@ def handle_rooms():
             "name": room_name,
             "hostId": host_id,
             "hostName": host_name,
+            "version": room_version,
             "cycleDurationSeconds": cycle_sec,
             "maxPlayers": max_players,
             "friendlyFire": data.get('friendlyFire', True),
@@ -153,6 +170,7 @@ def handle_rooms():
                 "name": room_name,
                 "hostId": host_id,
                 "hostName": host_name,
+                "version": room_version,
                 "playerCount": 1,
                 "maxPlayers": max_players,
                 "cycleDurationSeconds": cycle_sec,
@@ -176,9 +194,16 @@ def join_room(room_id):
     data = request.get_json(force=True) or {}
     player_id = data.get('playerId')
     player_name = data.get('playerName', 'Гість Слимакокіт')
+    client_version = str(data.get('clientVersion', '')).lstrip('vV')
+    room_version = str(room.get('version', '1.0.0')).lstrip('vV')
 
     if not player_id:
         return jsonify({"error": "playerId is required"}), 400
+
+    if client_version and parse_version(client_version) < parse_version(room_version):
+        return jsonify({
+            "error": f"Ваша версія гри (v{client_version}) застаріла! Кімната створена на новішій версії (v{room_version}). Оновіть гру."
+        }), 426
 
     if len(room['players']) >= room.get('maxPlayers', 12) and player_id not in room['players']:
         return jsonify({"error": "Кімната заповнена (макс 12 гравців)"}), 403
@@ -201,6 +226,7 @@ def join_room(room_id):
         "success": True,
         "roomId": room_id,
         "roomName": room['name'],
+        "roomVersion": room_version,
         "hostId": room['hostId'],
         "cycleRemainingSeconds": max(0, int(room['cycleDurationSeconds'] - ((now - room['createdAt']) % room['cycleDurationSeconds']))),
         "peers": other_players

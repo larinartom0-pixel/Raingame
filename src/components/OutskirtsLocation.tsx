@@ -17,7 +17,9 @@ import { RemotePlayer, NetworkPacket } from '../network/types';
 import { 
   CustomLocationData, EditorTransitPipe, PlatformType, 
   PlayerSaveData, DEFAULT_PLAYER_SAVE, BUILTIN_LOCATIONS,
-  DEFAULT_OUTSKIRTS_LOCATION, getLocationById, getLocationFloorY, resolveSafeSpawn
+  DEFAULT_OUTSKIRTS_LOCATION, SHELTER_OUTSKIRTS_LOCATION,
+  getLocationById, getLocationFloorY, resolveSafeSpawn, resolveSafeLizardSpawn,
+  SlugcatCharacterId, SLUGCAT_CHARACTERS, roundToOneDecimal
 } from '../types';
 
 interface OutskirtsLocationProps {
@@ -25,6 +27,7 @@ interface OutskirtsLocationProps {
   isSoundMuted: boolean;
   toggleSound: () => void;
   customLocation?: CustomLocationData;
+  characterId?: SlugcatCharacterId;
 }
 
 export const getRandomCycleSeconds = (): number => {
@@ -90,6 +93,7 @@ export interface WorldItem {
   stuckAngle?: number;
   isAirborne: boolean; // Thrown and active for collision
   thrownBy?: 'player' | 'npc' | string;
+  stuckLizardId?: string;
   sleeping?: boolean; // Resting on floor/platform, physics calculations paused
 }
 
@@ -124,6 +128,7 @@ interface DebugTelemetry {
   npcStunTimer: number;
   npcX: number;
   npcY: number;
+  roomLizards: Array<{ id: string; x: number; y: number }>;
 
   // World Items & Metrics
   spearsCount: number;
@@ -142,7 +147,18 @@ export interface LizardStoreEntry {
   lizard: PinkLizard;
 }
 
-export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, customLocation }: OutskirtsLocationProps) {
+export default function OutskirtsLocation({
+  onBack,
+  isSoundMuted,
+  toggleSound,
+  customLocation,
+  characterId = 'survivor'
+}: OutskirtsLocationProps) {
+  const charConfig = SLUGCAT_CHARACTERS[characterId] || SLUGCAT_CHARACTERS.survivor;
+  const charConfigRef = useRef(charConfig);
+  useEffect(() => {
+    charConfigRef.current = charConfig;
+  }, [charConfig]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   
   // Controls state
@@ -154,10 +170,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     jump: false,
   });
 
-  const controlsRef = useRef(controls);
-  useEffect(() => {
-    controlsRef.current = controls;
-  }, [controls]);
+  const controlsRef = useRef({
+    left: false,
+    right: false,
+    up: false,
+    down: false,
+    jump: false,
+  });
 
   // Notifications and actions
   const [spawnNotification, setSpawnNotification] = useState(true);
@@ -168,12 +187,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     musicManager.setMuted(isSoundMuted);
   }, [isSoundMuted]);
 
-  // Start exploration in-game music on location enter, transition to menu on exit
+  const isExitingRef = useRef(false);
+
+  // Start exploration in-game music on location enter (App.tsx handles menu music on exit)
   useEffect(() => {
+    isExitingRef.current = false;
     musicManager.playCategory('game');
-    return () => {
-      musicManager.playCategory('menu');
-    };
   }, []);
 
   // Fullscreen container and state ("Також додай кнопку яка открива гру на повний екран")
@@ -243,8 +262,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     crouching: false,
     facingRight: true,
     state: 'normal',
-    hp: 1, // Hidden HP parameter (1 HP)
-    maxHp: 1,
+    hp: charConfig.maxHp,
+    maxHp: charConfig.maxHp,
     stunTimer: 0, // Hidden stun timer
     heldItem: null,
 
@@ -254,11 +273,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     npcStunTimer: 0, // Hidden NPC stun timer
     npcX: 620,
     npcY: 520,
+    roomLizards: [],
 
     spearsCount: 1,
     rocksCount: 1,
     berriesCount: 5,
-    foodCount: 3, // 6 slots total requested
+    foodCount: 0,
     isEating: false,
     eatingProgress: 0,
     fps: 60,
@@ -331,8 +351,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     distributedSimulation.enterRoom(currentLocation.id);
   }, [currentLocation.id]);
 
-  // Food Pips State: 4 required + 3 extra = 7 slots total
-  const [foodCount, setFoodCount] = useState<number>(() => Math.min(7, playerSave.food ?? 3));
+  // Food Pips State: Survivor (4+3=7) or Monk (2+4=6)
+  const [foodCount, setFoodCount] = useState<number>(() => Math.min(charConfig.maxFood, playerSave.food ?? 0));
   const foodCountRef = useRef<number>(foodCount);
   useEffect(() => {
     foodCountRef.current = foodCount;
@@ -458,7 +478,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           karma: playerSave.karma,
           maxKarma: 5,
           cycle: playerSave.cycle + 1,
-          food: Math.max(4, foodCount),
+          food: Math.max(charConfig.requiredFood, foodCount),
           lastLocationId: currentLocation.id,
           playerSpawnX: 160,
           playerSpawnY: 280,
@@ -473,7 +493,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         window.location.reload();
       }
     }
-  }, [updateCountdown, currentLocation.isShelterRoom, inShelterChamber, currentLocation.id, foodCount, playerSave]);
+  }, [updateCountdown, currentLocation.isShelterRoom, inShelterChamber, currentLocation.id, foodCount, playerSave, charConfig.requiredFood]);
 
   // Cycle Duration and Countdown: 10 dots around Karma symbol
   const [cycleTotalDuration, setCycleTotalDuration] = useState<number>(() => getRandomCycleSeconds());
@@ -542,7 +562,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   // External trigger hooks for debug buttons & item interaction
   const triggerStunRef = useRef<((duration: number) => void) | null>(null);
   const triggerDamageRef = useRef<((amount: number) => void) | null>(null);
-  const triggerReviveRef = useRef<(() => void) | null>(null);
+  const triggerForceDeathRef = useRef<((reason: string) => void) | null>(null);
   const triggerResetPosRef = useRef<(() => void) | null>(null);
 
   // NPC Debug triggers
@@ -605,6 +625,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     let lastItemsSyncTime = 0;
     let lastLizardsSyncMs = 0;
     let shelterSleepTimer = 0;
+    let roomTransitionGraceTimer = 0;
+    let singleplayerDeathTimer = 0;
+    let sleepMsgCooldown = 0;
 
     // Room geometry cache helper
     interface RoomEnvCache {
@@ -676,6 +699,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     };
 
     // Persistent Player Physics State (survives all room transitions, sound mutes, and flashes)
+    const initCfg = charConfigRef.current;
     const player = {
       x: safeInitialSpawn.x,
       y: safeInitialSpawn.y,
@@ -688,8 +712,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       climbPoleX: 0,
 
       state: 'normal' as SlugcatState,
-      hp: 1,
-      maxHp: 1,
+      hp: initCfg.maxHp,
+      maxHp: initCfg.maxHp,
+      characterId: initCfg.id,
+      biteGrabImmunity: initCfg.biteGrabImmunity,
+      attackerStunOnGrabAttempt: initCfg.attackerStunOnGrabAttempt,
+      isPipeProtected: false,
       stunTimer: 0,
       heldItem: null as WorldItem | null,
 
@@ -720,7 +748,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         if (Math.random() < spawnChance) {
           const spawnX = loc.npcSpawn?.x ?? loc.lizardDen?.spawnX ?? Math.round((loc.width || 1000) * 0.68);
           const spawnY = loc.npcSpawn?.y ?? loc.lizardDen?.spawnY ?? Math.max(120, getLocationFloorY(loc) - 28);
-          const safe = resolveSafeSpawn(loc, spawnX, spawnY);
+          const safe = resolveSafeLizardSpawn(loc, spawnX, spawnY);
           const liz = new PinkLizard(`pink-lizard-${loc.id}`, safe.x, safe.y);
           cycleLizardsRef.current.set(`pink-lizard-${loc.id}`, {
             id: `pink-lizard-${loc.id}`,
@@ -732,19 +760,19 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     };
     ensureCycleLizardsInitialized();
 
+    let activeRoomLizards: LizardStoreEntry[] = [];
     let currentLizardEntry: LizardStoreEntry | null = null;
     let pinkLizard: PinkLizard | null = null;
 
     const refreshActiveRoomLizard = () => {
-      currentLizardEntry = null;
-      pinkLizard = null;
+      activeRoomLizards = [];
       for (const entry of cycleLizardsRef.current.values()) {
         if (entry.roomId === activeLoc.id) {
-          currentLizardEntry = entry;
-          pinkLizard = entry.lizard;
-          break;
+          activeRoomLizards.push(entry);
         }
       }
+      currentLizardEntry = activeRoomLizards[0] || null;
+      pinkLizard = currentLizardEntry ? currentLizardEntry.lizard : null;
     };
     refreshActiveRoomLizard();
 
@@ -868,6 +896,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       camera.y = Math.max(0, Math.min(Math.max(0, activeEnv.height - zh), (player.y + 19) - zh / 2));
 
       // 6. Refresh lizard handle & React HUD state
+      roomTransitionGraceTimer = 1.6;
       refreshActiveRoomLizard();
       setCurrentLocation(targetLoc);
       setInShelterChamber(!!targetLoc.isShelterRoom);
@@ -889,6 +918,66 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     transitionToLocationRef.current = transitionToLocation;
     triggerChangeLocationRef.current = (loc: CustomLocationData) => {
       transitionToLocation(loc, undefined, undefined, undefined, `Перехід до локації: ${loc.name}`);
+    };
+
+    const restartCycleFromSavedShelter = () => {
+      const cfg = charConfigRef.current;
+      const save = playerSaveRef.current;
+      const savedLoc = getLocationById(save.lastLocationId) || SHELTER_OUTSKIRTS_LOCATION;
+      const newKarma = Math.max(1, save.karma - 1);
+      const resetFood = Math.min(cfg.maxFood, save.food ?? 0);
+
+      const updatedSave: PlayerSaveData = {
+        ...save,
+        karma: newKarma,
+        lastLocationId: savedLoc.id,
+        hibernated: false
+      };
+      playerSaveRef.current = updatedSave;
+      setPlayerSave(updatedSave);
+      foodCountRef.current = resetFood;
+      setFoodCount(resetFood);
+      try {
+        localStorage.setItem('rain_world_player_progress', JSON.stringify(updatedSave));
+      } catch (e) {
+        console.warn('Failed to save progress on cycle restart:', e);
+      }
+
+      player.state = 'normal';
+      player.hp = cfg.maxHp;
+      player.maxHp = cfg.maxHp;
+      player.characterId = cfg.id;
+      player.stunTimer = 0;
+      player.ragdollAngle = 0;
+      if (player.heldItem) {
+        player.heldItem = null;
+        setHeldItemType(null);
+      }
+
+      cycleRoomItemsCache.current.clear();
+      cycleLizardsRef.current.clear();
+      lizardsInitializedForCycle = false;
+      ensureCycleLizardsInitialized();
+      lizardCombatTimerRef.current = 0;
+      pvpCombatTimerRef.current = 0;
+      pvpTargetPeerIdRef.current = null;
+
+      const freshDuration = getRandomCycleSeconds();
+      setCycleTotalDuration(freshDuration);
+      setCycleSecondsLeft(freshDuration);
+      setStormActive(false);
+      setStormSeconds(0);
+      soundEngine.setStormVolume(0);
+      soundEngine.resetConcussion();
+      setIsDead(false);
+
+      transitionToLocation(
+        savedLoc,
+        save.playerSpawnX,
+        save.playerSpawnY,
+        undefined,
+        `🔄 Цикл закінчився! Новий цикл розпочато з останнього укриття: ${savedLoc.name} (Карма ${newKarma}/5).`
+      );
     };
 
     // Helper to spawn item
@@ -918,15 +1007,24 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       }
     };
 
-    // Damage & Stun application function according to exact user rules:
-    // Spear: damage 1 HP, 1.8s stun. If already stunned: +0.8s stun.
-    // Rock: damage 0.01 HP, 1.2s stun. If already stunned: +0.5s stun.
-    const applyHit = (target: typeof player, weapon: 'spear' | 'rock') => {
+    // Damage & Stun application function with Monk damage/stun resistance & 1-decimal rounding
+    const applyHit = (
+      target: typeof player,
+      weapon: 'spear' | 'rock',
+      overrideBaseDamage?: number,
+      overrideBaseInitStun?: number,
+      overrideBaseAddStun?: number
+    ) => {
       if (target.state === 'dead') return;
+      const cfg = charConfigRef.current;
 
-      const damage = weapon === 'spear' ? 1.0 : 0.01;
-      const initialStun = weapon === 'spear' ? 1.8 : 1.2;
-      const addedStun = weapon === 'spear' ? 0.8 : 0.5;
+      const baseDmg = overrideBaseDamage ?? (weapon === 'spear' ? 1.0 : 0.01);
+      const baseInitStun = overrideBaseInitStun ?? (weapon === 'spear' ? 1.8 : 1.2);
+      const baseAddStun = overrideBaseAddStun ?? (weapon === 'spear' ? 0.8 : 0.5);
+
+      const damage = Math.round(baseDmg * cfg.incomingDamageMult * 1000) / 1000;
+      const initialStun = roundToOneDecimal(baseInitStun * cfg.incomingStunMult);
+      const addedStun = roundToOneDecimal(baseAddStun * cfg.incomingStunMult);
 
       const wasAlreadyStunned = target.state === 'stunned' || target.stunTimer > 0;
 
@@ -946,14 +1044,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         soundEngine.playThunder();
         setLastAction(`Слимакокіт загинув від ${weapon === 'spear' ? 'списа' : 'каменя'}!`);
       } else {
-        // Target alive, apply stun logic
         if (wasAlreadyStunned) {
-          target.stunTimer += addedStun;
-          setLastAction(`${weapon === 'spear' ? 'Спис' : 'Камінь'} додав +${addedStun}с стану гравцю!`);
+          target.stunTimer = roundToOneDecimal(target.stunTimer + addedStun);
+          setLastAction(`${weapon === 'spear' ? 'Спис' : 'Камінь'} додав +${addedStun.toFixed(1)}с стану гравцю!`);
         } else {
           target.state = 'stunned';
           target.stunTimer = initialStun;
-          setLastAction(`Слимакокіт оглушений ${weapon === 'spear' ? 'списом (1.8с)' : 'каменем (1.2с)'}!`);
+          setLastAction(`Слимакокіт оглушений ${weapon === 'spear' ? 'списом' : 'каменем'} (${initialStun.toFixed(1)}с)!`);
         }
         target.vy = -2.0;
         player.isClimbing = false;
@@ -1205,8 +1302,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         return;
       }
 
-      if (foodCountRef.current >= 7) {
-        setLastAction("Шлунок вже повний! (7 / 7 ячейок: 4 обов'язкові + 3 додаткові)");
+      const cfg = charConfigRef.current;
+      if (foodCountRef.current >= cfg.maxFood) {
+        setLastAction(`Шлунок вже повний! (${cfg.maxFood} / ${cfg.maxFood} ячейок: ${cfg.requiredFood} обов'язкові + ${cfg.extraFood} додаткові)`);
         return;
       }
 
@@ -1278,19 +1376,21 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     };
 
     triggerAddFoodRef.current = () => {
-      const nextFood = Math.min(7, foodCountRef.current + 1);
+      const cfg = charConfigRef.current;
+      const nextFood = Math.min(cfg.maxFood, foodCountRef.current + 1);
       foodCountRef.current = nextFood;
       setFoodCount(nextFood);
       setJustFilledIndex(nextFood - 1);
       setTimeout(() => setJustFilledIndex(null), 800);
       if (!isSoundMutedRef.current) soundEngine.playEatComplete();
-      setLastAction(`Додано +1 ячейку їжі (${nextFood} / 7: ${Math.min(4, nextFood)} обов'язк. + ${Math.max(0, nextFood - 4)} додатк.)`);
+      setLastAction(`Додано +1 ячейку їжі (${nextFood} / ${cfg.maxFood}: ${Math.min(cfg.requiredFood, nextFood)} обов'язк. + ${Math.max(0, nextFood - cfg.requiredFood)} додатк.)`);
     };
 
     triggerResetFoodRef.current = () => {
+      const cfg = charConfigRef.current;
       foodCountRef.current = 0;
       setFoodCount(0);
-      setLastAction('Їжу скинуто до 0 / 7');
+      setLastAction(`Їжу скинуто до 0 / ${cfg.maxFood}`);
     };
 
     triggerResetNpcRef.current = () => {
@@ -1298,7 +1398,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         pinkLizard.hp = 3.5;
         pinkLizard.state = 'patrol';
         pinkLizard.stunTimer = 0;
-        const safe = resolveSafeSpawn(
+        const safe = resolveSafeLizardSpawn(
           activeLoc,
           activeEnv.denData?.spawnX ?? activeLoc.npcSpawn.x,
           activeEnv.denData?.spawnY ?? activeLoc.npcSpawn.y
@@ -1349,74 +1449,28 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       }
     };
 
-    triggerReviveRef.current = () => {
-      player.state = 'normal';
-      player.hp = 1;
+    triggerForceDeathRef.current = (reason: string) => {
+      if (player.state === 'dead') return;
+      player.hp = 0;
+      player.state = 'dead';
       player.stunTimer = 0;
-      player.ragdollAngle = 0;
-      const safe = resolveSafeSpawn(activeLoc);
-      player.x = safe.x;
-      player.y = safe.y;
-      player.vx = 0;
-      player.vy = 0;
-      playerPosRef.current = { x: player.x, y: player.y };
-      player.head = { x: player.x + player.width / 2, y: player.y + 6, vx: 0, vy: 0 };
-      player.chest = { x: player.x + player.width / 2, y: player.y + 18, vx: 0, vy: 0 };
-      player.hips = { x: player.x + player.width / 2, y: player.y + 30, vx: 0, vy: 0 };
-      player.tail = Array.from({ length: 9 }, (_, i) => ({ x: player.x + player.width / 2, y: player.y + 30 + i * 4 }));
-
-      setPlayerSave(prev => {
-        const newKarma = Math.max(1, prev.karma - 1);
-        const updated = { ...prev, karma: newKarma, hibernated: false };
-        try {
-          localStorage.setItem('rain_world_player_progress', JSON.stringify(updated));
-        } catch (e) {
-          console.warn('Failed to save progress on death:', e);
-        }
-        return updated;
-      });
-
-      const newDuration = getRandomCycleSeconds();
-      setCycleTotalDuration(newDuration);
-      setCycleSecondsLeft(newDuration);
-      setStormActive(false);
-      setStormSeconds(0);
-      soundEngine.setStormVolume(0);
-
-      // Reset cycle items and creatures upon death respawn
-      cycleRoomItemsCache.current.clear();
-      cycleLizardsRef.current.clear();
-      lizardsInitializedForCycle = false;
-      ensureCycleLizardsInitialized();
-      items.length = 0;
-      for (const it of getOrInitRoomItems(activeLoc)) {
-        items.push(it);
-      }
-      if (player.heldItem) {
-        player.heldItem = null;
-        setHeldItemType(null);
-      }
-      refreshActiveRoomLizard();
-      lizardCombatTimerRef.current = 0;
-      pvpCombatTimerRef.current = 0;
-      pvpTargetPeerIdRef.current = null;
-      const vw = CANVAS_WIDTH / zoomRef.current;
-      const vh = CANVAS_HEIGHT / zoomRef.current;
-      camera.x = Math.max(0, Math.min(Math.max(0, activeEnv.width - vw), (player.x + 12) - vw / 2));
-      camera.y = Math.max(0, Math.min(Math.max(0, activeEnv.height - vh), (player.y + 19) - vh / 2));
-      setLastAction('Слимакокіт відродився! Карма знизилась через загибель у циклі.');
-      setIsDead(false);
-      soundEngine.resetConcussion();
+      player.isClimbing = false;
+      player.vy = -2.8;
+      setIsDead(true);
+      setLastAction(reason);
+      if (!isSoundMutedRef.current) soundEngine.playThunder();
     };
 
     triggerResetPosRef.current = () => {
+      const cfg = charConfigRef.current;
       const safe = resolveSafeSpawn(activeLoc);
       player.x = safe.x;
       player.y = safe.y;
       player.vx = 0;
       player.vy = 0;
       player.state = 'normal';
-      player.hp = 1;
+      player.hp = cfg.maxHp;
+      player.maxHp = cfg.maxHp;
       player.stunTimer = 0;
       player.ragdollAngle = 0;
       playerPosRef.current = { x: player.x, y: player.y };
@@ -1502,7 +1556,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       setNetworkStatus(status);
       setConnectedPeersCount(webRTCManager.getConnectedPeerCount());
       setNetworkPing(webRTCManager.getAveragePing());
-      if (status === 'connected') {
+      if (status === 'error' && webRTCManager.lastError) {
+        setLastAction(`❌ ${webRTCManager.lastError}`);
+      } else if (status === 'connected') {
         if (!isWorldAuthority()) {
           items.length = 0;
           if (player.heldItem) items.push(player.heldItem);
@@ -1521,11 +1577,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     // Client-Side Hit Registration listener
     const unregisterHit = distributedSimulation.onHitReceived((hit) => {
       if (player.state === 'dead') return;
-      if (hit.weaponType === 'spear') {
-        applyHit(player, 'spear');
-      } else {
-        applyHit(player, 'rock');
-      }
+      applyHit(player, hit.weaponType, hit.damage, hit.stunDuration, roundToOneDecimal(hit.stunDuration * 0.45));
       pvpCombatTimerRef.current = 60.0;
       pvpTargetPeerIdRef.current = hit.attackerId;
       musicManager.playCategory('battle');
@@ -1823,16 +1875,31 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         }
       } else if (packet.type === 'LIZARD_BITE_PEER') {
         if (packet.targetId === webRTCManager.localPlayerId && player.state !== 'dead') {
+          const cfg = charConfigRef.current;
+          const actualDmg = Math.round(packet.damage * cfg.incomingDamageMult * 1000) / 1000;
           soundEngine.playCreatureHurt();
-          player.hp = Math.max(0, player.hp - packet.damage);
-          player.state = player.hp <= 0 ? 'dead' : 'stunned';
-          player.stunTimer = packet.stunDuration;
+          player.hp = Math.max(0, player.hp - actualDmg);
           player.isClimbing = false;
-          if (player.hp <= 0) {
-            setIsDead(true);
-            setLastAction(`Розовий ящер вкусив на смерть (${packet.damage.toFixed(2)} урону)!`);
+
+          if (!packet.grabbed || cfg.biteGrabImmunity) {
+            player.vy = -3.0;
+            if (player.hp <= 0) {
+              player.state = 'dead';
+              setIsDead(true);
+              setLastAction(`Розовий ящер завдав смертельного удару (${actualDmg.toFixed(2)} HP)!`);
+            } else {
+              setLastAction(`🛡️ Імунітет Монаха до укусу! Ящер відкинутий і оглушений на ${cfg.attackerStunOnGrabAttempt.toFixed(1)}с! (-${actualDmg.toFixed(2)} HP)`);
+            }
           } else {
-            setLastAction(`Розовий ящер вкусив (${packet.damage.toFixed(2)} урону) і схопив у пащу! Стан ${packet.stunDuration}с!`);
+            const actualStun = roundToOneDecimal(packet.stunDuration * cfg.incomingStunMult);
+            player.state = player.hp <= 0 ? 'dead' : 'stunned';
+            player.stunTimer = player.hp <= 0 ? 0 : actualStun;
+            if (player.hp <= 0) {
+              setIsDead(true);
+              setLastAction(`Розовий ящер вкусив на смерть (${actualDmg.toFixed(2)} урону)!`);
+            } else {
+              setLastAction(`Розовий ящер вкусив (${actualDmg.toFixed(2)} урону) і схопив у пащу! Стан ${actualStun.toFixed(1)}с!`);
+            }
           }
         }
       } else if (packet.type === 'CYCLE_SYNC') {
@@ -1872,108 +1939,138 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     let prevJumpPressed = false;
     let denDamageTimer = 0;
 
-    // Key handlers
+    // Ensure no lingering lobby input/button holds keyboard focus when entering world
+    if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
+      document.activeElement.blur();
+    }
+    containerRef.current?.focus({ preventScroll: true });
+
+    // Layout-independent Key handlers (supports EN, UKR, RU keyboard layouts + prevents button focus trap)
+    const isTypingTarget = (target: EventTarget | null): boolean =>
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      (target instanceof HTMLElement && target.isContentEditable);
+
+    const setControlFlag = (btn: 'left' | 'right' | 'up' | 'down' | 'jump', pressed: boolean) => {
+      if (controlsRef.current[btn] === pressed) return;
+      controlsRef.current[btn] = pressed;
+      setControls(prev => (prev[btn] === pressed ? prev : { ...prev, [btn]: pressed }));
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Toggle Holographic Map on 'M' or 'Tab'
-      if (e.key.toLowerCase() === 'm' || e.key === 'Tab') {
-        e.preventDefault();
-        setShowMapOverlay(prev => !prev);
-        return;
+      if (isTypingTarget(e.target)) return;
+
+      // Prevent focused UI buttons from stealing Space / Enter / WASD
+      if (document.activeElement instanceof HTMLButtonElement || document.activeElement instanceof HTMLAnchorElement) {
+        document.activeElement.blur();
       }
 
-      // Quick Respawn on 'R' if dead (Singleplayer only!)
-      if ((e.key === 'r' || e.key === 'R') && player.state === 'dead' && !isMultiplayerActiveRef.current) {
-        triggerReviveRef.current?.();
+      const code = e.code;
+      const key = e.key.toLowerCase();
+
+      // Toggle Holographic Map on 'M' or 'Tab'
+      if (code === 'KeyM' || code === 'Tab' || key === 'm' || key === 'ь' || e.key === 'Tab') {
+        e.preventDefault();
+        if (!e.repeat) setShowMapOverlay(prev => !prev);
         return;
       }
 
       // Eat berry on 'E' when holding a berry
-      if (e.key.toLowerCase() === 'e' && player.heldItem?.type === 'berry') {
+      if ((code === 'KeyE' || key === 'e' || key === 'у') && player.heldItem?.type === 'berry') {
         e.preventDefault();
-        triggerEatRef.current?.();
+        if (!e.repeat) triggerEatRef.current?.();
         return;
       }
 
       // Pickup / Drop item on 'Z', 'C', 'E', or 'F'
-      if (['z', 'c', 'e', 'f'].includes(e.key.toLowerCase())) {
-        if (e.key.toLowerCase() !== 'z' || (player.isGrounded && controlsRef.current.down)) {
+      if (
+        code === 'KeyZ' || code === 'KeyC' || code === 'KeyE' || code === 'KeyF' ||
+        ['z', 'c', 'e', 'f', 'я', 'с', 'у', 'а'].includes(key)
+      ) {
+        const isZKey = code === 'KeyZ' || key === 'z' || key === 'я';
+        if (!e.repeat && (!isZKey || (player.isGrounded && controlsRef.current.down))) {
           triggerGrabRef.current?.();
         }
       }
 
       // Throw item on 'X', 'Q'
-      if (['x', 'q'].includes(e.key.toLowerCase())) {
+      if (code === 'KeyX' || code === 'KeyQ' || ['x', 'q', 'ч', 'й'].includes(key)) {
         e.preventDefault();
-        triggerThrowRef.current?.();
+        if (!e.repeat) triggerThrowRef.current?.();
         return;
       }
 
       // Piggyback / carry action on 'G'
-      if (e.key.toLowerCase() === 'g') {
+      if (code === 'KeyG' || key === 'g' || key === 'п') {
         e.preventDefault();
-        triggerPiggybackRef.current?.();
+        if (!e.repeat) triggerPiggybackRef.current?.();
         return;
       }
 
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
+      if (
+        ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code) ||
+        ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)
+      ) {
         e.preventDefault();
       }
 
-      const key = e.key.toLowerCase();
-      if (e.key === 'ArrowLeft' || key === 'a') {
-        controlsRef.current.left = true;
-        setControls(prev => ({ ...prev, left: true }));
+      if (code === 'ArrowLeft' || code === 'KeyA' || e.key === 'ArrowLeft' || key === 'a' || key === 'ф') {
+        setControlFlag('left', true);
       }
-      if (e.key === 'ArrowRight' || key === 'd') {
-        controlsRef.current.right = true;
-        setControls(prev => ({ ...prev, right: true }));
+      if (code === 'ArrowRight' || code === 'KeyD' || e.key === 'ArrowRight' || key === 'd' || key === 'в') {
+        setControlFlag('right', true);
       }
-      if (e.key === 'ArrowUp' || key === 'w') {
-        controlsRef.current.up = true;
-        setControls(prev => ({ ...prev, up: true }));
+      if (code === 'ArrowUp' || code === 'KeyW' || e.key === 'ArrowUp' || key === 'w' || key === 'ц') {
+        setControlFlag('up', true);
       }
-      if (e.key === 'ArrowDown' || key === 's') {
-        controlsRef.current.down = true;
-        setControls(prev => ({ ...prev, down: true }));
+      if (code === 'ArrowDown' || code === 'KeyS' || e.key === 'ArrowDown' || key === 's' || key === 'і' || key === 'ы') {
+        setControlFlag('down', true);
       }
-      if (e.key === ' ' || key === 'z') {
-        controlsRef.current.jump = true;
-        setControls(prev => ({ ...prev, jump: true }));
+      if (code === 'Space' || code === 'KeyZ' || e.key === ' ' || key === 'z' || key === 'я') {
+        setControlFlag('jump', true);
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      const code = e.code;
       const key = e.key.toLowerCase();
-      if (e.key === 'ArrowLeft' || key === 'a') {
-        controlsRef.current.left = false;
-        setControls(prev => ({ ...prev, left: false }));
+      if (code === 'ArrowLeft' || code === 'KeyA' || e.key === 'ArrowLeft' || key === 'a' || key === 'ф') {
+        setControlFlag('left', false);
       }
-      if (e.key === 'ArrowRight' || key === 'd') {
-        controlsRef.current.right = false;
-        setControls(prev => ({ ...prev, right: false }));
+      if (code === 'ArrowRight' || code === 'KeyD' || e.key === 'ArrowRight' || key === 'd' || key === 'в') {
+        setControlFlag('right', false);
       }
-      if (e.key === 'ArrowUp' || key === 'w') {
-        controlsRef.current.up = false;
-        setControls(prev => ({ ...prev, up: false }));
+      if (code === 'ArrowUp' || code === 'KeyW' || e.key === 'ArrowUp' || key === 'w' || key === 'ц') {
+        setControlFlag('up', false);
       }
-      if (e.key === 'ArrowDown' || key === 's') {
-        controlsRef.current.down = false;
-        setControls(prev => ({ ...prev, down: false }));
+      if (code === 'ArrowDown' || code === 'KeyS' || e.key === 'ArrowDown' || key === 's' || key === 'і' || key === 'ы') {
+        setControlFlag('down', false);
       }
-      if (e.key === ' ' || key === 'z') {
-        controlsRef.current.jump = false;
-        setControls(prev => ({ ...prev, jump: false }));
+      if (code === 'Space' || code === 'KeyZ' || e.key === ' ' || key === 'z' || key === 'я') {
+        setControlFlag('jump', false);
       }
     };
 
-    const handleBlur = () => {
-      controlsRef.current = { left: false, right: false, up: false, down: false, jump: false };
+    const resetAllControls = () => {
+      controlsRef.current.left = false;
+      controlsRef.current.right = false;
+      controlsRef.current.up = false;
+      controlsRef.current.down = false;
+      controlsRef.current.jump = false;
       setControls({ left: false, right: false, up: false, down: false, jump: false });
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    window.addEventListener('blur', handleBlur);
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        resetAllControls();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('keyup', handleKeyUp, { capture: true });
+    window.addEventListener('blur', resetAllControls);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     let musicCheckTimer = 0;
 
@@ -2012,6 +2109,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       refreshActiveRoomLizard();
       const ctrl = controlsRef.current;
 
+      if (roomTransitionGraceTimer > 0) {
+        roomTransitionGraceTimer = Math.max(0, roomTransitionGraceTimer - delta);
+      }
+      if (sleepMsgCooldown > 0) {
+        sleepMsgCooldown = Math.max(0, sleepMsgCooldown - delta);
+      }
+
       // ---------------- Player State Updates ----------------
       if (player.state === 'stunned') {
         player.stunTimer -= delta;
@@ -2028,6 +2132,17 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         setLastAction('Слимакокіт загинув!');
       }
 
+      // Singleplayer death -> automatic cycle end & restart from last saved shelter
+      if (player.state === 'dead' && !isMultiplayerActiveRef.current) {
+        singleplayerDeathTimer += delta;
+        if (singleplayerDeathTimer >= 2.2) {
+          singleplayerDeathTimer = 0;
+          restartCycleFromSavedShelter();
+        }
+      } else {
+        singleplayerDeathTimer = 0;
+      }
+
       // ---------------- Authoritative Pink Lizard Simulation vs Client Interpolation ----------------
       if (isWorldAuthority()) {
         const roomPeers = new Map<string, Array<{
@@ -2040,6 +2155,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           hp: number;
           state: string;
           room: string;
+          biteGrabImmunity?: boolean;
+          attackerStunOnGrabAttempt?: number;
         }>>();
         for (const p of webRTCManager.remotePlayers.values()) {
           const rId = p.room || activeLoc.id;
@@ -2048,6 +2165,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             list = [];
             roomPeers.set(rId, list);
           }
+          const peerCharCfg = SLUGCAT_CHARACTERS[p.characterId === 'monk' ? 'monk' : 'survivor'];
           list.push({
             id: p.id,
             name: p.name || 'Слимакокіт',
@@ -2055,13 +2173,20 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             y: p.y,
             vx: p.vx,
             vy: p.vy,
-            hp: p.hp ?? 1,
+            hp: p.hp ?? peerCharCfg.maxHp,
             state: p.state || 'normal',
             room: rId,
+            biteGrabImmunity: peerCharCfg.biteGrabImmunity,
+            attackerStunOnGrabAttempt: peerCharCfg.attackerStunOnGrabAttempt,
           });
         }
 
         const activeRooms = new Set<string>([activeLoc.id, ...roomPeers.keys()]);
+        const localCfg = charConfigRef.current;
+        player.characterId = localCfg.id;
+        player.biteGrabImmunity = localCfg.biteGrabImmunity;
+        player.attackerStunOnGrabAttempt = localCfg.attackerStunOnGrabAttempt;
+        player.isPipeProtected = !!pipeTransit || roomTransitionGraceTimer > 0;
 
         cycleLizardsRef.current.forEach((entry: LizardStoreEntry) => {
           const liz = entry.lizard;
@@ -2079,16 +2204,33 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               rEnv.platforms,
               rEnv.poles,
               rEnv.denData,
-              (damage: number) => {
+              (damage: number, grabbed: boolean) => {
                 soundEngine.playCreatureHurt();
-                player.hp = Math.max(0, player.hp - damage);
-                player.state = player.hp <= 0 ? 'dead' : 'stunned';
-                player.stunTimer = 20.0;
-                if (player.hp <= 0) {
-                  setIsDead(true);
-                  setLastAction(`Розовий ящер вкусив на смерть (${damage.toFixed(2)} урону)!`);
+                const cfg = charConfigRef.current;
+                const actualDmg = Math.round(damage * cfg.incomingDamageMult * 1000) / 1000;
+                player.hp = Math.max(0, player.hp - actualDmg);
+                player.isClimbing = false;
+
+                if (!grabbed) {
+                  player.vx = (player.x < liz.x ? -1 : 1) * 4.5;
+                  player.vy = -3.0;
+                  if (player.hp <= 0) {
+                    player.state = 'dead';
+                    setIsDead(true);
+                    setLastAction(`Розовий ящер завдав смертельного удару (${actualDmg.toFixed(2)} HP)!`);
+                  } else {
+                    setLastAction(`🛡️ Імунітет Монаха до укусу! Ящер відкинутий і оглушений на ${cfg.attackerStunOnGrabAttempt.toFixed(1)}с! (-${actualDmg.toFixed(2)} HP)`);
+                  }
                 } else {
-                  setLastAction(`Розовий ящер вкусив (${damage.toFixed(2)} урону) і схопив у пащу! Стан 20с!`);
+                  const actualStun = roundToOneDecimal(20.0 * cfg.incomingStunMult);
+                  player.state = player.hp <= 0 ? 'dead' : 'stunned';
+                  player.stunTimer = player.hp <= 0 ? 0 : actualStun;
+                  if (player.hp <= 0) {
+                    setIsDead(true);
+                    setLastAction(`Розовий ящер вкусив на смерть (${actualDmg.toFixed(2)} урону)!`);
+                  } else {
+                    setLastAction(`Розовий ящер вкусив (${actualDmg.toFixed(2)} урону) і схопив у пащу! Стан ${actualStun.toFixed(1)}с!`);
+                  }
                 }
               },
               () => {
@@ -2107,7 +2249,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                   lizardId: entry.id,
                   room: entry.roomId,
                   damage,
-                  stunDuration: 20.0,
+                  stunDuration: grabbed ? 20.0 : 0,
                   grabbed
                 });
               },
@@ -2117,7 +2259,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 if (!destLoc) return;
                 const prevRoomId = entry.roomId;
                 const retPipe = destLoc.transitPipes.find(p => p.targetLocationId === prevRoomId);
-                const destSafe = resolveSafeSpawn(
+                const destSafe = resolveSafeLizardSpawn(
                   destLoc,
                   spawnX ?? retPipe?.startX,
                   spawnY ?? retPipe?.startY
@@ -2158,7 +2300,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                   setLastAction('Ящер заліз у лігво, залишив здобич, виліз назовні та пішов далі полювати!');
                 }
               },
-              { width: rEnv.width, height: rEnv.height }
+              { width: rEnv.width, height: rEnv.height, roomId: roomLoc.id }
             );
           } else {
             // Simplified simulation for empty rooms with natural pipe emergence (never pops mid-air)
@@ -2206,7 +2348,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                   const destRoom = getLocationById(chosenPipe.targetLocationId);
                   if (destRoom) {
                     const retPipe = destRoom.transitPipes.find(p => p.targetLocationId === entry.roomId);
-                    const destSafe = resolveSafeSpawn(
+                    const destSafe = resolveSafeLizardSpawn(
                       destRoom,
                       chosenPipe.targetSpawnX ?? retPipe?.startX,
                       chosenPipe.targetSpawnY ?? retPipe?.startY
@@ -2291,10 +2433,13 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       musicManager.setHealthFilter(player.hp / player.maxHp);
 
       // ---------------- Dynamic Music Category Switching with Exact 60s Timers ----------------
-      if (pinkLizard && pinkLizard.state !== 'dead') {
-        const distToLizard = Math.hypot((player.x + 12) - (pinkLizard.x + 26), (player.y + 19) - (pinkLizard.y + 12));
-        if (distToLizard < 480 || pinkLizard.grabbedTarget === 'player' || pinkLizard.state === 'hunt') {
+      for (const entry of activeRoomLizards) {
+        const liz = entry.lizard;
+        if (liz.state === 'dead') continue;
+        const distToLizard = Math.hypot((player.x + 12) - (liz.x + 26), (player.y + 19) - (liz.y + 12));
+        if (distToLizard < 480 || liz.grabbedTarget === 'player' || liz.state === 'hunt') {
           lizardCombatTimerRef.current = 60.0;
+          break;
         }
       }
 
@@ -2310,7 +2455,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       }
 
       musicCheckTimer += delta;
-      if (musicCheckTimer > 0.3) {
+      if (musicCheckTimer > 0.3 && !isExitingRef.current) {
         musicCheckTimer = 0;
         const inCombat = (lizardCombatTimerRef.current > 0) || (pvpCombatTimerRef.current > 0);
         musicManager.playCategory(inCombat ? 'battle' : 'game');
@@ -2393,6 +2538,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
             player.y = pipeTransit.endY - player.height / 2;
             player.vx = exitDir * 3.2;
             player.vy = -2.2;
+            roomTransitionGraceTimer = 1.6;
             soundEngine.playPickup();
             pipeTransit = null;
             lastTransitTimestamp = performance.now();
@@ -2683,27 +2829,38 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           player.vy = 0.1;
         }
 
-        // Dedicated Shelter Room physical hibernation:
+        // Dedicated Shelter Room physical hibernation with food & rain rules:
+        // - Cannot sleep if required food pips aren't filled (unless raining -> kills player!)
         if ((activeLoc.isShelterRoom || inShelterChamberRef.current) && canControl && !isHibernatingRef.current && !pipeTransit) {
           const isHoldingSleep = ctrl.jump || ctrl.down || player.crouching || isHoldingSleepBtnRef.current;
+          const reqFood = charConfigRef.current.requiredFood;
+          const hasReqFood = foodCountRef.current >= reqFood;
+          const isRainingNow = cycleSecondsLeftRef.current <= 0;
+
           if (isHoldingSleep && player.isGrounded) {
-            player.vx *= 0.5;
-            shelterSleepTimer += delta;
-            setSleepProgress(Math.min(1, shelterSleepTimer / 1.5));
-            if (shelterSleepTimer >= 1.5) {
+            if (!hasReqFood && !isRainingNow) {
               shelterSleepTimer = 0;
               setSleepProgress(0);
-              isHoldingSleepBtnRef.current = false;
-              setIsHoldingSleepBtn(false);
-              triggerHibernateRef.current?.();
+              if (sleepMsgCooldown <= 0) {
+                sleepMsgCooldown = 1.5;
+                setLastAction(`❌ Не можна спати! Заповніть обов'язкові ячейки їжі (${foodCountRef.current} / ${reqFood}).`);
+              }
+            } else {
+              player.vx *= 0.5;
+              const chargeSpeed = !hasReqFood && isRainingNow ? 3.2 : 1.0;
+              shelterSleepTimer += delta * chargeSpeed;
+              setSleepProgress(Math.min(1, shelterSleepTimer / 1.5));
+              if (shelterSleepTimer >= 1.5) {
+                shelterSleepTimer = 0;
+                setSleepProgress(0);
+                isHoldingSleepBtnRef.current = false;
+                setIsHoldingSleepBtn(false);
+                triggerHibernateRef.current?.();
+              }
             }
           } else {
             shelterSleepTimer = Math.max(0, shelterSleepTimer - delta * 2.5);
             setSleepProgress(Math.min(1, shelterSleepTimer / 1.5));
-          }
-
-          if (cycleSecondsLeftRef.current <= 0) {
-            triggerHibernateRef.current?.();
           }
         } else {
           shelterSleepTimer = 0;
@@ -2789,10 +2946,15 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         if (item.isStuck) {
           item.sleeping = true;
           // Attached to stuck target (Lizard or Player)
-          if (item.stuckTarget === 'lizard' && pinkLizard) {
-            item.x = (pinkLizard.x + pinkLizard.width / 2) + (item.stuckOffsetX ?? 0);
-            item.y = (pinkLizard.y + pinkLizard.height / 2) + (item.stuckOffsetY ?? 0);
-            item.rotation = item.stuckAngle ?? 0;
+          if (item.stuckTarget === 'lizard') {
+            const stuckLiz = (item.stuckLizardId
+              ? activeRoomLizards.find(e => e.id === item.stuckLizardId)?.lizard
+              : null) || pinkLizard;
+            if (stuckLiz) {
+              item.x = (stuckLiz.x + stuckLiz.width / 2) + (item.stuckOffsetX ?? 0);
+              item.y = (stuckLiz.y + stuckLiz.height / 2) + (item.stuckOffsetY ?? 0);
+              item.rotation = item.stuckAngle ?? 0;
+            }
           } else if (item.stuckTarget === 'player') {
             item.x = player.chest.x + (item.stuckOffsetX ?? 0);
             item.y = player.chest.y + (item.stuckOffsetY ?? 0);
@@ -2835,35 +2997,42 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
         // Airborne spear / rock hit test against characters & creatures
         if (item.isAirborne) {
-          // Check collision with Pink Lizard
-          if (pinkLizard && pinkLizard.state !== 'dead') {
-            const lizDist = Math.hypot(item.x - (pinkLizard.x + pinkLizard.width / 2), item.y - (pinkLizard.y + pinkLizard.height / 2));
+          // Check collision with ALL Pink Lizards currently in this room
+          let hitAnyLizard = false;
+          for (const lizEntry of activeRoomLizards) {
+            const targetLiz = lizEntry.lizard;
+            if (targetLiz.state === 'dead' || targetLiz.pipeTransit) continue;
+            const lizDist = Math.hypot(item.x - (targetLiz.x + targetLiz.width / 2), item.y - (targetLiz.y + targetLiz.height / 2));
             if (lizDist < 36) {
+              hitAnyLizard = true;
               if (item.type === 'berry') {
                 item.isAirborne = false;
                 item.vx = -item.vx * 0.25;
                 item.vy = -1.5;
                 soundEngine.playPickup();
-                continue;
+                break;
               }
+              const cfg = charConfigRef.current;
               const kbVx = item.vx * 0.14;
               const kbVy = -2.2;
               if (item.type === 'spear') {
+                const dmg = Math.round(1.0 * cfg.outgoingDamageMult * 100) / 100;
+                const stun = roundToOneDecimal(2.5 * cfg.outgoingStunMult);
                 soundEngine.playHit('spear');
                 if (isWorldAuthority()) {
-                  pinkLizard.takeDamage(1.0, 2.5);
-                  pinkLizard.vx += kbVx;
-                  pinkLizard.vy += kbVy;
+                  targetLiz.takeDamage(dmg, stun);
+                  targetLiz.vx += kbVx;
+                  targetLiz.vy += kbVy;
                   sendAuthoritativeLizardsSync();
                 } else {
                   webRTCManager.broadcastPacket({
                     type: 'LIZARD_HIT',
                     senderId: webRTCManager.localPlayerId,
-                    lizardId: pinkLizard.id,
+                    lizardId: targetLiz.id,
                     room: activeLoc.id,
                     weaponType: 'spear',
-                    damage: 1.0,
-                    stunDuration: 2.5,
+                    damage: dmg,
+                    stunDuration: stun,
                     knockbackVx: kbVx,
                     knockbackVy: kbVy
                   });
@@ -2871,28 +3040,31 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 item.isAirborne = false;
                 item.isStuck = true;
                 item.stuckTarget = 'lizard';
-                item.stuckOffsetX = (pinkLizard.facingRight ? -1 : 1) * 8;
+                item.stuckLizardId = targetLiz.id;
+                item.stuckOffsetX = (targetLiz.facingRight ? -1 : 1) * 8;
                 item.stuckOffsetY = (Math.random() - 0.5) * 6;
                 item.stuckAngle = item.rotation;
                 item.vx = 0;
                 item.vy = 0;
-                setLastAction(`Спис влучив у ящера! HP: ${Math.max(0, pinkLizard.hp - (isWorldAuthority() ? 0 : 1.0)).toFixed(1)} / 3.5`);
+                setLastAction(`Спис влучив у ящера (-${dmg.toFixed(1)} HP, стан ${stun.toFixed(1)}с)!`);
               } else {
+                const dmg = Math.round(0.2 * cfg.outgoingDamageMult * 100) / 100;
+                const stun = roundToOneDecimal(1.8 * cfg.outgoingStunMult);
                 soundEngine.playHit('rock');
                 if (isWorldAuthority()) {
-                  pinkLizard.takeDamage(0.2, 1.8);
-                  pinkLizard.vx += kbVx * 0.6;
-                  pinkLizard.vy += kbVy * 0.6;
+                  targetLiz.takeDamage(dmg, stun);
+                  targetLiz.vx += kbVx * 0.6;
+                  targetLiz.vy += kbVy * 0.6;
                   sendAuthoritativeLizardsSync();
                 } else {
                   webRTCManager.broadcastPacket({
                     type: 'LIZARD_HIT',
                     senderId: webRTCManager.localPlayerId,
-                    lizardId: pinkLizard.id,
+                    lizardId: targetLiz.id,
                     room: activeLoc.id,
                     weaponType: 'rock',
-                    damage: 0.2,
-                    stunDuration: 1.8,
+                    damage: dmg,
+                    stunDuration: stun,
                     knockbackVx: kbVx * 0.6,
                     knockbackVy: kbVy * 0.6
                   });
@@ -2900,11 +3072,12 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                 item.isAirborne = false;
                 item.vx = -item.vx * 0.35;
                 item.vy = -1.8;
-                setLastAction(`Камінь влучив у ящера! Стан 1.8с (HP: ${Math.max(0, pinkLizard.hp - (isWorldAuthority() ? 0 : 0.2)).toFixed(1)} / 3.5)`);
+                setLastAction(`Камінь влучив у ящера! Стан ${stun.toFixed(1)}с (-${dmg.toFixed(2)} HP)`);
               }
-              continue;
+              break;
             }
           }
+          if (hitAnyLizard) continue;
 
           // Check collision with Player
           const playerDist = Math.hypot(item.x - (player.x + player.width / 2), item.y - (player.y + player.height / 2));
@@ -2950,7 +3123,15 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                   soundEngine.playPickup();
                   continue;
                 }
-                distributedSimulation.registerClientSideHit(rp.id, item.type, item.x, item.y);
+                const cfg = charConfigRef.current;
+                distributedSimulation.registerClientSideHit(
+                  rp.id,
+                  item.type,
+                  item.x,
+                  item.y,
+                  cfg.outgoingDamageMult,
+                  cfg.outgoingStunMult
+                );
                 pvpCombatTimerRef.current = 60.0;
                 pvpTargetPeerIdRef.current = rp.id;
                 musicManager.playCategory('battle');
@@ -3123,14 +3304,15 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               });
             }
 
-            const nextFood = Math.min(7, foodCountRef.current + 1);
+            const cfg = charConfigRef.current;
+            const nextFood = Math.min(cfg.maxFood, foodCountRef.current + 1);
             foodCountRef.current = nextFood;
             setFoodCount(nextFood);
             setJustFilledIndex(nextFood - 1);
             setTimeout(() => setJustFilledIndex(null), 800);
 
             if (!isSoundMutedRef.current) soundEngine.playEatComplete();
-            setLastAction(`Ягоду з'їдено! +1 ячейка їжі (${nextFood} / 7: ${Math.min(4, nextFood)} обов'язк. + ${Math.max(0, nextFood - 4)} додатк.)`);
+            setLastAction(`Ягоду з'їдено! +1 ячейка їжі (${nextFood} / ${cfg.maxFood}: ${Math.min(cfg.requiredFood, nextFood)} обов'язк. + ${Math.max(0, nextFood - cfg.requiredFood)} додатк.)`);
           }
         }
       }
@@ -3149,6 +3331,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       if (webRTCManager.connectionStatus === 'connected' && t - lastBroadcastTime > 0.04) {
         lastBroadcastTime = t;
         webRTCManager.broadcastPlayerState({
+          characterId: charConfigRef.current.id,
           x: player.x,
           y: player.y,
           vx: player.vx,
@@ -3217,6 +3400,11 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           npcStunTimer: pinkLizard ? Math.max(0, Math.round(pinkLizard.stunTimer * 100) / 100) : 0,
           npcX: pinkLizard ? Math.round(pinkLizard.x) : 0,
           npcY: pinkLizard ? Math.round(pinkLizard.y) : 0,
+          roomLizards: activeRoomLizards.map(e => ({
+            id: e.id,
+            x: Math.round(e.lizard.x + e.lizard.width / 2),
+            y: Math.round(e.lizard.y + e.lizard.height / 2)
+          })),
 
           spearsCount: spears,
           rocksCount: rocks,
@@ -3649,8 +3837,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         ctx.restore();
       }
 
-      if (pinkLizard) {
-        pinkLizard.render(ctx, t);
+      for (const entry of activeRoomLizards) {
+        entry.lizard.render(ctx, t);
       }
 
       // 7. Draw Player OR Traveling Slugcat Silhouette in Pipe
@@ -3661,7 +3849,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         const transitAngle = Math.atan2(pipeTransit.endY - pipeTransit.startY, pipeTransit.endX - pipeTransit.startX);
 
         ctx.save();
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = charConfigRef.current.bodyColorTop;
         ctx.shadowColor = pipeTransit.isShelter ? '#38bdf8' : '#34d399';
         ctx.shadowBlur = 12;
         ctx.beginPath();
@@ -3767,9 +3955,10 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     return () => {
       syncRoomItemsCache();
       cancelAnimationFrame(animId);
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('keyup', handleKeyUp, { capture: true });
+      window.removeEventListener('blur', resetAllControls);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       unregisterPeerList();
       unregisterStatus();
       unregisterHit();
@@ -4068,11 +4257,15 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     const hipsX = (entity.hips && Number.isFinite(entity.hips.x)) ? entity.hips.x : chestX;
     const hipsY = (entity.hips && Number.isFinite(entity.hips.y)) ? entity.hips.y : chestY + 14;
 
+    const charColors = SLUGCAT_CHARACTERS[entity.characterId === 'monk' ? 'monk' : 'survivor'];
+
     // 1. Procedural Tail Chain (Optimized single-pass stroke without gradient allocations)
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     if (Array.isArray(entity.tail) && entity.tail.length > 1) {
-      const tailColor = entity.state === 'dead' ? '#cbd5e1' : '#f1f5f9';
+      const tailColor = entity.state === 'dead'
+        ? (entity.characterId === 'monk' ? '#d4c36a' : '#cbd5e1')
+        : charColors.bodyColorMid;
       const tailOutline = entity.state === 'dead' ? 'rgba(51, 65, 85, 0.4)' : '#0f172a';
 
       for (let i = 1; i < entity.tail.length; i++) {
@@ -4106,17 +4299,17 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         hipsX, hipsY + 12
       );
       if (entity.state === 'dead') {
-        grad.addColorStop(0, '#cbd5e1');
-        grad.addColorStop(0.5, '#94a3b8');
-        grad.addColorStop(1, '#64748b');
+        grad.addColorStop(0, entity.characterId === 'monk' ? '#e5d478' : '#cbd5e1');
+        grad.addColorStop(0.5, entity.characterId === 'monk' ? '#b39f49' : '#94a3b8');
+        grad.addColorStop(1, entity.characterId === 'monk' ? '#7c6d2c' : '#64748b');
       } else {
-        grad.addColorStop(0, '#ffffff');
-        grad.addColorStop(0.4, '#f1f5f9');
-        grad.addColorStop(1, '#e2e8f0');
+        grad.addColorStop(0, charColors.bodyColorTop);
+        grad.addColorStop(0.4, charColors.bodyColorMid);
+        grad.addColorStop(1, charColors.bodyColorBottom);
       }
       slugGrad = grad;
     } catch {
-      slugGrad = entity.state === 'dead' ? '#94a3b8' : '#f8fafc';
+      slugGrad = entity.state === 'dead' ? '#94a3b8' : charColors.bodyColorMid;
     }
 
     ctx.fillStyle = slugGrad;
@@ -4126,8 +4319,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     // 3. Feet / Paws
     if (entity.isGrounded && entity.state !== 'dead') {
       const feetY = hipsY + (entity.crouching ? 8 : 11.5);
-      ctx.fillStyle = '#faf0db';
-      ctx.strokeStyle = '#855140';
+      ctx.fillStyle = charColors.bodyColorTop;
+      ctx.strokeStyle = charColors.contourColor;
       ctx.lineWidth = 1.2;
 
       ctx.beginPath();
@@ -4143,7 +4336,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
     // 4. Arms / Hands / Held item
     if (entity.isClimbing) {
-      ctx.strokeStyle = '#faf0db';
+      ctx.strokeStyle = charColors.bodyColorTop;
       ctx.lineWidth = 3.5;
       ctx.lineCap = 'round';
       ctx.beginPath();
@@ -4151,7 +4344,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       ctx.quadraticCurveTo(chestX + (dirSign * 14), chestY - 9, chestX + (dirSign * 8), chestY + 1);
       ctx.stroke();
 
-      ctx.strokeStyle = '#855140';
+      ctx.strokeStyle = charColors.contourColor;
       ctx.lineWidth = 1.0;
       ctx.stroke();
 
@@ -4181,7 +4374,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       const evx = Number.isFinite(entity.vx) ? entity.vx : 0;
       const evy = Number.isFinite(entity.vy) ? entity.vy : 0;
       const armSwing = Math.abs(evx) > 0.4 ? Math.sin(t * 2.0) * 4 : 0;
-      ctx.strokeStyle = '#faf0db';
+      ctx.strokeStyle = charColors.bodyColorTop;
       ctx.lineWidth = 3.0;
       ctx.lineCap = 'round';
 
@@ -4215,7 +4408,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       }
 
     } else if (entity.state === 'stunned') {
-      ctx.strokeStyle = '#faf0db';
+      ctx.strokeStyle = charColors.bodyColorTop;
       ctx.lineWidth = 2.8;
       ctx.lineCap = 'round';
       const dazeArm = Math.sin(t * 4) * 3;
@@ -4272,7 +4465,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     ctx.fill();
 
     // Smooth outer contour lines
-    ctx.strokeStyle = entity.state === 'dead' ? '#334155' : '#855140';
+    ctx.strokeStyle = entity.state === 'dead' ? '#334155' : charColors.contourColor;
     ctx.lineWidth = 1.3;
     ctx.beginPath();
     ctx.moveTo(headX - headRad, headY);
@@ -4293,7 +4486,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
           chestX + (dirSign * 2), chestY + 4, 1,
           chestX + (dirSign * 2), chestY + 6, 12
         );
-        bellyGrad.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
+        bellyGrad.addColorStop(0, entity.characterId === 'monk' ? 'rgba(254, 249, 195, 0.7)' : 'rgba(255, 255, 255, 0.7)');
         bellyGrad.addColorStop(0.7, 'rgba(254, 243, 199, 0.35)');
         bellyGrad.addColorStop(1, 'rgba(254, 243, 199, 0)');
 
@@ -4319,8 +4512,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     const earRightY = headY - 7;
     const earSway = Number.isFinite(entity.earSway) ? entity.earSway : 0;
 
-    ctx.fillStyle = entity.state === 'dead' ? '#94a3b8' : '#fef08a';
-    ctx.strokeStyle = entity.state === 'dead' ? '#334155' : '#855140';
+    ctx.fillStyle = entity.state === 'dead' ? '#94a3b8' : charColors.earColor;
+    ctx.strokeStyle = entity.state === 'dead' ? '#334155' : charColors.contourColor;
     ctx.lineWidth = 1.3;
 
     // Left Ear
@@ -4335,7 +4528,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     ctx.stroke();
 
     if (entity.state !== 'dead') {
-      ctx.fillStyle = '#fbcfe8';
+      ctx.fillStyle = charColors.earInnerColor;
       ctx.beginPath();
       ctx.ellipse(0, -9, 2.0, 7.5, earAngLeft, 0, Math.PI * 2);
       ctx.fill();
@@ -4348,14 +4541,14 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     const earAngRight = entity.state === 'dead' 
       ? 0.8 
       : (entity.state === 'stunned' ? 0.45 + (earSway * 0.08) : 0.15 + (earSway * 0.05));
-    ctx.fillStyle = entity.state === 'dead' ? '#94a3b8' : '#fef08a';
+    ctx.fillStyle = entity.state === 'dead' ? '#94a3b8' : charColors.earColor;
     ctx.beginPath();
     ctx.ellipse(0, -9, 4.4, 11.5, earAngRight, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
 
     if (entity.state !== 'dead') {
-      ctx.fillStyle = '#fbcfe8';
+      ctx.fillStyle = charColors.earInnerColor;
       ctx.beginPath();
       ctx.ellipse(0, -9, 2.0, 7.5, earAngRight, 0, Math.PI * 2);
       ctx.fill();
@@ -4554,8 +4747,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
   // Touch action button handlers with instant controlsRef update
   const handlePress = (btn: 'left' | 'right' | 'up' | 'down' | 'jump', isPressed: boolean) => {
+    if (controlsRef.current[btn] === isPressed) return;
     controlsRef.current[btn] = isPressed;
-    setControls(prev => ({ ...prev, [btn]: isPressed }));
+    setControls(prev => (prev[btn] === isPressed ? prev : { ...prev, [btn]: isPressed }));
   };
 
   // Touch & Mouse handlers that support simultaneous multi-touch without gesture conflicts
@@ -4628,7 +4822,19 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя і нічого більше тоєсть він сохранился а той игрок який ліг спать він до конца цикла наблюдатель..."
   const handleHibernate = () => {
     const liveFood = foodCountRef.current;
-    const isStarvation = liveFood < 4;
+    const reqFood = charConfigRef.current.requiredFood;
+    const hasRequiredFood = liveFood >= reqFood;
+    const isRainingNow = cycleSecondsLeftRef.current <= 0;
+
+    if (!hasRequiredFood) {
+      if (isRainingNow) {
+        triggerForceDeathRef.current?.('❌ Ви спробували заснути під час зливи з порожнім шлунком і загинули!');
+        return;
+      }
+      setLastAction(`❌ Не можна спати! Заповніть обов'язкові ячейки їжі (${liveFood} / ${reqFood}).`);
+      return;
+    }
+
     const liveSave = playerSaveRef.current;
     const saveX = Math.round(playerPosRef.current.x);
     const saveY = Math.round(playerPosRef.current.y);
@@ -4636,9 +4842,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
     // In multiplayer: player falls asleep, becomes invulnerable, saves progress, and enters spectator mode
     if (isMultiplayerActiveRef.current) {
       soundEngine.playKarmaAscend();
-      const newKarma = isStarvation ? Math.max(1, liveSave.karma - 1) : Math.min(5, liveSave.karma + 1);
+      const newKarma = Math.min(5, liveSave.karma + 1);
       const newCycle = liveSave.cycle + 1;
-      const newFood = Math.max(0, liveFood - (isStarvation ? liveFood : 4));
+      const newFood = Math.max(0, liveFood - reqFood);
 
       const updatedSave: PlayerSaveData = {
         karma: newKarma,
@@ -4666,28 +4872,22 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       if (living.length > 0) {
         setSpectatedPeerId(living[0].id);
       }
-      setLastAction(isStarvation
-        ? "😴 Заснули від виснаження в укритті! (Голодний сон: карма -1). Режим спостерігача."
-        : "😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано.");
+      setLastAction("😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано.");
       return;
     }
 
-    // Single-player hibernation (including starvation hibernation if food < 4)
+    // Single-player hibernation (requires all mandatory food pips filled)
     setIsHibernating(true);
     isHibernatingRef.current = true;
     soundEngine.playShelterDoor();
-    if (isStarvation) {
-      setLastAction("⚠️ Гібернація від виснаження! Карма знизилась через брак їжі (менше 4).");
-    }
 
     setTimeout(() => {
       soundEngine.playKarmaAscend();
       const currentSave = playerSaveRef.current;
       const curFood = foodCountRef.current;
-      const starv = curFood < 4;
-      const newKarma = starv ? Math.max(1, currentSave.karma - 1) : Math.min(5, currentSave.karma + 1);
+      const newKarma = Math.min(5, currentSave.karma + 1);
       const newCycle = currentSave.cycle + 1;
-      const newFood = Math.max(0, curFood - (starv ? curFood : 4));
+      const newFood = Math.max(0, curFood - reqFood);
 
       const updatedSave: PlayerSaveData = {
         karma: newKarma,
@@ -4731,9 +4931,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         isHibernatingRef.current = false;
         setInShelterChamber(false);
         soundEngine.playShelterDoor();
-        setLastAction(starv
-          ? `Цикл ${newCycle} розпочато ослабленим (карма ${newKarma}/5). Знайдіть їжу!`
-          : `Успішна гібернація! Карма підвищена до ${newKarma}/5. Цикл ${newCycle} розпочато!`);
+        setLastAction(`Успішна гібернація! Карма підвищена до ${newKarma}/5. Цикл ${newCycle} розпочато!`);
       }, 1800);
     }, 1200);
   };
@@ -4762,8 +4960,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
   return (
     <div 
       ref={containerRef}
+      tabIndex={-1}
       style={{ touchAction: 'none' }}
-      className="absolute inset-0 bg-[#0c0a10] z-40 flex flex-col items-center justify-between font-sans text-slate-100 overflow-hidden select-none touch-none"
+      className="absolute inset-0 bg-[#0c0a10] z-40 flex flex-col items-center justify-between font-sans text-slate-100 overflow-hidden select-none touch-none outline-none"
     >
       
       {/* GitHub Update Notification Banner */}
@@ -4801,6 +5000,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={() => {
+              isExitingRef.current = true;
+              musicManager.playCategory('menu');
               webRTCManager.disconnect();
               onBack();
             }}
@@ -5013,11 +5214,11 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               </svg>
             </div>
 
-            {/* Rain World Food Pips: 4 Required + Divider + 3 Extra */}
+            {/* Rain World Food Pips: Required + Divider + Extra */}
             <div className="flex items-center gap-1.5 filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]">
-              {/* 4 Required Food Pips */}
+              {/* Required Food Pips */}
               <div className="flex items-center gap-1.5">
-                {Array.from({ length: 4 }).map((_, i) => {
+                {Array.from({ length: charConfig.requiredFood }).map((_, i) => {
                   const isFilled = i < foodCount;
                   const isJustFilled = i === justFilledIndex;
 
@@ -5025,7 +5226,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                     <div
                       key={`req-${i}`}
                       className="relative flex items-center justify-center w-4 h-4 sm:w-5 sm:h-5"
-                      title={`Обов'язкова ячейка їжі ${i + 1} / 4 (потрібна для виживання)`}
+                      title={`Обов'язкова ячейка їжі ${i + 1} / ${charConfig.requiredFood} (потрібна для виживання)`}
                     >
                       {isFilled ? (
                         <motion.div 
@@ -5063,10 +5264,10 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
               {/* Pip Divider Bar */}
               <div className="w-[2px] h-4 sm:h-5 bg-white/40 rounded-full mx-0.5" />
 
-              {/* 3 Extra Surplus Food Pips */}
+              {/* Extra Surplus Food Pips */}
               <div className="flex items-center gap-1.5">
-                {Array.from({ length: 3 }).map((_, idx) => {
-                  const pipIndex = 4 + idx;
+                {Array.from({ length: charConfig.extraFood }).map((_, idx) => {
+                  const pipIndex = charConfig.requiredFood + idx;
                   const isFilled = pipIndex < foodCount;
                   const isJustFilled = pipIndex === justFilledIndex;
 
@@ -5074,7 +5275,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                     <div
                       key={`extra-${pipIndex}`}
                       className="relative flex items-center justify-center w-3.5 h-3.5 sm:w-4 sm:h-4"
-                      title={`Додаткова ячейка їжі ${idx + 1} / 3 (зберігається на наступний цикл)`}
+                      title={`Додаткова ячейка їжі ${idx + 1} / ${charConfig.extraFood} (зберігається на наступний цикл)`}
                     >
                       {isFilled ? (
                         <motion.div 
@@ -5282,11 +5483,15 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                       );
                     })}
 
-                    {/* NPC / Lizard Radar Position */}
-                    <circle cx={telemetry.npcX} cy={telemetry.npcY} r="10" fill="#ec4899" stroke="#ffffff" strokeWidth="2" />
-                    <text x={telemetry.npcX} y={telemetry.npcY - 14} fill="#f472b6" fontSize="12" fontWeight="bold" textAnchor="middle">
-                      ЯЩІР
-                    </text>
+                    {/* NPC / Lizards Radar Positions */}
+                    {telemetry.roomLizards.map((lizPos) => (
+                      <g key={lizPos.id}>
+                        <circle cx={lizPos.x} cy={lizPos.y} r="10" fill="#ec4899" stroke="#ffffff" strokeWidth="2" />
+                        <text x={lizPos.x} y={lizPos.y - 14} fill="#f472b6" fontSize="12" fontWeight="bold" textAnchor="middle">
+                          ЯЩІР
+                        </text>
+                      </g>
+                    ))}
 
                     {/* Live Player Position Marker */}
                     <circle cx={telemetry.x} cy={telemetry.y} r="13" fill="#facc15" stroke="#ffffff" strokeWidth="3" className="animate-pulse" />
@@ -5306,7 +5511,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                     </span>
                     <span className="flex items-center gap-1 text-pink-300">
                       <span className="w-2.5 h-2.5 rounded-full bg-pink-500 inline-block" />
-                      Ящір ({telemetry.npcX}, {telemetry.npcY})
+                      Ящірів: {telemetry.roomLizards.length}
                     </span>
                     <span className="flex items-center gap-1 text-sky-300">
                       <span className="w-2.5 h-2.5 rounded-full bg-sky-400 inline-block shadow-sm" />
@@ -5314,7 +5519,7 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                     </span>
                     <span className="flex items-center gap-1 text-amber-400">
                       <CircleDot className="w-3 h-3 text-amber-400" />
-                      Їжа: {foodCount} / 7
+                      Їжа: {foodCount} / {charConfig.maxFood}
                     </span>
                   </div>
 
@@ -5369,19 +5574,9 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
                   <span className="truncate text-zinc-300 text-[11px] sm:text-xs">
                     {isMultiplayerActive 
                       ? 'Ви загинули. Очікуйте завершення поточного циклу або початку наступного.' 
-                      : 'Ви загинули в дикому світі.'}
+                      : 'Ви загинули. Цикл завершується — повернення до останнього укриття...'}
                   </span>
                 </div>
-                {/* Respawn button strictly only in singleplayer! */}
-                {!isMultiplayerActive && (
-                  <button
-                    onClick={() => triggerReviveRef.current?.()}
-                    className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white font-bold text-[10px] shrink-0 cursor-pointer transition-colors active:scale-95"
-                    title="Швидкий респавн (R)"
-                  >
-                    Респавн (R)
-                  </button>
-                )}
               </motion.div>
             )}
           </AnimatePresence>
@@ -5659,54 +5854,78 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
       {/* ---------------- DEDICATED SHELTER SLEEP BUTTON (TOUCH & DESKTOP) ---------------- */}
       {/* "В убержкі досихпор не работає додай окрему кнопку яку нада зажать і буде сон" */}
       <AnimatePresence>
-        {(currentLocation.isShelterRoom || inShelterChamber) && !isHibernating && !isDead && !isSpectating && (
-          <motion.div
-            initial={{ opacity: 0, y: -15 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -15 }}
-            transition={{ duration: 0.2 }}
-            className="absolute top-16 sm:top-20 left-1/2 -translate-x-1/2 z-40 pointer-events-auto"
-          >
-            <button
-              type="button"
-              style={{ touchAction: 'none' }}
-              onMouseDown={() => { isHoldingSleepBtnRef.current = true; setIsHoldingSleepBtn(true); }}
-              onMouseUp={() => { isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
-              onMouseLeave={() => { isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
-              onTouchStart={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = true; setIsHoldingSleepBtn(true); }}
-              onTouchEnd={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
-              onTouchCancel={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
-              className={`relative group overflow-hidden px-5 py-3 sm:px-6 sm:py-3.5 rounded-2xl border-2 flex items-center gap-3.5 font-mono font-bold shadow-2xl transition-all cursor-pointer select-none active:scale-95 ${
-                isHoldingSleepBtn || sleepProgress > 0
-                  ? 'bg-cyan-950/95 border-cyan-300 text-cyan-100 shadow-[0_0_30px_rgba(34,211,238,0.6)] scale-105'
-                  : 'bg-zinc-950/90 hover:bg-zinc-900 border-cyan-500/80 text-cyan-300 shadow-[0_0_20px_rgba(34,211,238,0.3)]'
-              }`}
-              title="Затисніть кнопку для засинання та гібернації"
+        {(currentLocation.isShelterRoom || inShelterChamber) && !isHibernating && !isDead && !isSpectating && (() => {
+          const hasReqFood = foodCount >= charConfig.requiredFood;
+          const isRainingNow = cycleSecondsLeft <= 0 || stormActive;
+          const isDangerSleep = !hasReqFood && isRainingNow;
+          const isBlockedDry = !hasReqFood && !isRainingNow;
+          return (
+            <motion.div
+              initial={{ opacity: 0, y: -15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              transition={{ duration: 0.2 }}
+              className="absolute top-16 sm:top-20 left-1/2 -translate-x-1/2 z-40 pointer-events-auto"
             >
-              {/* Progress background fill */}
-              <div 
-                className="absolute inset-0 bg-gradient-to-r from-cyan-600/40 via-cyan-400/50 to-cyan-300/60 transition-all pointer-events-none" 
-                style={{ width: `${Math.round(sleepProgress * 100)}%` }} 
-              />
-              <span className="text-2xl relative z-10">
-                {isHoldingSleepBtn || sleepProgress > 0 ? '💤' : '🛏️'}
-              </span>
-              <div className="flex flex-col text-left relative z-10">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs sm:text-sm tracking-widest font-black uppercase text-cyan-200">
-                    {sleepProgress > 0 ? `ЗАСИНАННЯ ${Math.round(sleepProgress * 100)}%` : 'ЗАТИСНІТЬ ДЛЯ СНУ'}
-                  </span>
-                  {sleepProgress > 0 && (
-                    <span className="inline-block w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
-                  )}
-                </div>
-                <span className="text-[9px] text-cyan-300/80 font-normal">
-                  {sleepProgress > 0 ? 'Утримуйте до 100% щоб зберегти цикл' : 'Затисніть кнопку або клавіші [ПРОБІЛ / ВНИЗ]'}
+              <button
+                type="button"
+                style={{ touchAction: 'none' }}
+                onMouseDown={() => { isHoldingSleepBtnRef.current = true; setIsHoldingSleepBtn(true); }}
+                onMouseUp={() => { isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+                onMouseLeave={() => { isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+                onTouchStart={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = true; setIsHoldingSleepBtn(true); }}
+                onTouchEnd={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+                onTouchCancel={(e) => { e.preventDefault(); isHoldingSleepBtnRef.current = false; setIsHoldingSleepBtn(false); }}
+                className={`relative group overflow-hidden px-5 py-3 sm:px-6 sm:py-3.5 rounded-2xl border-2 flex items-center gap-3.5 font-mono font-bold shadow-2xl transition-all cursor-pointer select-none active:scale-95 ${
+                  isDangerSleep
+                    ? 'bg-red-950/95 border-red-500 text-red-100 shadow-[0_0_25px_rgba(239,68,68,0.55)]'
+                    : isBlockedDry
+                    ? 'bg-zinc-950/90 border-amber-600/70 text-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.2)]'
+                    : (isHoldingSleepBtn || sleepProgress > 0)
+                    ? 'bg-cyan-950/95 border-cyan-300 text-cyan-100 shadow-[0_0_30px_rgba(34,211,238,0.6)] scale-105'
+                    : 'bg-zinc-950/90 hover:bg-zinc-900 border-cyan-500/80 text-cyan-300 shadow-[0_0_20px_rgba(34,211,238,0.3)]'
+                }`}
+                title={isDangerSleep ? 'Злива! Спроба заснути голодним убʼє слимакокота!' : isBlockedDry ? `Потрібно ${charConfig.requiredFood} обовʼязкових ячеєк їжі` : 'Затисніть кнопку для засинання та гібернації'}
+              >
+                {/* Progress background fill */}
+                <div 
+                  className={`absolute inset-0 bg-gradient-to-r transition-all pointer-events-none ${
+                    isDangerSleep
+                      ? 'from-red-700/50 via-red-500/60 to-red-400/70'
+                      : 'from-cyan-600/40 via-cyan-400/50 to-cyan-300/60'
+                  }`}
+                  style={{ width: `${Math.round(sleepProgress * 100)}%` }} 
+                />
+                <span className="text-2xl relative z-10">
+                  {isDangerSleep ? '⚠️' : isBlockedDry ? '🔒' : (isHoldingSleepBtn || sleepProgress > 0 ? '💤' : '🛏️')}
                 </span>
-              </div>
-            </button>
-          </motion.div>
-        )}
+                <div className="flex flex-col text-left relative z-10">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs sm:text-sm tracking-widest font-black uppercase ${
+                      isDangerSleep ? 'text-red-200' : isBlockedDry ? 'text-amber-300' : 'text-cyan-200'
+                    }`}>
+                      {isBlockedDry
+                        ? `НЕДОСТАТНЬО ЇЖІ (${foodCount}/${charConfig.requiredFood})`
+                        : isDangerSleep
+                        ? (sleepProgress > 0 ? `СМЕРТЬ ЧЕРЕЗ ГОЛОД ${Math.round(sleepProgress * 100)}%` : '⚠️ СПРОБА СНУ (ГОЛОДНИЙ У ЗЛИВУ = СМЕРТЬ)')
+                        : (sleepProgress > 0 ? `ЗАСИНАННЯ ${Math.round(sleepProgress * 100)}%` : 'ЗАТИСНІТЬ ДЛЯ СНУ')}
+                    </span>
+                    {sleepProgress > 0 && (
+                      <span className={`inline-block w-2 h-2 rounded-full animate-ping ${isDangerSleep ? 'bg-red-400' : 'bg-cyan-400'}`} />
+                    )}
+                  </div>
+                  <span className={`text-[9px] font-normal ${isDangerSleep ? 'text-red-300/90' : isBlockedDry ? 'text-amber-400/80' : 'text-cyan-300/80'}`}>
+                    {isBlockedDry
+                      ? `Заповніть ${charConfig.requiredFood} обовʼязкові ячейки їжі, щоб спати`
+                      : isDangerSleep
+                      ? 'У зливу без їжі сон смертельний!'
+                      : (sleepProgress > 0 ? 'Утримуйте до 100% щоб зберегти цикл' : 'Затисніть кнопку або клавіші [ПРОБІЛ / ВНИЗ]')}
+                  </span>
+                </div>
+              </button>
+            </motion.div>
+          );
+        })()}
       </AnimatePresence>
 
       {/* ---------------- AUTHENTIC RAIN WORLD HIBERNATION CINEMATIC ---------------- */}
@@ -5887,12 +6106,6 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
         <span className="text-amber-400 font-bold">Z / E — взяти / покласти</span>
         <span>•</span>
         <span className="text-red-400 font-bold">X / Q — кинути спис / камінь</span>
-        {isDead && !isMultiplayerActive && (
-          <>
-            <span>•</span>
-            <span className="text-red-400 font-bold">R — відродитися</span>
-          </>
-        )}
       </div>
 
     </div>

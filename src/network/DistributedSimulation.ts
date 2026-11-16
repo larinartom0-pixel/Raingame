@@ -4,6 +4,7 @@
 import { webRTCManager } from './WebRTCManager';
 import { NetworkPacket } from './types';
 import { soundEngine } from '../components/RainWorldSynth';
+import { roundToOneDecimal } from '../types';
 
 export interface HitResult {
   attackerId: string;
@@ -134,10 +135,14 @@ export class DistributedSimulationManager {
     targetId: string,
     itemType: 'spear' | 'rock',
     impactX: number,
-    impactY: number
+    impactY: number,
+    outgoingDamageMult: number = 1.0,
+    outgoingStunMult: number = 1.0
   ): boolean {
-    const damage = itemType === 'spear' ? 1.0 : 0.01;
-    const stunDuration = itemType === 'spear' ? 1.8 : 1.2;
+    const baseDamage = itemType === 'spear' ? 1.0 : 0.01;
+    const baseStun = itemType === 'spear' ? 1.8 : 1.2;
+    const damage = Math.round(baseDamage * outgoingDamageMult * 1000) / 1000;
+    const stunDuration = roundToOneDecimal(baseStun * outgoingStunMult);
 
     // 1. Play immediate local impact audio & visual feedback
     soundEngine.playHit(itemType);

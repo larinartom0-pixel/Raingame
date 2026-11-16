@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Sparkles, Play, Volume2, VolumeX, Settings, Compass, HelpCircle, Globe, Users, ExternalLink, Layers } from 'lucide-react';
 
-import { WeatherState, CustomLocationData } from './types';
+import { WeatherState, CustomLocationData, SlugcatCharacterId, SLUGCAT_CHARACTERS } from './types';
 import RainCanvas from './components/RainCanvas';
 import OutskirtsLocation from './components/OutskirtsLocation';
 import LocationEditor from './components/LocationEditor';
@@ -11,6 +11,7 @@ import MultiplayerLobbyModal from './components/MultiplayerLobbyModal';
 import LoadingScreen from './components/LoadingScreen';
 import { musicManager } from './audio/MusicManager';
 import { webRTCManager } from './network/WebRTCManager';
+import { APP_VERSION } from './version';
 
 export default function App() {
   const [hasEntered, setHasEntered] = useState(false);
@@ -20,6 +21,22 @@ export default function App() {
   const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
   const [isSoundMuted, setIsSoundMuted] = useState(true);
   const [activeFeedback, setActiveFeedback] = useState<string | null>(null);
+  const [selectedCharacter, setSelectedCharacter] = useState<SlugcatCharacterId>(() => {
+    try {
+      return localStorage.getItem('rw_selected_character') === 'monk' ? 'monk' : 'survivor';
+    } catch {
+      return 'survivor';
+    }
+  });
+
+  const handleSelectCharacter = (charId: SlugcatCharacterId) => {
+    setSelectedCharacter(charId);
+    try {
+      localStorage.setItem('rw_selected_character', charId);
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   // Loading Screen state
   const [isLoadingWorld, setIsLoadingWorld] = useState<boolean>(false);
@@ -33,6 +50,14 @@ export default function App() {
     fogDensity: 0.35
   });
 
+  // Single authoritative menu music lifecycle when not in gameplay
+  useEffect(() => {
+    if (!hasEntered) return;
+    if (!isGameplayActive) {
+      musicManager.playCategory('menu');
+    }
+  }, [hasEntered, isGameplayActive]);
+
   const handleEnterExperience = () => {
     // Initialize procedural ambient synthesizer on user gesture
     soundEngine.init();
@@ -41,9 +66,8 @@ export default function App() {
     soundEngine.toggleMute(false);
     setIsSoundMuted(false);
     musicManager.setMuted(false);
-    musicManager.playCategory('menu');
     
-    // Set enter state
+    // Set enter state (useEffect starts menu music cleanly)
     setHasEntered(true);
   };
 
@@ -62,7 +86,6 @@ export default function App() {
     setTimeout(() => {
       setIsGameplayActive(true);
       setIsLoadingWorld(false);
-      musicManager.playCategory('game');
     }, 1100);
   };
 
@@ -179,6 +202,44 @@ export default function App() {
               <span className="hidden md:inline">MAIN MENU</span>
               <span className="md:hidden text-amber-400 font-mono text-xs">RAIN GAME // МЕНЮ</span>
             </h2>
+          </div>
+
+          {/* Slugcat Character Selector (Виживший / Монах) */}
+          <div className="w-full space-y-1.5">
+            <div className="grid grid-cols-2 gap-1.5 w-full">
+              {(['survivor', 'monk'] as SlugcatCharacterId[]).map((cid) => {
+                const cfg = SLUGCAT_CHARACTERS[cid];
+                const isSelected = selectedCharacter === cid;
+                return (
+                  <button
+                    key={cid}
+                    type="button"
+                    onClick={() => handleSelectCharacter(cid)}
+                    className={`px-2.5 py-2 rounded-xl border text-left font-mono transition-all cursor-pointer active:scale-95 flex items-center gap-2 ${
+                      isSelected
+                        ? cid === 'monk'
+                          ? 'bg-yellow-950/70 border-yellow-400 text-yellow-200 shadow-[0_0_14px_rgba(250,204,21,0.3)]'
+                          : 'bg-zinc-800/90 border-white text-white shadow-[0_0_12px_rgba(255,255,255,0.2)]'
+                        : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:border-zinc-600'
+                    }`}
+                  >
+                    <span
+                      className="w-3.5 h-3.5 rounded-full shrink-0 border border-black/40"
+                      style={{ backgroundColor: cfg.bodyColorMid }}
+                    />
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold truncate">{cfg.name}</div>
+                      <div className="text-[9px] text-zinc-400 truncate">
+                        {cid === 'monk' ? '2 HP • 2+4 їжі' : '1 HP • 4+3 їжі'}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[9px] font-mono text-zinc-400 leading-tight px-0.5">
+              {SLUGCAT_CHARACTERS[selectedCharacter].subtitle}
+            </p>
           </div>
 
           {/* Interactive Options list: Grid/Row on mobile, Vertical stack on PC */}
@@ -383,11 +444,11 @@ export default function App() {
             <OutskirtsLocation 
               onBack={() => {
                 setIsGameplayActive(false);
-                musicManager.playCategory('menu');
               }} 
               isSoundMuted={isSoundMuted}
               toggleSound={toggleSound}
               customLocation={activeCustomLocation ?? undefined}
+              characterId={selectedCharacter}
             />
           </motion.div>
         )}
@@ -416,7 +477,6 @@ export default function App() {
                 setTimeout(() => {
                   setIsGameplayActive(true);
                   setIsLoadingWorld(false);
-                  musicManager.playCategory('game');
                 }, 900);
               }}
             />
@@ -428,6 +488,8 @@ export default function App() {
       <MultiplayerLobbyModal
         isOpen={showMultiplayerModal}
         onClose={() => setShowMultiplayerModal(false)}
+        selectedCharacter={selectedCharacter}
+        onSelectCharacter={handleSelectCharacter}
         onConnectedToRoom={() => {
           setLoadingTitle('МУЛЬТИПЛЕЄР P2P // ПІДКЛЮЧЕНО');
           setIsLoadingWorld(true);
@@ -435,13 +497,17 @@ export default function App() {
           setTimeout(() => {
             setIsGameplayActive(true);
             setIsLoadingWorld(false);
-            musicManager.playCategory('game');
           }, 1100);
         }}
       />
 
       {/* 8. ATMOSPHERIC KARMA LOADING SCREEN */}
       <LoadingScreen isLoading={isLoadingWorld} title={loadingTitle} />
+
+      {/* 9. BOTTOM-LEFT CURRENT VERSION INDICATOR */}
+      <div className="fixed bottom-1.5 left-3 z-[60] pointer-events-none select-none font-mono text-[10px] tracking-wider text-zinc-400/80 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]">
+        v{APP_VERSION}
+      </div>
 
     </div>
   );

@@ -39,6 +39,7 @@ class MusicManager {
   // Active audio nodes
   private currentSource: AudioBufferSourceNode | null = null;
   private currentGain: GainNode | null = null;
+  private activeNodes: Set<{ source: AudioBufferSourceNode; gain: GainNode; timerId: number | null }> = new Set();
 
   private currentCategory: MusicCategory = 'none';
   private currentTrackUrl: string = '';
@@ -63,10 +64,10 @@ class MusicManager {
   constructor() {
     if (typeof window !== 'undefined') {
       const unlock = () => {
-        this.unlockAudioContext();
         window.removeEventListener('click', unlock);
         window.removeEventListener('keydown', unlock);
         window.removeEventListener('touchstart', unlock);
+        this.unlockAudioContext();
       };
       window.addEventListener('click', unlock, { once: true });
       window.addEventListener('keydown', unlock, { once: true });
@@ -135,7 +136,7 @@ class MusicManager {
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
     }
-    if (this.currentCategory !== 'none' && !this.currentSource && !this.isLoading) {
+    if (this.currentCategory !== 'none' && !this.currentSource && !this.isLoading && this.activeNodes.size === 0) {
       this.playCategory(this.currentCategory, true);
     }
   }
@@ -206,9 +207,57 @@ class MusicManager {
     this.loadTrackBuffer(url).catch(() => {});
   }
 
+  private stopAllActiveSources(fadeDuration: number = 0.22) {
+    const ctx = this.ctx;
+    const nodes = Array.from(this.activeNodes);
+    for (const entry of nodes) {
+      if (entry.timerId !== null) {
+        window.clearTimeout(entry.timerId);
+        entry.timerId = null;
+      }
+      entry.source.onended = null;
+
+      if (ctx && fadeDuration > 0.02) {
+        const now = ctx.currentTime;
+        try {
+          entry.gain.gain.cancelScheduledValues(now);
+          entry.gain.gain.setValueAtTime(Math.max(0.0001, entry.gain.gain.value), now);
+          entry.gain.gain.linearRampToValueAtTime(0.0001, now + fadeDuration);
+        } catch {}
+
+        entry.timerId = window.setTimeout(() => {
+          try {
+            entry.source.stop();
+          } catch {}
+          try {
+            entry.source.disconnect();
+            entry.gain.disconnect();
+          } catch {}
+          this.activeNodes.delete(entry);
+        }, fadeDuration * 1000 + 30);
+      } else {
+        try {
+          entry.source.stop();
+        } catch {}
+        try {
+          entry.source.disconnect();
+          entry.gain.disconnect();
+        } catch {}
+        this.activeNodes.delete(entry);
+      }
+    }
+
+    this.currentSource = null;
+    this.currentGain = null;
+  }
+
   public playCategory(category: MusicCategory, forceRestart: boolean = false) {
     // Already playing or loading this exact category, don't restart or layer another song
-    if (category === this.currentCategory && !forceRestart && (this.currentSource || this.isLoading)) {
+    if (
+      category === this.currentCategory &&
+      !forceRestart &&
+      (this.currentSource || this.isLoading || this.activeNodes.size > 0)
+    ) {
       return;
     }
 
@@ -220,6 +269,11 @@ class MusicManager {
     const playlist = TRACKS[category];
     if (!playlist || playlist.length === 0) return;
 
+    // Immediately silence previous category audio so menu and game music never overlap
+    if (category !== this.currentCategory || forceRestart) {
+      this.stopAllActiveSources(0.22);
+    }
+
     // Filter out tracks that recently failed (unless cooldown expired)
     const nowMs = Date.now();
     const availableIndices = playlist
@@ -228,6 +282,8 @@ class MusicManager {
 
     if (availableIndices.length === 0) {
       this.currentCategory = category;
+      this.isLoading = false;
+      this.requestToken++;
       return;
     }
 
@@ -262,6 +318,10 @@ class MusicManager {
   }
 
   private executeCrossFade(buffer: AudioBuffer, trackUrl: string, category: MusicCategory, token: number) {
+    if (this.requestToken !== token || this.currentCategory !== category) {
+      return;
+    }
+
     const ctx = this.getAudioContext();
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
@@ -269,31 +329,13 @@ class MusicManager {
 
     this.clearMediaSession();
 
+    // Stop any lingering previous sources cleanly before starting the new source
+    this.stopAllActiveSources(0.25);
+
     const now = ctx.currentTime;
-    const fadeDuration = 1.0;
+    const fadeDuration = 0.45;
 
-    // 1. Smoothly fade out and dispose previous source
-    if (this.currentGain && this.currentSource) {
-      const oldGain = this.currentGain;
-      const oldSource = this.currentSource;
-
-      oldGain.gain.cancelScheduledValues(now);
-      oldGain.gain.setValueAtTime(oldGain.gain.value, now);
-      oldGain.gain.linearRampToValueAtTime(0.0001, now + fadeDuration);
-
-      // Nullify onended to prevent old track from triggering playlist loops
-      oldSource.onended = null;
-
-      setTimeout(() => {
-        try {
-          oldSource.stop();
-          oldSource.disconnect();
-          oldGain.disconnect();
-        } catch {}
-      }, fadeDuration * 1000 + 100);
-    }
-
-    // 2. Create new buffer source and gain node
+    // Create new buffer source and gain node
     const newSource = ctx.createBufferSource();
     newSource.buffer = buffer;
     newSource.loop = false;
@@ -307,8 +349,12 @@ class MusicManager {
       newGain.connect(this.masterGain);
     }
 
+    const nodeEntry = { source: newSource, gain: newGain, timerId: null as number | null };
+    this.activeNodes.add(nodeEntry);
+
     // Auto-advance to next track in category when current finishes
     newSource.onended = () => {
+      this.activeNodes.delete(nodeEntry);
       if (this.currentSource === newSource) {
         this.currentSource = null;
         this.currentGain = null;
@@ -329,32 +375,11 @@ class MusicManager {
     this.currentTrackUrl = trackUrl;
   }
 
-  public stop(fadeSeconds: number = 0.8) {
+  public stop(fadeSeconds: number = 0.35) {
     this.currentCategory = 'none';
     this.isLoading = false;
     this.requestToken++;
-
-    if (this.ctx && this.currentGain && this.currentSource) {
-      const now = this.ctx.currentTime;
-      const oldGain = this.currentGain;
-      const oldSource = this.currentSource;
-
-      oldSource.onended = null;
-      oldGain.gain.cancelScheduledValues(now);
-      oldGain.gain.linearRampToValueAtTime(0.0001, now + fadeSeconds);
-
-      setTimeout(() => {
-        try {
-          oldSource.stop();
-          oldSource.disconnect();
-          oldGain.disconnect();
-        } catch {}
-      }, fadeSeconds * 1000 + 50);
-
-      this.currentSource = null;
-      this.currentGain = null;
-    }
-
+    this.stopAllActiveSources(fadeSeconds);
     this.clearMediaSession();
   }
 

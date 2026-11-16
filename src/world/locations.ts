@@ -1,8 +1,10 @@
 import type { CustomLocationData, EditorPlatform } from '../types';
 
-// Safe spawn resolver: ensures coordinates are inside world bounds and not embedded inside solid walls
-export function resolveSafeSpawn(
+// Safe spawn resolver for arbitrary entity dimensions: prevents spawning inside walls/monoliths
+export function resolveSafeEntitySpawn(
   loc: CustomLocationData,
+  entityWidth: number,
+  entityHeight: number,
   requestedX?: number,
   requestedY?: number
 ): { x: number; y: number } {
@@ -11,34 +13,54 @@ export function resolveSafeSpawn(
   let x = typeof requestedX === 'number' && Number.isFinite(requestedX) ? requestedX : (loc.playerSpawn?.x ?? 180);
   let y = typeof requestedY === 'number' && Number.isFinite(requestedY) ? requestedY : (loc.playerSpawn?.y ?? 420);
 
-  x = Math.max(24, Math.min(maxW - 48, x));
-  y = Math.max(24, Math.min(maxH - 64, y));
+  x = Math.max(18, Math.min(maxW - entityWidth - 18, x));
+  y = Math.max(20, Math.min(maxH - entityHeight - 20, y));
 
-  // Push out horizontally if spawning inside a solid wall/monolith
-  const playerW = 24;
-  const playerH = 38;
-  for (const plat of loc.platforms) {
-    const isSolidBlock = plat.type === 'wall' || plat.type === 'shelter' || plat.h >= 45;
-    if (!isSolidBlock) continue;
-    const overlapX = x + playerW > plat.x && x < plat.x + plat.w;
-    const overlapY = y + playerH > plat.y + 4 && y < plat.y + plat.h - 4;
-    if (overlapX && overlapY) {
-      // Push above platform top if near top, otherwise push horizontally out of nearest side
-      if (y + playerH - plat.y <= 36 && plat.y >= 44) {
-        y = plat.y - playerH - 2;
-      } else {
-        const distLeft = Math.abs(x + playerW - plat.x);
-        const distRight = Math.abs(plat.x + plat.w - x);
-        if (distLeft < distRight && plat.x - playerW - 4 >= 20) {
-          x = plat.x - playerW - 4;
-        } else if (plat.x + plat.w + 4 <= maxW - 44) {
-          x = plat.x + plat.w + 4;
+  // Multiple passes ensure pushing out of one solid block does not overlap an adjacent wall
+  for (let pass = 0; pass < 3; pass++) {
+    let moved = false;
+    for (const plat of loc.platforms) {
+      const isSolidBlock = plat.type === 'wall' || plat.type === 'shelter' || plat.h >= 45;
+      if (!isSolidBlock) continue;
+      const overlapX = x + entityWidth > plat.x && x < plat.x + plat.w;
+      const overlapY = y + entityHeight > plat.y + 4 && y < plat.y + plat.h - 4;
+      if (overlapX && overlapY) {
+        if (y + entityHeight - plat.y <= 38 && plat.y >= entityHeight + 8) {
+          y = plat.y - entityHeight - 2;
+          moved = true;
+        } else {
+          const distLeft = Math.abs(x + entityWidth - plat.x);
+          const distRight = Math.abs(plat.x + plat.w - x);
+          if (distLeft <= distRight && plat.x - entityWidth - 4 >= 16) {
+            x = plat.x - entityWidth - 4;
+            moved = true;
+          } else if (plat.x + plat.w + 4 <= maxW - entityWidth - 16) {
+            x = plat.x + plat.w + 4;
+            moved = true;
+          }
         }
       }
     }
+    if (!moved) break;
   }
 
   return { x: Math.round(x), y: Math.round(y) };
+}
+
+export function resolveSafeSpawn(
+  loc: CustomLocationData,
+  requestedX?: number,
+  requestedY?: number
+): { x: number; y: number } {
+  return resolveSafeEntitySpawn(loc, 24, 38, requestedX, requestedY);
+}
+
+export function resolveSafeLizardSpawn(
+  loc: CustomLocationData,
+  requestedX?: number,
+  requestedY?: number
+): { x: number; y: number } {
+  return resolveSafeEntitySpawn(loc, 52, 24, requestedX, requestedY);
 }
 
 export function getLocationFloorY(loc: CustomLocationData): number {

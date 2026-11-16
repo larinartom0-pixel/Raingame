@@ -1,5 +1,6 @@
 // Authentic Rain World Pink Lizard (Розовий ящер)
 // Graph-based Platform/Pole/Pipe Pathfinding, Quadruped Anatomy, Bite & Drag Mechanics & Authoritative Sync
+import { findNextGraphWaypoint, doesSegmentCrossAnyWall, NavWaypoint } from '../world/navGraph';
 
 export interface LizardLimb {
   x: number;
@@ -64,30 +65,6 @@ export interface LizardNetworkSnapshot {
     toY: number;
     progress: number;
   } | null;
-}
-
-interface NavNode {
-  id: number;
-  x: number;
-  y: number;
-  poleIndex?: number;
-  pipeId?: string;
-}
-
-interface NavEdge {
-  to: number;
-  cost: number;
-  kind: 'walk' | 'pole' | 'jump' | 'pipe';
-  poleX?: number;
-  pipeId?: string;
-}
-
-interface NavWaypoint {
-  x: number;
-  y: number;
-  kind: 'walk' | 'pole' | 'jump' | 'pipe';
-  poleX?: number;
-  pipeId?: string;
 }
 
 type PlatformInput = { x: number; y: number; w: number; h: number; type: string; id?: string; label?: string };
@@ -301,256 +278,15 @@ export class PinkLizard {
       progress: 0,
       duration
     };
+    this.pipeCooldown = Math.max(this.pipeCooldown, 5.0);
+    this.biteCooldown = Math.max(this.biteCooldown, 1.5);
     this.x = fromX - this.width / 2;
     this.y = fromY - this.height / 2;
     this.vx = 0;
     this.vy = 0;
+    this.facingRight = toX >= fromX;
     this.activeWaypoint = null;
     this.resetProceduralPose(this.x, this.y);
-  }
-
-  // Check whether a solid tall barrier blocks horizontal line-of-sight at height y
-  private isWallBetween(x1: number, x2: number, y: number, platforms: PlatformInput[]): boolean {
-    const minX = Math.min(x1, x2);
-    const maxX = Math.max(x1, x2);
-    for (const p of platforms) {
-      if (p.type === 'wall' || p.h >= 75) {
-        if (y > p.y + 8 && y < p.y + p.h - 4) {
-          if (p.x + p.w > minX + 4 && p.x < maxX - 4) {
-            return true;
-          }
-        }
-      }
-    }
-    return false;
-  }
-
-  // Check if a point is embedded inside a solid wall
-  private isInsideWall(x: number, y: number, platforms: PlatformInput[]): boolean {
-    for (const p of platforms) {
-      if (p.type === 'wall' || p.h >= 75) {
-        if (x >= p.x + 2 && x <= p.x + p.w - 2 && y > p.y + 4 && y < p.y + p.h - 2) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  // Build platform/pole/shortcut-pipe waypoint navigation graph & run Dijkstra
-  private computeNextWaypoint(
-    startX: number,
-    startY: number,
-    goalX: number,
-    goalY: number,
-    platforms: PlatformInput[],
-    poles: PoleInput[],
-    pipes?: PipeInput[]
-  ): NavWaypoint | null {
-    const nodes: NavNode[] = [];
-    const addNode = (x: number, y: number, poleIndex?: number, pipeId?: string): number => {
-      const id = nodes.length;
-      nodes.push({ id, x, y, poleIndex, pipeId });
-      return id;
-    };
-
-    // 1. Sample walkable surface nodes along every non-wall platform
-    for (const plat of platforms) {
-      if (plat.type === 'wall') continue;
-      if (plat.y <= 30) continue; // skip room ceilings
-      const surfaceY = plat.y - 12;
-      const step = Math.max(95, Math.min(140, plat.w / Math.max(1, Math.round(plat.w / 120))));
-      for (let sx = plat.x + 24; sx <= plat.x + plat.w - 24; sx += step) {
-        if (!this.isInsideWall(sx, surfaceY, platforms)) {
-          addNode(sx, surfaceY);
-        }
-      }
-      // Ensure right edge anchor
-      const endAnchorX = plat.x + plat.w - 24;
-      if (endAnchorX > plat.x + 24 && !this.isInsideWall(endAnchorX, surfaceY, platforms)) {
-        addNode(endAnchorX, surfaceY);
-      }
-    }
-
-    // 2. Sample vertical Pole nodes where poles pass platforms or start/end
-    const poleNodeGroups: number[][] = [];
-    poles.forEach((pole, pIdx) => {
-      const heights = new Set<number>();
-      heights.add(pole.yMin + 14);
-      heights.add(pole.yMax - 12);
-      for (const plat of platforms) {
-        if (plat.type === 'wall') continue;
-        if (plat.y >= pole.yMin - 24 && plat.y <= pole.yMax + 24) {
-          // Only add transfer node if pole is near this platform horizontally
-          if (pole.x >= plat.x - 55 && pole.x <= plat.x + plat.w + 55) {
-            heights.add(plat.y - 12);
-          }
-        }
-      }
-      const sortedY = Array.from(heights).sort((a, b) => a - b);
-      const ids: number[] = [];
-      for (const py of sortedY) {
-        if (!this.isInsideWall(pole.x, py, platforms)) {
-          ids.push(addNode(pole.x, py, pIdx));
-        }
-      }
-      poleNodeGroups.push(ids);
-    });
-
-    // 3. Add internal shortcut pipe portal pairs (non-shelter, same-room)
-    const pipePairs: Array<{ a: number; b: number; pipeId: string }> = [];
-    if (pipes) {
-      for (const pipe of pipes) {
-        if (pipe.isShelterPipe || pipe.targetLocationId) continue;
-        const a = addNode(pipe.startX, pipe.startY, undefined, pipe.id);
-        const b = addNode(pipe.endX, pipe.endY, undefined, pipe.id);
-        pipePairs.push({ a, b, pipeId: pipe.id });
-      }
-    }
-
-    if (nodes.length === 0) return null;
-
-    // 4. Add start and goal temporary anchor nodes
-    const startNodeId = addNode(startX, startY);
-    const goalNodeId = addNode(goalX, goalY);
-
-    const edges: NavEdge[][] = Array.from({ length: nodes.length }, () => []);
-    const connect = (u: number, v: number, cost: number, kind: NavEdge['kind'], poleX?: number, pipeId?: string) => {
-      edges[u].push({ to: v, cost, kind, poleX, pipeId });
-    };
-
-    // Pole vertical bidirectional edges
-    poleNodeGroups.forEach((ids, pIdx) => {
-      const px = poles[pIdx].x;
-      for (let i = 0; i < ids.length - 1; i++) {
-        const u = ids[i];
-        const v = ids[i + 1];
-        const dy = Math.abs(nodes[v].y - nodes[u].y);
-        connect(u, v, dy * 1.15, 'pole', px);
-        connect(v, u, dy * 1.15, 'pole', px);
-      }
-    });
-
-    // Internal shortcut pipe edges
-    for (const pair of pipePairs) {
-      connect(pair.a, pair.b, 95, 'pipe', undefined, pair.pipeId);
-      connect(pair.b, pair.a, 95, 'pipe', undefined, pair.pipeId);
-    }
-
-    // Walk & jump edges between surface / pole / pipe / start / goal nodes
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i];
-        const b = nodes[j];
-        const dx = Math.abs(a.x - b.x);
-        const dy = Math.abs(a.y - b.y);
-
-        // Same-height walkable horizontal link
-        if (dy <= 26 && dx <= 210) {
-          if (!this.isWallBetween(a.x, b.x, (a.y + b.y) / 2, platforms)) {
-            const dist = Math.hypot(dx, dy);
-            connect(i, j, dist, 'walk');
-            connect(j, i, dist, 'walk');
-          }
-          continue;
-        }
-
-        // Jump / drop link between nearby ledges
-        if (dx <= 135 && dy <= 155) {
-          if (!this.isWallBetween(a.x, b.x, Math.min(a.y, b.y) + 12, platforms)) {
-            // a -> b
-            const aToBDy = b.y - a.y; // negative = going UP
-            if (aToBDy >= -88 && aToBDy <= 220) {
-              connect(i, j, Math.hypot(dx, dy) * (aToBDy < 0 ? 1.45 : 1.15), 'jump');
-            }
-            // b -> a
-            const bToADy = a.y - b.y;
-            if (bToADy >= -88 && bToADy <= 220) {
-              connect(j, i, Math.hypot(dx, dy) * (bToADy < 0 ? 1.45 : 1.15), 'jump');
-            }
-          }
-        }
-      }
-    }
-
-    // Also ensure start & goal link cleanly to their nearest unobstructed node
-    const linkClosest = (anchorIdx: number, isStart: boolean) => {
-      if (edges[anchorIdx].length > 0) return;
-      let bestIdx = -1;
-      let bestDist = Infinity;
-      const anchor = nodes[anchorIdx];
-      for (let i = 0; i < nodes.length - 2; i++) {
-        const cand = nodes[i];
-        if (this.isWallBetween(anchor.x, cand.x, anchor.y, platforms)) continue;
-        const d = Math.hypot(anchor.x - cand.x, anchor.y - cand.y);
-        if (d < bestDist) {
-          bestDist = d;
-          bestIdx = i;
-        }
-      }
-      if (bestIdx >= 0) {
-        if (isStart) {
-          connect(anchorIdx, bestIdx, bestDist, 'walk');
-        } else {
-          connect(bestIdx, anchorIdx, bestDist, 'walk');
-        }
-      }
-    };
-    linkClosest(startNodeId, true);
-    linkClosest(goalNodeId, false);
-
-    // Dijkstra shortest path from startNodeId to goalNodeId
-    const distArr = new Float64Array(nodes.length).fill(Infinity);
-    const prevNode = new Int32Array(nodes.length).fill(-1);
-    const prevEdge: Array<NavEdge | null> = new Array(nodes.length).fill(null);
-    const visited = new Uint8Array(nodes.length);
-
-    distArr[startNodeId] = 0;
-
-    for (let iter = 0; iter < nodes.length; iter++) {
-      let u = -1;
-      let best = Infinity;
-      for (let i = 0; i < nodes.length; i++) {
-        if (!visited[i] && distArr[i] < best) {
-          best = distArr[i];
-          u = i;
-        }
-      }
-      if (u === -1 || u === goalNodeId) break;
-      visited[u] = 1;
-
-      for (const edge of edges[u]) {
-        const alt = distArr[u] + edge.cost;
-        if (alt < distArr[edge.to]) {
-          distArr[edge.to] = alt;
-          prevNode[edge.to] = u;
-          prevEdge[edge.to] = edge;
-        }
-      }
-    }
-
-    if (!Number.isFinite(distArr[goalNodeId])) {
-      return null;
-    }
-
-    // Reconstruct path and pick the immediate next step after startNodeId
-    let step = goalNodeId;
-    while (prevNode[step] !== -1 && prevNode[step] !== startNodeId) {
-      step = prevNode[step];
-    }
-
-    // If next node is very close (< 28px), advance one node further along path to keep momentum fluid
-    const stepEdge = prevEdge[step];
-    const targetNode = nodes[step];
-    if (!targetNode || !stepEdge) return null;
-
-    return {
-      x: targetNode.x,
-      y: targetNode.y,
-      kind: stepEdge.kind,
-      poleX: stepEdge.poleX,
-      pipeId: stepEdge.pipeId
-    };
   }
 
   public update(
@@ -566,6 +302,9 @@ export class PinkLizard {
       state: string;
       stunTimer: number;
       isGrounded: boolean;
+      biteGrabImmunity?: boolean;
+      attackerStunOnGrabAttempt?: number;
+      isPipeProtected?: boolean;
     } | null,
     remotePeers: Array<{
       id: string;
@@ -577,6 +316,8 @@ export class PinkLizard {
       hp: number;
       state: string;
       room: string;
+      biteGrabImmunity?: boolean;
+      attackerStunOnGrabAttempt?: number;
     }>,
     platforms: PlatformInput[],
     poles: PoleInput[],
@@ -587,10 +328,11 @@ export class PinkLizard {
     pipes?: PipeInput[],
     onLizardChangedRoom?: (targetRoomId: string, spawnX?: number, spawnY?: number) => void,
     onPreyDepositedInDen?: () => void,
-    worldBounds?: { width: number; height: number }
+    worldBounds?: { width: number; height: number; roomId?: string }
   ) {
     const worldW = worldBounds?.width ?? 1200;
     const worldH = worldBounds?.height ?? 640;
+    const roomKey = worldBounds?.roomId ?? 'room-default';
 
     if (this.state === 'dead') {
       this.vy += 0.42;
@@ -820,7 +562,7 @@ export class PinkLizard {
       const lx = this.x + this.width / 2;
       const ly = this.y + this.height / 2;
 
-      if (player && player.state !== 'sleeping') {
+      if (player && player.state !== 'sleeping' && !player.isPipeProtected) {
         candidates.push({
           kind: 'player',
           id: 'local',
@@ -923,10 +665,18 @@ export class PinkLizard {
     const lx = this.x + this.width / 2;
     const ly = this.y + this.height / 2;
     const directDist = Math.hypot(targetX - lx, targetY - ly);
+    const solidWallBlockers = platforms
+      .filter(p => p.type === 'wall' || p.type === 'shelter' || p.h >= 45)
+      .map(p => ({
+        x: p.x + 2,
+        y: p.type === 'wall' || p.type === 'shelter' ? p.y + 2 : p.y + 10,
+        w: Math.max(2, p.w - 4),
+        h: Math.max(2, p.h - 12)
+      }));
     const hasDirectLine =
-      directDist < 180 &&
-      Math.abs(targetY - ly) < 48 &&
-      !this.isWallBetween(lx, targetX, ly, platforms);
+      directDist < 175 &&
+      Math.abs(targetY - ly) < 42 &&
+      !doesSegmentCrossAnyWall(lx, ly, targetX, targetY, solidWallBlockers);
 
     this.pathRecalcTimer -= delta;
     if (hasDirectLine) {
@@ -934,13 +684,13 @@ export class PinkLizard {
     } else if (
       this.pathRecalcTimer <= 0 ||
       !this.activeWaypoint ||
-      Math.hypot(targetX - this.cachedTargetX, targetY - this.cachedTargetY) > 75 ||
+      Math.hypot(targetX - this.cachedTargetX, targetY - this.cachedTargetY) > 70 ||
       Math.hypot(lx - this.activeWaypoint.x, ly - this.activeWaypoint.y) < 26
     ) {
-      this.pathRecalcTimer = 0.24;
+      this.pathRecalcTimer = 0.22;
       this.cachedTargetX = targetX;
       this.cachedTargetY = targetY;
-      this.activeWaypoint = this.computeNextWaypoint(lx, ly, targetX, targetY, platforms, poles, pipes);
+      this.activeWaypoint = findNextGraphWaypoint(roomKey, lx, ly, targetX, targetY, platforms, poles, pipes);
     }
 
     const steerX = this.activeWaypoint ? this.activeWaypoint.x : targetX;
@@ -1041,17 +791,18 @@ export class PinkLizard {
       }
     }
 
-    // 2. Wall climbing only when stuck or blocked by vertical barrier while needing upward elevation
+    // 2. Wall climbing only when stuck or blocked by reachable vertical barrier while needing upward elevation
     let nearWall = false;
     if (!nearPole) {
       for (const plat of platforms) {
         if (plat.type === 'wall' || plat.h >= 60) {
           const xDist = Math.abs(lx - (plat.x + plat.w / 2));
           const yOverlap = this.y + this.height > plat.y + 4 && this.y < plat.y + plat.h;
-          if (xDist < plat.w / 2 + 18 && yOverlap && (dy < -25 || this.stuckTimer > 0.25)) {
+          const wallTopReachable = this.y - plat.y < 145;
+          if (xDist < plat.w / 2 + 18 && yOverlap && wallTopReachable && (dy < -25 || this.stuckTimer > 0.35)) {
             nearWall = true;
             this.isClimbing = true;
-            this.vy = dy < 0 || this.stuckTimer > 0.25 ? -4.8 : 4.4;
+            this.vy = dy < 0 || this.stuckTimer > 0.35 ? -4.8 : 4.4;
             break;
           }
         }
@@ -1095,7 +846,7 @@ export class PinkLizard {
         } else {
           // Proactive small ledge hop
           for (const plat of platforms) {
-            if (plat.type === 'wall') continue;
+            if (plat.type === 'wall' || plat.type === 'shelter') continue;
             const aheadX = this.x + (this.facingRight ? this.width + 16 : -16);
             if (aheadX >= plat.x && aheadX <= plat.x + plat.w) {
               if (this.y + this.height > plat.y && this.y + this.height - plat.y < 70) {
@@ -1113,24 +864,43 @@ export class PinkLizard {
     this.clampToWorld(worldW, worldH);
 
     // ---------------- BITE & GRAB LOGIC (Player + Remote Peers) ----------------
-    if (!this.grabbedTarget && this.biteCooldown <= 0) {
+    // Skip biting briefly right after emerging from a pipe (pipeCooldown > 3.5)
+    if (!this.grabbedTarget && this.biteCooldown <= 0 && this.pipeCooldown <= 3.5) {
       const mouthX = this.facingRight ? this.x + this.width : this.x;
       const mouthY = this.y + 12;
 
       let bitten = false;
 
-      if (player && player.state !== 'sleeping' && (!pursuitTargetType || pursuitTargetType === 'player')) {
+      if (
+        player &&
+        player.state !== 'sleeping' &&
+        !player.isPipeProtected &&
+        (!pursuitTargetType || pursuitTargetType === 'player')
+      ) {
         const distToPlayerMouth = Math.hypot(
           mouthX - (player.x + player.width / 2),
           mouthY - (player.y + player.height / 2)
         );
         if (distToPlayerMouth < 36) {
-          this.biteCooldown = 2.0;
           this.jawOpen = 0.5;
           const dmg = 0.5 + Math.random() * 1.0;
-          this.grabbedTarget = player.state === 'dead' ? 'corpse' : 'player';
-          this.grabbedPeerId = null;
-          onPlayerBitten(dmg, true);
+
+          if (player.biteGrabImmunity && player.state !== 'dead') {
+            // Monk / grab-immune slugcat: deals damage without grabbing, stuns predator for 5 seconds!
+            const predatorStun = player.attackerStunOnGrabAttempt ?? 5.0;
+            this.grabbedTarget = null;
+            this.grabbedPeerId = null;
+            this.biteCooldown = predatorStun;
+            this.vx = (this.x + this.width / 2 < player.x + player.width / 2 ? -1 : 1) * 4.5;
+            this.vy = -3.0;
+            this.takeDamage(0, predatorStun);
+            onPlayerBitten(dmg, false);
+          } else {
+            this.biteCooldown = 2.0;
+            this.grabbedTarget = player.state === 'dead' ? 'corpse' : 'player';
+            this.grabbedPeerId = null;
+            onPlayerBitten(dmg, true);
+          }
           bitten = true;
         }
       }
@@ -1141,12 +911,24 @@ export class PinkLizard {
           if (pursuitTargetId && peer.id !== pursuitTargetId && remotePeers.length > 1) continue;
           const distToPeerMouth = Math.hypot(mouthX - (peer.x + 12), mouthY - (peer.y + 19));
           if (distToPeerMouth < 36) {
-            this.biteCooldown = 2.0;
             this.jawOpen = 0.5;
             const dmg = 0.5 + Math.random() * 1.0;
-            this.grabbedTarget = 'peer';
-            this.grabbedPeerId = peer.id;
-            onPeerBitten(peer.id, dmg, true);
+
+            if (peer.biteGrabImmunity && peer.state !== 'dead') {
+              const predatorStun = peer.attackerStunOnGrabAttempt ?? 5.0;
+              this.grabbedTarget = null;
+              this.grabbedPeerId = null;
+              this.biteCooldown = predatorStun;
+              this.vx = (this.x + this.width / 2 < peer.x + 12 ? -1 : 1) * 4.5;
+              this.vy = -3.0;
+              this.takeDamage(0, predatorStun);
+              onPeerBitten(peer.id, dmg, false);
+            } else {
+              this.biteCooldown = 2.0;
+              this.grabbedTarget = 'peer';
+              this.grabbedPeerId = peer.id;
+              onPeerBitten(peer.id, dmg, true);
+            }
             break;
           }
         }
@@ -1185,13 +967,19 @@ export class PinkLizard {
 
     this.isGrounded = false;
     for (const plat of platforms) {
-      if (plat.type === 'wall' || plat.h >= 50) {
+      if (plat.type === 'wall' || plat.type === 'shelter' || plat.h >= 50) {
         if (this.y + this.height > plat.y + 5 && this.y < plat.y + plat.h - 5) {
-          if (this.x + this.width >= plat.x && this.x + this.width - this.vx <= plat.x + 10) {
+          if (this.x + this.width >= plat.x && this.x + this.width - this.vx <= plat.x + 12) {
             this.x = plat.x - this.width;
             this.vx = 0;
-          } else if (this.x <= plat.x + plat.w && this.x - this.vx >= plat.x + plat.w - 10) {
+          } else if (this.x <= plat.x + plat.w && this.x - this.vx >= plat.x + plat.w - 12) {
             this.x = plat.x + plat.w;
+            this.vx = 0;
+          } else if (this.x + this.width > plat.x + 4 && this.x < plat.x + plat.w - 4) {
+            // De-penetration fallback: never stay wedged inside a wall or passage block
+            const distLeft = Math.abs(this.x + this.width - plat.x);
+            const distRight = Math.abs(plat.x + plat.w - this.x);
+            this.x = distLeft <= distRight ? plat.x - this.width - 1 : plat.x + plat.w + 1;
             this.vx = 0;
           }
         }
@@ -1270,17 +1058,37 @@ export class PinkLizard {
 
   public render(ctx: CanvasRenderingContext2D, t: number) {
     if (this.pipeTransit) {
+      // Draw recognizable lizard silhouette & glowing cyan eyes sliding through/emerging from pipe
       ctx.save();
       const cx = this.x + this.width / 2;
       const cy = this.y + this.height / 2;
-      ctx.fillStyle = 'rgba(236, 72, 153, 0.75)';
+      const dir = this.facingRight ? 1 : -1;
+      const angle = Math.atan2(this.pipeTransit.toY - this.pipeTransit.fromY, this.pipeTransit.toX - this.pipeTransit.fromX);
+
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+
+      // Trailing tail & segmented torso sliding inside conduit
+      ctx.fillStyle = 'rgba(236, 72, 153, 0.85)';
       ctx.beginPath();
-      ctx.ellipse(cx, cy, 14, 8, 0, 0, Math.PI * 2);
+      ctx.ellipse(-6, 0, 18, 9, 0, 0, Math.PI * 2);
       ctx.fill();
 
+      // Armored head crest
+      ctx.fillStyle = '#f472b6';
+      ctx.beginPath();
+      ctx.moveTo(16, 0);
+      ctx.lineTo(4, -9);
+      ctx.lineTo(-4, -7);
+      ctx.lineTo(-4, 7);
+      ctx.lineTo(4, 9);
+      ctx.closePath();
+      ctx.fill();
+
+      // Glowing lizard eye
       ctx.fillStyle = '#22d3ee';
       ctx.beginPath();
-      ctx.arc(cx + (this.facingRight ? 6 : -6), cy - 2, 2.5, 0, Math.PI * 2);
+      ctx.arc(8, -3 * dir, 2.8, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
       return;
