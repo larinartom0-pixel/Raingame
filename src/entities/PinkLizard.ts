@@ -117,12 +117,27 @@ export class PinkLizard {
   public lastY: number = 0;
   public hissTimer: number = 0;
   public lostPlayerTimer: number = 0;
+  public lastKnownPreyX: number | null = null;
+  public lastKnownPreyY: number | null = null;
+  public pipePursuitMemory: {
+    pipeId: string;
+    fromRoomId: string;
+    targetRoomId?: string;
+    entryX: number;
+    entryY: number;
+    spawnX?: number;
+    spawnY?: number;
+    timer: number;
+    reactDelay: number;
+  } | null = null;
 
   // Pathfinding state
   private activeWaypoint: NavWaypoint | null = null;
   private pathRecalcTimer: number = 0;
   private cachedTargetX: number = 0;
   private cachedTargetY: number = 0;
+  private shortcutDecisionCooldown: number = 0;
+  private allowShortcutForRoute: boolean = true;
 
   // Client-side multiplayer interpolation targets
   private netTargetX: number | null = null;
@@ -174,6 +189,35 @@ export class PinkLizard {
       this.grabbedTarget = null;
       this.grabbedPeerId = null;
     }
+  }
+
+  public rememberPreyPipeEntry(opts: {
+    pipeId: string;
+    fromRoomId: string;
+    targetRoomId?: string;
+    entryX: number;
+    entryY: number;
+    spawnX?: number;
+    spawnY?: number;
+  }) {
+    if (this.state === 'dead' || this.state === 'stunned' || this.grabbedTarget) return;
+    this.state = 'hunt';
+    this.lostPlayerTimer = Math.max(this.lostPlayerTimer, 18.0);
+    this.lastKnownPreyX = opts.entryX;
+    this.lastKnownPreyY = opts.entryY;
+    this.pipePursuitMemory = {
+      pipeId: opts.pipeId,
+      fromRoomId: opts.fromRoomId,
+      targetRoomId: opts.targetRoomId,
+      entryX: opts.entryX,
+      entryY: opts.entryY,
+      spawnX: opts.spawnX,
+      spawnY: opts.spawnY,
+      timer: 18.0,
+      reactDelay: opts.targetRoomId ? 1.4 : 0.45
+    };
+    this.activeWaypoint = null;
+    this.pathRecalcTimer = 0;
   }
 
   // Export compact authoritative network state
@@ -397,8 +441,13 @@ export class PinkLizard {
         this.vx = exitDir * 3.8;
         this.vy = -2.2;
         this.isClimbing = false;
+        if (this.pipePursuitMemory && !this.pipePursuitMemory.targetRoomId) {
+          this.lastKnownPreyX = this.pipeTransit.toX;
+          this.lastKnownPreyY = this.pipeTransit.toY;
+          this.pipePursuitMemory = null;
+        }
         this.pipeTransit = null;
-        this.pipeCooldown = 3.5;
+        this.pipeCooldown = 5.5;
         this.activeWaypoint = null;
       }
 
@@ -408,6 +457,12 @@ export class PinkLizard {
 
     if (this.pipeCooldown > 0) {
       this.pipeCooldown -= delta;
+    }
+    if (this.shortcutDecisionCooldown > 0) {
+      this.shortcutDecisionCooldown -= delta;
+    } else {
+      this.shortcutDecisionCooldown = 5.0;
+      this.allowShortcutForRoute = this.state === 'hunt' ? Math.random() < 0.85 : Math.random() < 0.35;
     }
 
     // Stun Recovery
@@ -607,17 +662,43 @@ export class PinkLizard {
 
         const bestPrey = livingCands.find(c => {
           const inFront = (c.x > this.x) === this.facingRight;
-          const loud = Math.abs(c.vx) > 1.8 || Math.abs(c.vy) > 1.6;
-          return c.dist < 240 || (inFront && c.dist < 560) || (loud && c.dist < 400);
-        }) || (this.state === 'hunt' && livingCands[0] && livingCands[0].dist < 760 ? livingCands[0] : undefined);
+          const loud = Math.abs(c.vx) > 1.7 || Math.abs(c.vy) > 1.5;
+          return c.dist < 300 || (inFront && c.dist < 680) || (loud && c.dist < 500);
+        }) || (this.state === 'hunt' && livingCands[0] && livingCands[0].dist < 1150 ? livingCands[0] : undefined);
 
         if (bestPrey) {
           this.state = 'hunt';
-          this.lostPlayerTimer = 5.0;
+          this.lostPlayerTimer = 18.0;
+          this.lastKnownPreyX = bestPrey.x;
+          this.lastKnownPreyY = bestPrey.y;
+          this.pipePursuitMemory = null;
           targetX = bestPrey.x;
           targetY = bestPrey.y;
           pursuitTargetType = bestPrey.kind;
           pursuitTargetId = bestPrey.id;
+        } else if (this.pipePursuitMemory && this.pipePursuitMemory.timer > 0) {
+          this.pipePursuitMemory.timer -= delta;
+          this.pipePursuitMemory.reactDelay = Math.max(0, this.pipePursuitMemory.reactDelay - delta);
+          this.state = 'hunt';
+          this.lostPlayerTimer = Math.max(this.lostPlayerTimer, this.pipePursuitMemory.timer);
+          targetX = this.pipePursuitMemory.entryX;
+          targetY = this.pipePursuitMemory.entryY;
+          intendedPipeId = this.pipePursuitMemory.reactDelay <= 0 ? this.pipePursuitMemory.pipeId : null;
+          if (this.pipePursuitMemory.timer <= 0) {
+            this.pipePursuitMemory = null;
+          }
+        } else if (this.lostPlayerTimer > 0 && this.lastKnownPreyX !== null && this.lastKnownPreyY !== null) {
+          const distToMem = Math.hypot(lx - this.lastKnownPreyX, ly - this.lastKnownPreyY);
+          this.lostPlayerTimer -= delta * (distToMem < 58 ? 2.5 : 1.0);
+          this.state = 'hunt';
+          targetX = this.lastKnownPreyX;
+          targetY = this.lastKnownPreyY;
+          if (this.lostPlayerTimer <= 0) {
+            this.lostPlayerTimer = 0;
+            this.lastKnownPreyX = null;
+            this.lastKnownPreyY = null;
+            this.state = 'patrol';
+          }
         } else {
           if (this.lostPlayerTimer > 0) {
             this.lostPlayerTimer -= delta;
@@ -676,6 +757,7 @@ export class PinkLizard {
     const hasDirectLine =
       directDist < 175 &&
       Math.abs(targetY - ly) < 42 &&
+      !intendedPipeId &&
       !doesSegmentCrossAnyWall(lx, ly, targetX, targetY, solidWallBlockers);
 
     this.pathRecalcTimer -= delta;
@@ -690,12 +772,22 @@ export class PinkLizard {
       this.pathRecalcTimer = 0.22;
       this.cachedTargetX = targetX;
       this.cachedTargetY = targetY;
-      this.activeWaypoint = findNextGraphWaypoint(roomKey, lx, ly, targetX, targetY, platforms, poles, pipes);
+      this.activeWaypoint = findNextGraphWaypoint(
+        roomKey,
+        lx,
+        ly,
+        targetX,
+        targetY,
+        platforms,
+        poles,
+        pipes,
+        { allowShortcutPipes: this.pipeCooldown <= 0 && (!!this.pipePursuitMemory || this.allowShortcutForRoute) }
+      );
     }
 
     const steerX = this.activeWaypoint ? this.activeWaypoint.x : targetX;
     const steerY = this.activeWaypoint ? this.activeWaypoint.y : targetY;
-    const activePipeGoal = this.activeWaypoint?.kind === 'pipe' ? this.activeWaypoint.pipeId : intendedPipeId;
+    const activePipeGoal = this.activeWaypoint?.pipeId ?? intendedPipeId;
 
     const dx = steerX - lx;
     const dy = steerY - ly;
@@ -761,24 +853,68 @@ export class PinkLizard {
     this.lastX = this.x;
     this.lastY = this.y;
 
-    // 1. Pole climbing (guided cleanly by waypoint or elevation difference)
+    // 1. Pole climbing (up AND down through thin platforms, guided cleanly by waypoint or elevation difference)
     let nearPole = false;
+    let activePoleClimbTargetY: number | null = null;
+    const targetVerticalDiff = Math.abs(targetY - ly);
     const wantsPole =
       this.activeWaypoint?.kind === 'pole' ||
-      Math.abs(dy) > 32 ||
+      Math.abs(dy) > 26 ||
+      targetVerticalDiff > 30 ||
       this.stuckTimer > 0.25;
 
     for (const p of poles) {
-      if (Math.abs(lx - p.x) < 34 && this.y + this.height >= p.yMin - 15 && this.y <= p.yMax + 15) {
-        if (wantsPole && (!this.activeWaypoint?.poleX || Math.abs(this.activeWaypoint.poleX - p.x) < 20)) {
-          nearPole = true;
-          this.isClimbing = true;
-          this.x += (p.x - lx) * 0.38;
-          this.vx *= 0.4;
-          if (Math.abs(dy) > 12) {
-            this.vy = dy < 0 ? -4.9 : 4.9;
+      if (Math.abs(lx - p.x) < 34 && this.y + this.height >= p.yMin - 18 && this.y <= p.yMax + 18) {
+        const matchesWaypointPole =
+          this.activeWaypoint?.kind === 'pole' &&
+          (!this.activeWaypoint.poleX || Math.abs(this.activeWaypoint.poleX - p.x) < 20);
+        const poleExtendsTowardTarget =
+          (targetY > ly + 18 && p.yMax > this.y + this.height + 16) ||
+          (targetY < ly - 18 && p.yMin < this.y - 16);
+
+        if (wantsPole && (matchesWaypointPole || (!this.activeWaypoint?.poleX && (poleExtendsTowardTarget || Math.abs(dy) > 26)))) {
+          const climbGoalY =
+            matchesWaypointPole && Math.abs(steerY - ly) > 16
+              ? steerY
+              : poleExtendsTowardTarget
+                ? targetY
+                : steerY;
+          const climbDy = climbGoalY - ly;
+
+          if (Math.abs(climbDy) > 16) {
+            // Stop climbing if already at the physical pole end in the climb direction
+            if (climbDy > 0 && this.y + this.height >= p.yMax - 4) {
+              continue;
+            }
+            if (climbDy < 0 && this.y <= p.yMin + 4) {
+              continue;
+            }
+            nearPole = true;
+            this.isClimbing = true;
+            this.isGrounded = false;
+            this.x += (p.x - lx) * 0.38;
+            this.vx *= 0.4;
+            this.vy = climbDy < 0 ? -4.9 : 4.9;
+            activePoleClimbTargetY = climbGoalY;
+            if (matchesWaypointPole && Math.abs(steerY - ly) <= 18) {
+              this.pathRecalcTimer = 0;
+            }
+          } else if (this.activeWaypoint?.kind === 'pole' && targetVerticalDiff > 24 && poleExtendsTowardTarget) {
+            // Reached intermediate pole waypoint — keep climbing along pole toward target instead of hopping off mid-air
+            nearPole = true;
+            this.isClimbing = true;
+            this.isGrounded = false;
+            this.x += (p.x - lx) * 0.38;
+            this.vx *= 0.4;
+            this.vy = targetY < ly ? -4.9 : 4.9;
+            activePoleClimbTargetY = targetY;
+            this.pathRecalcTimer = 0;
           } else {
             // Reached destination height on pole -> hop onto horizontal platform toward target
+            nearPole = true;
+            this.isClimbing = true;
+            this.x += (p.x - lx) * 0.38;
+            this.vx *= 0.4;
             this.vy = 0;
             if (Math.abs(targetX - lx) > 20) {
               this.isClimbing = false;
@@ -860,7 +996,8 @@ export class PinkLizard {
       }
     }
 
-    this.applyGravityAndCollisions(platforms);
+    const descendPastY = this.isClimbing && this.vy > 0 ? activePoleClimbTargetY : null;
+    this.applyGravityAndCollisions(platforms, descendPastY);
     this.clampToWorld(worldW, worldH);
 
     // ---------------- BITE & GRAB LOGIC (Player + Remote Peers) ----------------
@@ -956,7 +1093,7 @@ export class PinkLizard {
     }
   }
 
-  private applyGravityAndCollisions(platforms: PlatformInput[]) {
+  private applyGravityAndCollisions(platforms: PlatformInput[], descendPastY: number | null = null) {
     if (!this.isClimbing) {
       this.vy += 0.38;
       if (this.vy > 12) this.vy = 12;
@@ -967,7 +1104,8 @@ export class PinkLizard {
 
     this.isGrounded = false;
     for (const plat of platforms) {
-      if (plat.type === 'wall' || plat.type === 'shelter' || plat.h >= 50) {
+      const isSolidMonolith = plat.type === 'wall' || plat.type === 'shelter' || plat.h >= 45;
+      if (isSolidMonolith) {
         if (this.y + this.height > plat.y + 5 && this.y < plat.y + plat.h - 5) {
           if (this.x + this.width >= plat.x && this.x + this.width - this.vx <= plat.x + 12) {
             this.x = plat.x - this.width;
@@ -985,7 +1123,15 @@ export class PinkLizard {
         }
       }
 
-      if (this.x + this.width > plat.x && this.x < plat.x + plat.w) {
+      // Allow climbing DOWN a pole smoothly through intermediate thin horizontal platforms
+      const passThroughThinForClimb =
+        this.isClimbing &&
+        this.vy > 0 &&
+        !isSolidMonolith &&
+        descendPastY !== null &&
+        descendPastY > plat.y + 8;
+
+      if (!passThroughThinForClimb && this.x + this.width > plat.x && this.x < plat.x + plat.w) {
         if (this.y + this.height >= plat.y && this.y + this.height - this.vy <= plat.y + 10 && this.vy >= 0) {
           this.y = plat.y - this.height;
           this.vy = 0;

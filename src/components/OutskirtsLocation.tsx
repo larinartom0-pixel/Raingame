@@ -21,6 +21,7 @@ import {
   getLocationById, getLocationFloorY, resolveSafeSpawn, resolveSafeLizardSpawn,
   SlugcatCharacterId, SLUGCAT_CHARACTERS, roundToOneDecimal
 } from '../types';
+import { APP_VERSION, compareVersions } from '../version';
 
 interface OutskirtsLocationProps {
   onBack: () => void;
@@ -415,11 +416,21 @@ export default function OutskirtsLocation({
     spectatedPeerIdRef.current = spectatedPeerId;
   }, [spectatedPeerId]);
 
-  // GitHub Version Polling & 5-minute Auto-Restart State
-  // "додай щоб гра на клієнті кожні 20 сикунд провіряла версіЮ фАйла на гит хабі єслі там новіша чим та що на клієнті..."
+  // GitHub Version Polling & Auto-Restart Screen State (no native browser dialogs)
   const [updateCountdown, setUpdateCountdown] = useState<number | null>(null);
   const [updateDetected, setUpdateDetected] = useState<boolean>(false);
-  const clientVersionRef = useRef<string | null>(null);
+  const [reloadOverlay, setReloadOverlay] = useState<{ title: string; subtitle: string } | null>(null);
+  const reloadTriggeredRef = useRef<boolean>(false);
+  const clientVersionRef = useRef<string>(APP_VERSION);
+
+  const triggerAutoReload = (title: string, subtitle: string, delayMs: number = 1400) => {
+    if (reloadTriggeredRef.current) return;
+    reloadTriggeredRef.current = true;
+    setReloadOverlay({ title, subtitle });
+    window.setTimeout(() => {
+      window.location.reload();
+    }, delayMs);
+  };
 
   useEffect(() => {
     let isCancelled = false;
@@ -433,9 +444,7 @@ export default function OutskirtsLocation({
         const serverVer = data.version ? String(data.version) : null;
         if (!serverVer) return;
 
-        if (clientVersionRef.current === null) {
-          clientVersionRef.current = serverVer;
-        } else if (clientVersionRef.current !== serverVer) {
+        if (compareVersions(serverVer, clientVersionRef.current) > 0) {
           if (!updateDetected && !isCancelled) {
             setUpdateDetected(true);
             setUpdateCountdown(prev => (prev === null ? 300 : prev)); // 5 minutes countdown
@@ -458,7 +467,11 @@ export default function OutskirtsLocation({
   useEffect(() => {
     if (updateCountdown === null) return;
     if (updateCountdown <= 0) {
-      window.location.reload();
+      triggerAutoReload(
+        'ПЕРЕЗАВАНТАЖЕННЯ...',
+        'Час очікування вийшов. Оновлення гри до нової версії...',
+        1200
+      );
       return;
     }
 
@@ -469,10 +482,9 @@ export default function OutskirtsLocation({
     return () => clearInterval(timer);
   }, [updateCountdown]);
 
-  // Emergency shelter save during update countdown:
-  // "...і єслі за це время дойти до убержки даже єчлі не наївся або даже єслі ще цикл не закончился гра всеодно сохранить прогрес і перезапустить сторінку тому гравцю"
+  // Shelter save & silent on-screen auto-reload when update is pending and player is inside shelter
   useEffect(() => {
-    if (updateCountdown !== null && updateCountdown > 0) {
+    if (updateCountdown !== null && updateCountdown > 0 && !reloadTriggeredRef.current) {
       if (currentLocation.isShelterRoom || inShelterChamber) {
         const emergencySave: PlayerSaveData = {
           karma: playerSave.karma,
@@ -489,8 +501,11 @@ export default function OutskirtsLocation({
         } catch (e) {
           console.warn('Emergency save error:', e);
         }
-        alert('⚠️ Ви дісталися укриття! Прогрес екстрено збережено перед оновленням. Перезавантаження гри...');
-        window.location.reload();
+        triggerAutoReload(
+          'ПЕРЕЗАВАНТАЖЕННЯ...',
+          'Ви в укритті — прогрес збережено! Встановлюємо оновлення гри...',
+          1500
+        );
       }
     }
   }, [updateCountdown, currentLocation.isShelterRoom, inShelterChamber, currentLocation.id, foodCount, playerSave, charConfig.requiredFood]);
@@ -2329,6 +2344,73 @@ export default function OutskirtsLocation({
               liz.pipeCooldown = Math.max(0, liz.pipeCooldown - delta);
             }
 
+            // Persistent chase memory: if player escaped through an inter-room pipe, follow them!
+            if (liz.pipePursuitMemory && liz.pipePursuitMemory.timer > 0) {
+              liz.pipePursuitMemory.timer -= delta;
+              liz.pipePursuitMemory.reactDelay = Math.max(0, liz.pipePursuitMemory.reactDelay - delta);
+              const lxMid = liz.x + liz.width / 2;
+              const distToPipeX = liz.pipePursuitMemory.entryX - lxMid;
+              if (Math.abs(distToPipeX) > 10) {
+                liz.facingRight = distToPipeX > 0;
+                liz.x += Math.sign(distToPipeX) * (delta * 155);
+              }
+              liz.y = Math.max(60, Math.min(rEnv.floorY - liz.height, liz.pipePursuitMemory.entryY - liz.height / 2));
+              liz.updateProceduralBody();
+
+              if (
+                liz.pipePursuitMemory.targetRoomId &&
+                liz.pipePursuitMemory.reactDelay <= 0 &&
+                liz.pipeCooldown <= 0 &&
+                Math.abs(distToPipeX) < 80
+              ) {
+                const destRoom = getLocationById(liz.pipePursuitMemory.targetRoomId);
+                if (destRoom && !destRoom.isShelterRoom) {
+                  const retPipe = destRoom.transitPipes.find(p => p.targetLocationId === entry.roomId);
+                  const destSafe = resolveSafeLizardSpawn(
+                    destRoom,
+                    liz.pipePursuitMemory.spawnX ?? retPipe?.startX,
+                    liz.pipePursuitMemory.spawnY ?? retPipe?.startY
+                  );
+                  entry.roomId = destRoom.id;
+                  liz.pipePursuitMemory = null;
+                  liz.state = 'hunt';
+                  liz.lostPlayerTimer = 15.0;
+                  liz.lastKnownPreyX = destSafe.x;
+                  liz.lastKnownPreyY = destSafe.y;
+                  liz.pipeCooldown = 5.0;
+                  if (retPipe) {
+                    liz.startPipeEmergence(
+                      retPipe.endX,
+                      retPipe.endY,
+                      destSafe.x + liz.width / 2,
+                      destSafe.y + liz.height / 2,
+                      0.85
+                    );
+                  } else {
+                    liz.x = destSafe.x;
+                    liz.y = destSafe.y;
+                    liz.vx = 0;
+                    liz.vy = 0;
+                    liz.resetProceduralPose(destSafe.x, destSafe.y);
+                  }
+                  refreshActiveRoomLizard();
+                  if (destRoom.id === activeLoc.id) {
+                    setLastAction(`Ящер вистежив вас і проліз у кімнату: ${destRoom.name}!`);
+                  }
+                  if (webRTCManager.remotePlayers.size > 0) {
+                    sendAuthoritativeLizardsSync();
+                  }
+                  return;
+                }
+              }
+
+              if (liz.pipePursuitMemory && liz.pipePursuitMemory.timer <= 0) {
+                liz.pipePursuitMemory = null;
+                liz.state = 'patrol';
+              }
+              return;
+            }
+
             liz.x += (liz.facingRight ? 1 : -1) * (delta * 85);
             liz.y = Math.max(60, Math.min(rEnv.floorY - liz.height, liz.y));
             if (liz.x < 60) {
@@ -2890,6 +2972,24 @@ export default function OutskirtsLocation({
                   targetSpawnX: pipe.targetSpawnX,
                   targetSpawnY: pipe.targetSpawnY
                 };
+                if (isWorldAuthority() && !pipe.isShelterPipe && !pipe.isDenPipe) {
+                  for (const entry of activeRoomLizards) {
+                    const liz = entry.lizard;
+                    if (liz.state === 'dead' || liz.state === 'stunned') continue;
+                    const distToLiz = Math.hypot(px - (liz.x + liz.width / 2), py - (liz.y + liz.height / 2));
+                    if (liz.state === 'hunt' || liz.lostPlayerTimer > 0 || distToLiz < 760) {
+                      liz.rememberPreyPipeEntry({
+                        pipeId: pipe.id,
+                        fromRoomId: activeLoc.id,
+                        targetRoomId: pipe.targetLocationId,
+                        entryX: pipe.startX,
+                        entryY: pipe.startY,
+                        spawnX: pipe.targetSpawnX,
+                        spawnY: pipe.targetSpawnY
+                      });
+                    }
+                  }
+                }
                 soundEngine.playPipeTravel();
                 setLastAction(pipe.isShelterPipe
                   ? 'Залізає у герметичний шлюз укриття...'
@@ -2908,6 +3008,21 @@ export default function OutskirtsLocation({
                   duration: 0.95,
                   isShelter: false
                 };
+                if (isWorldAuthority()) {
+                  for (const entry of activeRoomLizards) {
+                    const liz = entry.lizard;
+                    if (liz.state === 'dead' || liz.state === 'stunned') continue;
+                    const distToLiz = Math.hypot(px - (liz.x + liz.width / 2), py - (liz.y + liz.height / 2));
+                    if (liz.state === 'hunt' || liz.lostPlayerTimer > 0 || distToLiz < 760) {
+                      liz.rememberPreyPipeEntry({
+                        pipeId: pipe.id,
+                        fromRoomId: activeLoc.id,
+                        entryX: pipe.endX,
+                        entryY: pipe.endY
+                      });
+                    }
+                  }
+                }
                 soundEngine.playPipeTravel();
                 setLastAction('Залізає у трубу-перехід...');
                 break;
@@ -4985,11 +5100,33 @@ export default function OutskirtsLocation({
             <div className="flex items-center gap-2 text-[10px] text-amber-200/90">
               <span className="hidden sm:inline font-sans">Дійдіть до укриття (убержки) для екстреного збереження!</span>
               <button
-                onClick={() => window.location.reload()}
+                onClick={() => triggerAutoReload('ПЕРЕЗАВАНТАЖЕННЯ...', 'Застосування нової версії гри...', 900)}
                 className="px-2.5 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold uppercase cursor-pointer text-[9px] active:scale-95 shadow-sm"
               >
                 Оновити зараз
               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Silent On-Screen Auto-Reload Overlay (No browser alert dialog) */}
+      <AnimatePresence>
+        {reloadOverlay && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] bg-black/92 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center select-none"
+          >
+            <div className="max-w-md w-full space-y-4 border border-amber-500/40 bg-zinc-950/90 rounded-2xl p-6 shadow-2xl">
+              <div className="w-10 h-10 mx-auto rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
+              <div className="font-mono text-xl sm:text-2xl font-black tracking-[0.2em] text-amber-400 uppercase">
+                {reloadOverlay.title}
+              </div>
+              <p className="text-xs sm:text-sm font-mono text-zinc-300 leading-relaxed">
+                {reloadOverlay.subtitle}
+              </p>
             </div>
           </motion.div>
         )}

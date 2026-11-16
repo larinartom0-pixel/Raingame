@@ -66,6 +66,7 @@ export interface LocationNavGraph {
   nodes: NavNode[];
   edges: NavEdge[][];
   blockers: WallBlocker[];
+  nonPoleBlockers: WallBlocker[];
 }
 
 const navGraphCache = new Map<string, LocationNavGraph>();
@@ -78,6 +79,24 @@ function extractWallBlockers(platforms: NavPlatformInput[]): WallBlocker[] {
     } else if (p.h >= 45) {
       // Tall concrete/metal monolith: walkable on top (p.y), solid wall interior below top surface
       blockers.push({ x: p.x + 2, y: p.y + 10, w: Math.max(2, p.w - 4), h: Math.max(2, p.h - 12) });
+    }
+  }
+  return blockers;
+}
+
+function extractNonPoleBlockers(platforms: NavPlatformInput[], wallBlockers: WallBlocker[]): WallBlocker[] {
+  const blockers: WallBlocker[] = [...wallBlockers];
+  for (const p of platforms) {
+    if (p.type !== 'wall' && p.type !== 'shelter' && p.h < 45 && p.w > 16) {
+      // Thin horizontal platform: prevents fake "phase through floor" jump/drop edges,
+      // while leaving outer 6px edges open for genuine ledge drop-offs (poles bypass via wallBlockers only)
+      const inset = Math.min(6, p.w * 0.2);
+      blockers.push({
+        x: p.x + inset,
+        y: p.y + 1,
+        w: Math.max(2, p.w - inset * 2),
+        h: Math.max(6, p.h - 2)
+      });
     }
   }
   return blockers;
@@ -155,13 +174,14 @@ export function getOrBuildNavGraph(
   poles: NavPoleInput[],
   pipes?: NavPipeInput[]
 ): LocationNavGraph {
-  const sig = `${roomKey}:${platforms.length}:${poles.length}:${pipes?.length ?? 0}`;
+  const sig = `v2:${roomKey}:${platforms.length}:${poles.length}:${pipes?.length ?? 0}`;
   const cached = navGraphCache.get(roomKey);
   if (cached && cached.signature === sig) {
     return cached;
   }
 
   const blockers = extractWallBlockers(platforms);
+  const nonPoleBlockers = extractNonPoleBlockers(platforms, blockers);
   const nodes: NavNode[] = [];
 
   const addNode = (x: number, y: number, kind: NavNode['kind'], poleIndex?: number, pipeId?: string): number => {
@@ -175,8 +195,9 @@ export function getOrBuildNavGraph(
     if (plat.type === 'wall' || plat.type === 'shelter') continue;
     if (plat.y <= 35 || plat.w < 36) continue;
     const surfaceY = plat.y - 12;
-    const minX = plat.x + 22;
-    const maxX = plat.x + plat.w - 22;
+    const edgeInset = plat.h < 45 && plat.w >= 48 ? 8 : 22;
+    const minX = plat.x + edgeInset;
+    const maxX = plat.x + plat.w - edgeInset;
     if (minX > maxX) {
       const midX = plat.x + plat.w / 2;
       if (!isPointInsideWall(midX, surfaceY, blockers)) {
@@ -253,28 +274,37 @@ export function getOrBuildNavGraph(
     }
   });
 
-  // Shortcut pipe connections
+  // Shortcut pipe connections (only cheaper than walking when pipe spans significant multi-level distance)
   for (const pair of pipePairs) {
-    connect(pair.a, pair.b, 95, 'pipe', undefined, pair.pipeId);
-    connect(pair.b, pair.a, 95, 'pipe', undefined, pair.pipeId);
+    const na = nodes[pair.a];
+    const nb = nodes[pair.b];
+    const pipeSpan = Math.hypot(nb.x - na.x, nb.y - na.y);
+    const pipeCost = Math.max(105, Math.min(185, pipeSpan * 0.32 + 65));
+    connect(pair.a, pair.b, pipeCost, 'pipe', undefined, pair.pipeId);
+    connect(pair.b, pair.a, pipeCost, 'pipe', undefined, pair.pipeId);
   }
 
-  // Walk & Jump/Drop edges (strictly checked against ALL walls)
+  // Walk & Jump/Drop edges (strictly checked against walls AND thin platforms for drops)
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const a = nodes[i];
       const b = nodes[j];
       const dx = Math.abs(a.x - b.x);
       const dy = Math.abs(a.y - b.y);
+      const involvesPipe = a.kind === 'pipe' || b.kind === 'pipe';
 
-      if (dx > 180 || dy > 190) continue;
+      const maxDx = involvesPipe ? 190 : 180;
+      const maxDy = involvesPipe ? 160 : 190;
+      if (dx > maxDx || dy > maxDy) continue;
       if (doesSegmentCrossAnyWall(a.x, a.y, b.x, b.y, blockers)) continue;
 
-      if (dy <= 24 && dx <= 165) {
+      if ((dy <= 24 && dx <= 165) || (involvesPipe && dy <= 38 && dx <= 190)) {
         const dist = Math.hypot(dx, dy);
         connect(i, j, dist, 'walk');
         connect(j, i, dist, 'walk');
       } else if (dx <= 135 && dy <= 160) {
+        // Non-pole jumps/drops must NOT pass straight through horizontal platforms!
+        if (doesSegmentCrossAnyWall(a.x, a.y, b.x, b.y, nonPoleBlockers)) continue;
         const aToBDy = b.y - a.y; // negative = upward jump
         if (aToBDy >= -92 && aToBDy <= 180) {
           connect(i, j, Math.hypot(dx, dy) * (aToBDy < 0 ? 1.45 : 1.15), 'jump');
@@ -287,7 +317,7 @@ export function getOrBuildNavGraph(
     }
   }
 
-  const graph: LocationNavGraph = { signature: sig, nodes, edges, blockers };
+  const graph: LocationNavGraph = { signature: sig, nodes, edges, blockers, nonPoleBlockers };
   navGraphCache.set(roomKey, graph);
   return graph;
 }
@@ -300,10 +330,12 @@ export function findNextGraphWaypoint(
   goalY: number,
   platforms: NavPlatformInput[],
   poles: NavPoleInput[],
-  pipes?: NavPipeInput[]
+  pipes?: NavPipeInput[],
+  options?: { allowShortcutPipes?: boolean }
 ): NavWaypoint | null {
+  const allowShortcutPipes = options?.allowShortcutPipes ?? true;
   const graph = getOrBuildNavGraph(roomKey, platforms, poles, pipes);
-  const { nodes, edges, blockers } = graph;
+  const { nodes, edges, blockers, nonPoleBlockers } = graph;
   if (nodes.length === 0) return null;
 
   // Dynamic temporary node count: base nodes + start + goal
@@ -317,18 +349,22 @@ export function findNextGraphWaypoint(
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
     const ds = Math.hypot(n.x - startX, n.y - startY);
-    if (ds <= 185 && !doesSegmentCrossAnyWall(startX, startY, n.x, n.y, blockers)) {
+    const samePoleStart = n.kind === 'pole' && Math.abs(n.x - startX) < 30;
+    const startBlockerSet = (Math.abs(n.y - startY) > 22 && !samePoleStart) ? nonPoleBlockers : blockers;
+    if (ds <= 185 && !doesSegmentCrossAnyWall(startX, startY, n.x, n.y, startBlockerSet)) {
       startEdges.push({
         to: i,
         cost: ds,
-        kind: n.kind === 'pole' && Math.abs(n.y - startY) > 25 ? 'pole' : 'walk',
+        kind: n.kind === 'pole' && Math.abs(n.y - startY) > 24 ? 'pole' : 'walk',
         poleX: n.poleIndex !== undefined ? poles[n.poleIndex]?.x : undefined,
         pipeId: n.pipeId
       });
     }
 
     const dg = Math.hypot(n.x - goalX, n.y - goalY);
-    if (dg <= 195 && !doesSegmentCrossAnyWall(n.x, n.y, goalX, goalY, blockers)) {
+    const samePoleGoal = n.kind === 'pole' && Math.abs(n.x - goalX) < 30;
+    const goalBlockerSet = (Math.abs(goalY - n.y) > 22 && !samePoleGoal) ? nonPoleBlockers : blockers;
+    if (dg <= 195 && !doesSegmentCrossAnyWall(n.x, n.y, goalX, goalY, goalBlockerSet)) {
       incomingToGoal.push({
         from: i,
         edge: {
@@ -403,6 +439,7 @@ export function findNextGraphWaypoint(
 
     const adj = u === startId ? startEdges : (u < nodes.length ? edges[u] : []);
     for (const edge of adj) {
+      if (!allowShortcutPipes && edge.kind === 'pipe') continue;
       const alt = distArr[u] + edge.cost;
       if (alt < distArr[edge.to]) {
         distArr[edge.to] = alt;
@@ -425,12 +462,18 @@ export function findNextGraphWaypoint(
     return null;
   }
 
-  // Reconstruct path and pick immediate next node after startId
-  let step = goalId;
-  while (prevNode[step] !== -1 && prevNode[step] !== startId) {
-    step = prevNode[step];
+  // Reconstruct full path from startId -> ... -> goalId
+  const pathNodes: number[] = [];
+  let cur = goalId;
+  while (cur !== -1) {
+    pathNodes.push(cur);
+    if (cur === startId) break;
+    cur = prevNode[cur];
   }
+  pathNodes.reverse();
+  if (pathNodes.length < 2 || pathNodes[0] !== startId) return null;
 
+  const step = pathNodes[1];
   const stepEdge = prevEdge[step];
   if (!stepEdge) return null;
 
@@ -441,11 +484,17 @@ export function findNextGraphWaypoint(
   const targetNode = nodes[step];
   if (!targetNode) return null;
 
+  const nextAfterStep = pathNodes.length > 2 ? pathNodes[2] : -1;
+  const nextEdge = nextAfterStep !== -1 ? prevEdge[nextAfterStep] : null;
+  const isEnteringPipeNow =
+    stepEdge.kind === 'pipe' ||
+    (targetNode.kind === 'pipe' && nextEdge?.kind === 'pipe');
+
   return {
     x: targetNode.x,
     y: targetNode.y,
-    kind: stepEdge.kind,
+    kind: isEnteringPipeNow && stepEdge.kind !== 'pole' ? 'pipe' : stepEdge.kind,
     poleX: stepEdge.poleX,
-    pipeId: stepEdge.pipeId
+    pipeId: isEnteringPipeNow ? (targetNode.pipeId ?? nextEdge?.pipeId ?? stepEdge.pipeId) : undefined
   };
 }
