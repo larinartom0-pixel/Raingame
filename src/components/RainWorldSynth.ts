@@ -3,9 +3,12 @@
  * Generates rain soundscapes, thunder, and melancholic ambient tracks.
  */
 
+import { getGameSettings } from '../settings';
+
 class RainWorldSynth {
   private ctx: AudioContext | null = null;
   private isMuted: boolean = true;
+  private sfxVolume: number = getGameSettings().audio.sfxVolume;
   
   // Audio Nodes
   private masterGain: GainNode | null = null;
@@ -42,7 +45,7 @@ class RainWorldSynth {
 
       // Master output
       this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.setValueAtTime(0.3, this.ctx.currentTime);
+      this.masterGain.gain.setValueAtTime(this.isMuted ? 0 : 0.35 * this.sfxVolume, this.ctx.currentTime);
       
       this.concussionFilter.connect(this.masterGain);
       this.masterGain.connect(this.ctx.destination);
@@ -620,6 +623,19 @@ class RainWorldSynth {
     }
   }
 
+  public setVolume(vol: number) {
+    this.sfxVolume = Math.max(0, Math.min(1, vol));
+    if (this.ctx && this.masterGain && !this.isMuted) {
+      const now = this.ctx.currentTime;
+      this.masterGain.gain.cancelScheduledValues(now);
+      this.masterGain.gain.linearRampToValueAtTime(0.35 * this.sfxVolume, now + 0.1);
+    }
+  }
+
+  public getVolume(): number {
+    return this.sfxVolume;
+  }
+
   public toggleMute(mutedState?: boolean) {
     const newState = mutedState !== undefined ? mutedState : !this.isMuted;
     this.isMuted = newState;
@@ -633,7 +649,7 @@ class RainWorldSynth {
         this.ctx.resume();
       }
       const now = this.ctx.currentTime;
-      this.masterGain.gain.linearRampToValueAtTime(newState ? 0 : 0.25, now + 0.5);
+      this.masterGain.gain.linearRampToValueAtTime(newState ? 0 : 0.35 * this.sfxVolume, now + 0.3);
     }
 
     return this.isMuted;

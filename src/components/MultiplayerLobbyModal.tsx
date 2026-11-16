@@ -11,6 +11,7 @@ import { signalingClient } from '../network/SignalingClient';
 import { webRTCManager } from '../network/WebRTCManager';
 import { distributedSimulation } from '../network/DistributedSimulation';
 import { APP_VERSION, compareVersions } from '../version';
+import { getPersistentNickname, updateNicknameSetting } from '../settings';
 
 interface MultiplayerLobbyModalProps {
   isOpen: boolean;
@@ -29,10 +30,8 @@ export default function MultiplayerLobbyModal({
 }: MultiplayerLobbyModalProps) {
   const [activeTab, setActiveTab] = useState<'rooms' | 'create'>('rooms');
   
-  // Player Profile
-  const [playerName, setPlayerName] = useState<string>(() => {
-    return localStorage.getItem('rw_player_name') || `Слимакокіт-${Math.floor(Math.random() * 899 + 100)}`;
-  });
+  // Player Profile (persistent across reloads)
+  const [playerName, setPlayerName] = useState<string>(() => getPersistentNickname());
   const [isDummyMode, setIsDummyMode] = useState<boolean>(distributedSimulation.isClientDummyMode);
 
   // Server state
@@ -50,6 +49,7 @@ export default function MultiplayerLobbyModal({
 
   useEffect(() => {
     if (!isOpen) return;
+    setPlayerName(getPersistentNickname());
     checkServerHealth();
     fetchRooms();
   }, [isOpen]);
@@ -92,8 +92,9 @@ export default function MultiplayerLobbyModal({
   };
 
   const handleSaveProfile = () => {
-    localStorage.setItem('rw_player_name', playerName);
-    webRTCManager.setLocalIdentity(playerName);
+    const saved = updateNicknameSetting(playerName);
+    setPlayerName(saved);
+    webRTCManager.setLocalIdentity(saved);
   };
 
   const handleJoinRoom = async (roomId: string, roomVersion?: string) => {
@@ -170,7 +171,15 @@ export default function MultiplayerLobbyModal({
               <input
                 type="text"
                 value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setPlayerName(val);
+                  if (val.trim()) {
+                    const saved = updateNicknameSetting(val);
+                    webRTCManager.setLocalIdentity(saved);
+                  }
+                }}
+                onBlur={handleSaveProfile}
                 maxLength={20}
                 className="px-2.5 py-1 rounded bg-black/80 border border-zinc-700 font-mono text-xs text-white focus:border-amber-400 focus:outline-none w-36 sm:w-44"
                 placeholder="Слимакокіт"

@@ -6,13 +6,24 @@ const devInjectedVersion =
     ? (window as unknown as { __DEV_APP_VERSION__?: string }).__DEV_APP_VERSION__
     : undefined;
 
-export const APP_VERSION: string =
-  (devInjectedVersion && devInjectedVersion.trim()) ||
-  (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.0.0');
+export function isValidSemver(ver: string): boolean {
+  return /^\d+(\.\d+)+$/.test(String(ver || '').replace(/^v/i, '').trim());
+}
+
+export const APP_VERSION: string = (() => {
+  const candidate =
+    (devInjectedVersion && devInjectedVersion.trim()) ||
+    (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.4.4');
+  const clean = String(candidate).replace(/^v/i, '').trim();
+  return isValidSemver(clean) ? clean : '1.4.4';
+})();
 
 export function compareVersions(a: string, b: string): number {
   const cleanA = String(a || '0.0.0').replace(/^v/i, '').trim();
   const cleanB = String(b || '0.0.0').replace(/^v/i, '').trim();
+  if (!isValidSemver(cleanA) || !isValidSemver(cleanB)) {
+    return 0;
+  }
   const partsA = cleanA.split('.').map((n) => parseInt(n, 10) || 0);
   const partsB = cleanB.split('.').map((n) => parseInt(n, 10) || 0);
   const len = Math.max(partsA.length, partsB.length, 3);

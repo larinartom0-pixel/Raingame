@@ -1,7 +1,7 @@
-// WebRTC DataChannel Peer-to-Peer Mesh Manager (up to 12 players)
 import { NetworkPacket, RemotePlayer } from './types';
 import { signalingClient, SignalMessage } from './SignalingClient';
 import { APP_VERSION, compareVersions } from '../version';
+import { getPersistentNickname, setPersistentNickname } from '../settings';
 
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
@@ -25,7 +25,7 @@ interface PeerConnectionWrapper {
 
 export class WebRTCManager {
   public localPlayerId: string = `sc-${Math.floor(Math.random() * 89999 + 10000)}`;
-  public localPlayerName: string = `Слимакокіт-${this.localPlayerId.slice(-4)}`;
+  public localPlayerName: string = getPersistentNickname();
   
   public currentRoomId: string | null = null;
   public currentRoomVersion: string = APP_VERSION;
@@ -69,7 +69,8 @@ export class WebRTCManager {
   }
 
   public setLocalIdentity(name: string) {
-    this.localPlayerName = name.trim() || this.localPlayerName;
+    const saved = setPersistentNickname(name);
+    this.localPlayerName = saved;
   }
 
   public onPacket(handler: (packet: NetworkPacket) => void): () => void {
@@ -481,6 +482,7 @@ export class WebRTCManager {
         this.sendPacketToPeer(wrapper.peerId, {
           type: 'REQUEST_ITEMS_SYNC',
           senderId: this.localPlayerId,
+          senderName: this.localPlayerName,
           room: this.currentRoomId || 'outskirts-default',
           clientVersion: APP_VERSION,
         });
@@ -489,6 +491,7 @@ export class WebRTCManager {
         this.packetHandlers.forEach(h => h({
           type: 'REQUEST_ITEMS_SYNC',
           senderId: wrapper.peerId,
+          senderName: wrapper.peerName,
           room: this.currentRoomId || 'outskirts-default',
           clientVersion: APP_VERSION,
         }));
@@ -580,11 +583,19 @@ export class WebRTCManager {
           }))
         : Array.from({ length: 9 }, (_, i) => ({ x: safeHips.x, y: safeHips.y + i * 5 }));
 
+      const incomingName =
+        typeof packet.senderName === 'string' && packet.senderName.trim()
+          ? packet.senderName.trim().slice(0, 20)
+          : null;
+      const peerWrapper = this.peers.get(packet.senderId);
+
       if (!rp) {
         const charId = packet.characterId === 'monk' ? 'monk' : 'survivor';
+        const resolvedName = incomingName || peerWrapper?.peerName || `Слимакокіт-${packet.senderId.slice(-4)}`;
+        if (peerWrapper && incomingName) peerWrapper.peerName = incomingName;
         rp = {
           id: packet.senderId,
-          name: `Слимакокіт-${packet.senderId.slice(-4)}`,
+          name: resolvedName,
           characterId: charId,
           room: packet.room || 'outskirts-default',
           x: safeX,
@@ -614,6 +625,12 @@ export class WebRTCManager {
         this.remotePlayers.set(packet.senderId, rp);
         this.notifyPeerList();
       } else {
+        let nameChanged = false;
+        if (incomingName && rp.name !== incomingName) {
+          rp.name = incomingName;
+          if (peerWrapper) peerWrapper.peerName = incomingName;
+          nameChanged = true;
+        }
         if (packet.characterId) {
           rp.characterId = packet.characterId === 'monk' ? 'monk' : 'survivor';
           rp.maxHp = rp.characterId === 'monk' ? 2 : 1;
@@ -640,6 +657,7 @@ export class WebRTCManager {
         rp.hips = safeHips;
         rp.tail = safeTail;
         rp.lastUpdateTimestamp = Date.now();
+        if (nameChanged) this.notifyPeerList();
       }
     }
 
@@ -674,6 +692,7 @@ export class WebRTCManager {
     this.broadcastPacket({
       type: 'PLAYER_STATE',
       senderId: this.localPlayerId,
+      senderName: this.localPlayerName,
       clientVersion: APP_VERSION,
       timestamp: Date.now(),
       ...data

@@ -56,6 +56,7 @@ export type NetworkPacket =
   | {
       type: 'PLAYER_STATE';
       senderId: string;
+      senderName?: string;
       clientVersion?: string;
       characterId?: SlugcatCharacterId;
       room: string;
@@ -122,6 +123,7 @@ export type NetworkPacket =
   | {
       type: 'REQUEST_ITEMS_SYNC';
       senderId: string;
+      senderName?: string;
       room: string;
       clientVersion?: string;
     }
@@ -253,6 +255,7 @@ export type NetworkPacket =
   | {
       type: 'REQUEST_WORLD_SYNC';
       senderId: string;
+      senderName?: string;
       room: string;
       clientVersion?: string;
     }

@@ -37,7 +37,18 @@ jobs:
       - name: Generate build version stamp
         run: |
           mkdir -p public
-          echo "{\"version\":\"${{ github.sha }}\",\"buildTime\":$(date +%s000)}" > public/version.json
+          node -e '
+            const fs = require("fs");
+            const p = "public/version.json";
+            let version = "1.4.4";
+            try {
+              const cur = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (cur && typeof cur.version === "string" && /^\d+(\.\d+)+$/.test(cur.version.trim())) {
+                version = cur.version.trim();
+              }
+            } catch {}
+            fs.writeFileSync(p, JSON.stringify({ version, commit: process.env.GITHUB_SHA || "", buildTime: Date.now() }, null, 2) + "\n");
+          '
           if [ -d "Music" ]; then cp -r Music public/; fi
 
       - name: Build production app

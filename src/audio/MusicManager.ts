@@ -2,7 +2,16 @@
 // 100% immune to OS Media Player Notification (MediaSession) in notification shade
 // Eliminates track overlapping via single authoritative source cross-fading
 
+import { getGameSettings } from '../settings';
+
 export type MusicCategory = 'menu' | 'game' | 'battle' | 'none';
+
+export interface MusicTrackInfo {
+  id: string;
+  title: string;
+  category: 'menu' | 'game' | 'battle';
+  url: string;
+}
 
 const BASE_URL = (((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL) || './').replace(/\/?$/, '/');
 
@@ -11,25 +20,36 @@ function resolveAssetUrl(relativePath: string): string {
   return `${BASE_URL}${clean}`;
 }
 
+export const MUSIC_TRACK_CATALOG: MusicTrackInfo[] = [
+  { id: 'menu_1', title: 'Меню #1 — Окраїни (Атмосфера)', category: 'menu', url: resolveAssetUrl('Music/Main_menu/main_menu1.mp3') },
+  { id: 'menu_2', title: 'Меню #2 — Вічна злива', category: 'menu', url: resolveAssetUrl('Music/Main_menu/main_menu2.mp3') },
+  { id: 'game_1', title: 'У грі #1 — Руїни', category: 'game', url: resolveAssetUrl('Music/In_game/in_game1.mp3') },
+  { id: 'game_2', title: 'У грі #2 — Дослідження', category: 'game', url: resolveAssetUrl('Music/In_game/in_game2.mp3') },
+  { id: 'game_3', title: 'У грі #3 — Тунель', category: 'game', url: resolveAssetUrl('Music/In_game/in_game3.mp3') },
+  { id: 'battle_1', title: 'Бій #1 — Небезпека', category: 'battle', url: resolveAssetUrl('Music/In_battle/in_battle1.mp3') },
+  { id: 'battle_2', title: 'Бій #2 — Загроза', category: 'battle', url: resolveAssetUrl('Music/In_battle/in_battle2.mp3') },
+  { id: 'battle_3', title: 'Бій #3 — Переслідування', category: 'battle', url: resolveAssetUrl('Music/In_battle/in_battle3.mp3') },
+  { id: 'battle_4', title: 'Бій #4 — Сутичка', category: 'battle', url: resolveAssetUrl('Music/In_battle/in_battle4.mp3') },
+];
+
 const TRACKS: Record<'menu' | 'game' | 'battle', string[]> = {
-  menu: [
-    resolveAssetUrl('Music/Main_menu/main_menu1.mp3'),
-    resolveAssetUrl('Music/Main_menu/main_menu2.mp3')
-  ],
-  game: [
-    resolveAssetUrl('Music/In_game/in_game1.mp3'),
-    resolveAssetUrl('Music/In_game/in_game2.mp3'),
-    resolveAssetUrl('Music/In_game/in_game3.mp3')
-  ],
-  battle: [
-    resolveAssetUrl('Music/In_battle/in_battle1.mp3'),
-    resolveAssetUrl('Music/In_battle/in_battle2.mp3'),
-    resolveAssetUrl('Music/In_battle/in_battle3.mp3'),
-    resolveAssetUrl('Music/In_battle/in_battle4.mp3')
-  ]
+  menu: MUSIC_TRACK_CATALOG.filter(t => t.category === 'menu').map(t => t.url),
+  game: MUSIC_TRACK_CATALOG.filter(t => t.category === 'game').map(t => t.url),
+  battle: MUSIC_TRACK_CATALOG.filter(t => t.category === 'battle').map(t => t.url),
 };
 
 const FAILED_RETRY_COOLDOWN_MS = 15000;
+
+export interface MusicManagerState {
+  currentCategory: MusicCategory;
+  currentTrackUrl: string;
+  isPreviewing: boolean;
+  isLoading: boolean;
+  isPlaying: boolean;
+  isMuted: boolean;
+  volume: number;
+  lastError: string | null;
+}
 
 class MusicManager {
   private ctx: AudioContext | null = null;
@@ -42,12 +62,15 @@ class MusicManager {
   private activeNodes: Set<{ source: AudioBufferSourceNode; gain: GainNode; timerId: number | null }> = new Set();
 
   private currentCategory: MusicCategory = 'none';
+  private categoryBeforePreview: MusicCategory = 'none';
   private currentTrackUrl: string = '';
   private currentTrackIndex: number = 0;
 
   private isMuted: boolean = false;
-  private volume: number = 0.65;
+  private volume: number = getGameSettings().audio.musicVolume;
   private isUnlocked: boolean = false;
+  private isPreviewing: boolean = false;
+  private lastError: string | null = null;
   private currentHpRatio: number = 1.0;
 
   // Loading & retry state so periodic callers never spam or abort in-flight downloads
@@ -60,6 +83,7 @@ class MusicManager {
   // In-memory cache for decoded audio buffers
   private bufferCache: Map<string, AudioBuffer> = new Map();
   private loadingPromises: Map<string, Promise<AudioBuffer>> = new Map();
+  private listeners: Set<(state: MusicManagerState) => void> = new Set();
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -152,6 +176,29 @@ class MusicManager {
     this.hpFilter.frequency.setTargetAtTime(targetFreq, now, 0.2);
   }
 
+  private notifyListeners() {
+    const snapshot = this.getState();
+    this.listeners.forEach((cb) => cb(snapshot));
+  }
+
+  public getState(): MusicManagerState {
+    return {
+      currentCategory: this.currentCategory,
+      currentTrackUrl: this.currentTrackUrl,
+      isPreviewing: this.isPreviewing,
+      isLoading: this.isLoading,
+      isPlaying: !!this.currentSource && !this.isLoading,
+      isMuted: this.isMuted,
+      volume: this.volume,
+      lastError: this.lastError,
+    };
+  }
+
+  public subscribe(cb: (state: MusicManagerState) => void): () => void {
+    this.listeners.add(cb);
+    return () => this.listeners.delete(cb);
+  }
+
   public setMuted(muted: boolean) {
     this.isMuted = muted;
     if (this.ctx && this.masterGain) {
@@ -159,6 +206,7 @@ class MusicManager {
       this.masterGain.gain.cancelScheduledValues(now);
       this.masterGain.gain.linearRampToValueAtTime(muted ? 0 : this.volume, now + 0.15);
     }
+    this.notifyListeners();
   }
 
   public setVolume(vol: number) {
@@ -168,6 +216,11 @@ class MusicManager {
       this.masterGain.gain.cancelScheduledValues(now);
       this.masterGain.gain.linearRampToValueAtTime(this.volume, now + 0.15);
     }
+    this.notifyListeners();
+  }
+
+  public getVolume(): number {
+    return this.volume;
   }
 
   private async loadTrackBuffer(url: string): Promise<AudioBuffer> {
@@ -252,6 +305,14 @@ class MusicManager {
   }
 
   public playCategory(category: MusicCategory, forceRestart: boolean = false) {
+    // Do not interrupt active user track preview from Settings Music Tester
+    if (this.isPreviewing && !forceRestart) {
+      if (category !== 'none') {
+        this.categoryBeforePreview = category;
+      }
+      return;
+    }
+
     // Already playing or loading this exact category, don't restart or layer another song
     if (
       category === this.currentCategory &&
@@ -297,13 +358,99 @@ class MusicManager {
     this.loadAndPlay(chosen.url, category, token);
   }
 
+  public async playPreviewTrack(trackUrl: string) {
+    const ctx = this.getAudioContext();
+    if (ctx.state === 'suspended') {
+      await ctx.resume().catch(() => {});
+    }
+    this.isUnlocked = true;
+
+    if (!this.isPreviewing && this.currentCategory !== 'none') {
+      this.categoryBeforePreview = this.currentCategory;
+    }
+    this.isPreviewing = true;
+    this.lastError = null;
+    this.stopAllActiveSources(0.15);
+
+    const token = ++this.requestToken;
+    this.isLoading = true;
+    this.currentTrackUrl = trackUrl;
+    this.notifyListeners();
+
+    try {
+      // Clear cooldown on explicit user preview test
+      this.failedCooldowns.delete(trackUrl);
+      const buffer = await this.loadTrackBuffer(trackUrl);
+      if (this.requestToken !== token || !this.isPreviewing) return;
+
+      this.isLoading = false;
+      const now = ctx.currentTime;
+      const newSource = ctx.createBufferSource();
+      newSource.buffer = buffer;
+      newSource.loop = true;
+
+      const newGain = ctx.createGain();
+      newGain.gain.setValueAtTime(0.0001, now);
+      newGain.gain.linearRampToValueAtTime(1.0, now + 0.25);
+
+      newSource.connect(newGain);
+      if (this.masterGain) {
+        newGain.connect(this.masterGain);
+      }
+
+      const nodeEntry = { source: newSource, gain: newGain, timerId: null as number | null };
+      this.activeNodes.add(nodeEntry);
+      newSource.onended = () => {
+        this.activeNodes.delete(nodeEntry);
+        if (this.currentSource === newSource) {
+          this.currentSource = null;
+          this.currentGain = null;
+          this.notifyListeners();
+        }
+      };
+
+      newSource.start(0);
+      this.currentSource = newSource;
+      this.currentGain = newGain;
+      this.currentTrackUrl = trackUrl;
+      this.notifyListeners();
+    } catch {
+      if (this.requestToken === token) {
+        this.isLoading = false;
+        this.currentSource = null;
+        this.currentGain = null;
+        this.lastError = 'Файл аудіо недоступний або не знайдений';
+        this.notifyListeners();
+      }
+    }
+  }
+
+  public stopPreview(resumeCategory?: MusicCategory) {
+    if (!this.isPreviewing) return;
+    this.isPreviewing = false;
+    this.lastError = null;
+    this.isLoading = false;
+    this.requestToken++;
+    this.stopAllActiveSources(0.2);
+    const targetCat = resumeCategory ?? this.categoryBeforePreview;
+    if (targetCat && targetCat !== 'none') {
+      this.currentCategory = 'none';
+      this.playCategory(targetCat, true);
+    } else {
+      this.currentTrackUrl = '';
+      this.notifyListeners();
+    }
+  }
+
   private async loadAndPlay(trackUrl: string, category: MusicCategory, token: number) {
     this.isLoading = true;
+    this.lastError = null;
+    this.notifyListeners();
     try {
       const buffer = await this.loadTrackBuffer(trackUrl);
 
       // Discard if user switched categories while track was decoding
-      if (this.requestToken !== token || this.currentCategory !== category) {
+      if (this.requestToken !== token || this.currentCategory !== category || this.isPreviewing) {
         return;
       }
 
@@ -312,13 +459,14 @@ class MusicManager {
     } catch (err) {
       if (this.requestToken === token) {
         this.isLoading = false;
+        this.notifyListeners();
       }
       console.warn('Could not load soundtrack:', trackUrl, err);
     }
   }
 
   private executeCrossFade(buffer: AudioBuffer, trackUrl: string, category: MusicCategory, token: number) {
-    if (this.requestToken !== token || this.currentCategory !== category) {
+    if (this.requestToken !== token || this.currentCategory !== category || this.isPreviewing) {
       return;
     }
 
@@ -359,7 +507,7 @@ class MusicManager {
         this.currentSource = null;
         this.currentGain = null;
       }
-      if (this.requestToken === token && this.currentCategory === category) {
+      if (this.requestToken === token && this.currentCategory === category && !this.isPreviewing) {
         const playlist = TRACKS[category];
         this.currentTrackIndex = (this.currentTrackIndex + 1) % playlist.length;
         const nextUrl = playlist[this.currentTrackIndex];
@@ -373,14 +521,17 @@ class MusicManager {
     this.currentSource = newSource;
     this.currentGain = newGain;
     this.currentTrackUrl = trackUrl;
+    this.notifyListeners();
   }
 
   public stop(fadeSeconds: number = 0.35) {
+    this.isPreviewing = false;
     this.currentCategory = 'none';
     this.isLoading = false;
     this.requestToken++;
     this.stopAllActiveSources(fadeSeconds);
     this.clearMediaSession();
+    this.notifyListeners();
   }
 
   public getCurrentCategory(): MusicCategory {

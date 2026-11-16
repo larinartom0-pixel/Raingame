@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Sparkles, Play, Volume2, VolumeX, Settings, Compass, HelpCircle, Globe, Users, ExternalLink, Layers } from 'lucide-react';
+import { Sparkles, Play, Volume2, VolumeX, Settings, Globe, Layers, Maximize2, Minimize2 } from 'lucide-react';
 
 import { WeatherState, CustomLocationData, SlugcatCharacterId, SLUGCAT_CHARACTERS } from './types';
 import RainCanvas from './components/RainCanvas';
@@ -8,19 +8,23 @@ import OutskirtsLocation from './components/OutskirtsLocation';
 import LocationEditor from './components/LocationEditor';
 import { soundEngine } from './components/RainWorldSynth';
 import MultiplayerLobbyModal from './components/MultiplayerLobbyModal';
+import SettingsModal from './components/SettingsModal';
 import LoadingScreen from './components/LoadingScreen';
 import { musicManager } from './audio/MusicManager';
 import { webRTCManager } from './network/WebRTCManager';
 import { APP_VERSION, compareVersions } from './version';
+import { useGameSettings } from './settings';
 
 export default function App() {
+  const settings = useGameSettings();
   const [hasEntered, setHasEntered] = useState(false);
   const [isGameplayActive, setIsGameplayActive] = useState(false);
   const [isEditorActive, setIsEditorActive] = useState(false);
   const [activeCustomLocation, setActiveCustomLocation] = useState<CustomLocationData | null>(null);
   const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isSoundMuted, setIsSoundMuted] = useState(true);
-  const [activeFeedback, setActiveFeedback] = useState<string | null>(null);
   const [selectedCharacter, setSelectedCharacter] = useState<SlugcatCharacterId>(() => {
     try {
       return localStorage.getItem('rw_selected_character') === 'monk' ? 'monk' : 'survivor';
@@ -96,6 +100,59 @@ export default function App() {
     }
   }, [hasEntered, isGameplayActive]);
 
+  // Keep audio volumes & local identity synced with settings
+  useEffect(() => {
+    musicManager.setVolume(settings.audio.musicVolume);
+    soundEngine.setVolume(settings.audio.sfxVolume);
+    webRTCManager.setLocalIdentity(settings.nickname);
+  }, [settings.audio.musicVolume, settings.audio.sfxVolume, settings.nickname]);
+
+  // Track Fullscreen state
+  useEffect(() => {
+    const handleFsChange = () => {
+      const fs = !!(
+        document.fullscreenElement ||
+        (document as unknown as { webkitFullscreenElement?: Element }).webkitFullscreenElement ||
+        (document as unknown as { mozFullScreenElement?: Element }).mozFullScreenElement
+      );
+      setIsFullscreen(fs);
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    document.addEventListener('webkitfullscreenchange', handleFsChange);
+    document.addEventListener('mozfullscreenchange', handleFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange);
+      document.removeEventListener('webkitfullscreenchange', handleFsChange);
+      document.removeEventListener('mozfullscreenchange', handleFsChange);
+    };
+  }, []);
+
+  const toggleFullscreen = async () => {
+    try {
+      const fs = !!(
+        document.fullscreenElement ||
+        (document as unknown as { webkitFullscreenElement?: Element }).webkitFullscreenElement ||
+        (document as unknown as { mozFullScreenElement?: Element }).mozFullScreenElement
+      );
+      if (!fs) {
+        const el = document.documentElement;
+        if (el.requestFullscreen) {
+          await el.requestFullscreen();
+        } else if ((el as unknown as { webkitRequestFullscreen?: () => Promise<void> }).webkitRequestFullscreen) {
+          await (el as unknown as { webkitRequestFullscreen: () => Promise<void> }).webkitRequestFullscreen();
+        }
+      } else {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if ((document as unknown as { webkitExitFullscreen?: () => Promise<void> }).webkitExitFullscreen) {
+          await (document as unknown as { webkitExitFullscreen: () => Promise<void> }).webkitExitFullscreen();
+        }
+      }
+    } catch (err) {
+      console.warn('Fullscreen toggle failed:', err);
+    }
+  };
+
   const handleEnterExperience = () => {
     // Initialize procedural ambient synthesizer on user gesture
     soundEngine.init();
@@ -127,20 +184,6 @@ export default function App() {
     }, 1100);
   };
 
-  const handleMenuClick = (actionName: string) => {
-    setActiveFeedback(actionName);
-    if (!isSoundMuted) {
-      soundEngine.playThunder(); 
-    }
-    if (actionName === 'play') {
-      handleStartSingleplayer();
-    } else {
-      setTimeout(() => {
-        setActiveFeedback(null);
-      }, 1500);
-    }
-  };
-
   return (
     <div 
       id="rain-world-app-root" 
@@ -153,13 +196,18 @@ export default function App() {
         <RainCanvas 
           weather={weather} 
           setWeather={setWeather} 
-          isSoundMuted={isSoundMuted} 
+          isSoundMuted={isSoundMuted}
+          graphics={settings.graphics}
         />
       )}
 
       {/* 2. CRT SCANLINES & SOFT MOODY CORNER VIGNETTE */}
-      <div id="screen-glare-effect" className="absolute inset-0 pointer-events-none z-10 scanlines opacity-30" />
-      <div id="screen-vignette" className="absolute inset-0 pointer-events-none z-10 bg-[radial-gradient(ellipse_at_center,transparent_40%,rgba(0,0,0,0.9)_100%)]" />
+      {settings.graphics.scanlines && (
+        <div id="screen-glare-effect" className="absolute inset-0 pointer-events-none z-10 scanlines opacity-30" />
+      )}
+      {settings.graphics.vignette && (
+        <div id="screen-vignette" className="absolute inset-0 pointer-events-none z-10 bg-[radial-gradient(ellipse_at_center,transparent_40%,rgba(0,0,0,0.9)_100%)]" />
+      )}
 
       {/* 3. CINEMATICS: INTRO SPLASH LAYER */}
       <AnimatePresence>
@@ -351,55 +399,46 @@ export default function App() {
               {/* 4. SETTINGS BUTTON */}
               <motion.button
                 id="menu-btn-settings"
-                onClick={() => handleMenuClick('settings')}
+                type="button"
+                onClick={() => {
+                  if (!isSoundMuted) soundEngine.playThunder();
+                  setShowSettingsModal(true);
+                }}
                 whileHover={{ x: 8 }}
                 className="group p-2 rounded-xl bg-zinc-900/70 border border-zinc-800 hover:border-zinc-600 flex items-center justify-center gap-1.5 font-mono text-[11px] font-bold text-slate-300 hover:text-amber-400 transition-all cursor-pointer active:scale-95 md:p-0 md:bg-transparent md:border-0 md:justify-start md:text-base md:sm:text-lg md:tracking-[0.2em]"
               >
                 <span className="hidden md:inline-block w-1.5 h-1.5 rounded-full bg-amber-500 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+                <Settings className="w-3.5 h-3.5 text-amber-400 md:hidden shrink-0" />
                 <span className="truncate">НАСТРОЙКИ</span>
               </motion.button>
 
-              {/* 5. OPEN STANDALONE TAB BUTTON */}
-              <motion.a
-                id="menu-btn-standalone"
-                href={window.location.href}
-                target="_blank"
-                rel="noopener noreferrer"
+              {/* 5. FULLSCREEN TOGGLE BUTTON */}
+              <motion.button
+                id="menu-btn-fullscreen"
+                type="button"
+                onClick={toggleFullscreen}
                 whileHover={{ x: 8 }}
                 className="group p-2 rounded-xl bg-emerald-950/40 border border-emerald-800/60 hover:border-emerald-500/80 flex items-center justify-center gap-1.5 font-mono text-[11px] font-bold text-emerald-300 hover:text-emerald-200 transition-all cursor-pointer active:scale-95 md:p-0 md:bg-transparent md:border-0 md:justify-start md:text-base md:sm:text-lg md:tracking-[0.2em]"
-                title="Відкрити гру в окремій вкладці браузера без інтерфейсу Google AI Studio"
+                title={isFullscreen ? 'Вийти з повного екрана' : 'Відкрити гру на весь екран'}
               >
                 <span className="hidden md:inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
-                <ExternalLink className="w-3.5 h-3.5 text-emerald-400 group-hover:rotate-12 transition-transform shrink-0" />
-                <span className="truncate">ВКЛАДКА</span>
-              </motion.a>
+                {isFullscreen ? (
+                  <Minimize2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                ) : (
+                  <Maximize2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                )}
+                <span className="truncate">{isFullscreen ? 'ЗГОРНУТИ' : 'ВЕСЬ ЕКРАН'}</span>
+              </motion.button>
             </div>
           </div>
 
           <hr className="hidden md:block border-zinc-800/40 w-full" />
 
-          {/* Notification dynamic feedback (Desktop only to keep mobile clean) */}
-          <div className="hidden md:block min-h-[40px] w-full">
-            <AnimatePresence mode="wait">
-              {activeFeedback ? (
-                <motion.div
-                  key="feedback-notif"
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -5 }}
-                  className="p-2 bg-amber-950/20 border border-amber-900/30 rounded text-[9px] font-mono text-zinc-400 leading-normal"
-                >
-                  <span className="text-amber-400 font-bold uppercase tracking-wider block">
-                    {activeFeedback === 'play' ? '// Режим гри' : '// Настройки'}
-                  </span>
-                  Функція розробляється. Слимакокіт все одно стежить за твоєю мишкою!
-                </motion.div>
-              ) : (
-                <div className="text-[9px] font-mono text-zinc-600 leading-relaxed uppercase tracking-wider">
-                  Курсор керує поглядом кота на лівій стороні екрана.
-                </div>
-              )}
-            </AnimatePresence>
+          {/* Helper info (Desktop only to keep mobile clean) */}
+          <div className="hidden md:block min-h-[32px] w-full">
+            <div className="text-[9px] font-mono text-zinc-500 leading-relaxed uppercase tracking-wider">
+              Гравець: <span className="text-amber-400 font-bold">{settings.nickname}</span>
+            </div>
           </div>
         </motion.div>
       )}
@@ -421,18 +460,16 @@ export default function App() {
             </span>
           </div>
 
-          {/* Header Action Badges (Standalone Tab & Sound Mute) */}
+          {/* Header Action Badges (Settings & Sound Mute) */}
           <div className="flex items-center gap-2 pointer-events-auto">
-            <a
-              href={window.location.href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2.5 py-1.5 rounded-xl border border-zinc-800 bg-zinc-950/80 hover:bg-zinc-900 text-zinc-400 hover:text-cyan-300 transition-all text-xs font-mono flex items-center gap-1.5 backdrop-blur-md shadow-md active:scale-95"
-              title="Відкрити гру в окремій вкладці браузера без інтерфейсу Google AI Studio"
+            <button
+              type="button"
+              onClick={() => setShowSettingsModal(true)}
+              className="w-9 h-9 rounded-full flex items-center justify-center border border-zinc-800 bg-zinc-950/60 text-zinc-400 hover:border-amber-500/60 hover:text-amber-300 backdrop-blur-md transition-all duration-300 cursor-pointer"
+              title="Налаштування"
             >
-              <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden sm:inline font-bold">НОВА ВКЛАДКА</span>
-            </a>
+              <Settings className="w-4 h-4" />
+            </button>
 
             {/* Pure minimalist sound icon to mute/unmute in the corner */}
             <button
@@ -537,6 +574,15 @@ export default function App() {
             setIsLoadingWorld(false);
           }, 1100);
         }}
+      />
+
+      {/* 7.1 SETTINGS MODAL */}
+      <SettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        isSoundMuted={isSoundMuted}
+        toggleSound={toggleSound}
+        resumeMusicCategory={isGameplayActive ? 'game' : 'menu'}
       />
 
       {/* 8. ATMOSPHERIC KARMA LOADING SCREEN */}

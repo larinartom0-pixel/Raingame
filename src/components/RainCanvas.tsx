@@ -1,19 +1,25 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { soundEngine } from './RainWorldSynth';
 import { WeatherState } from '../types';
+import { GraphicsSettings, GRAPHICS_PRESETS } from '../settings';
 
 interface RainCanvasProps {
   weather: WeatherState;
   setWeather: React.Dispatch<React.SetStateAction<WeatherState>>;
   isSoundMuted: boolean;
+  graphics?: GraphicsSettings;
 }
 
-export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCanvasProps) {
+export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics = GRAPHICS_PRESETS.high }: RainCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mouseRef = useRef({ x: 0, y: 0 });
   const timeRef = useRef(0);
   const lightningTimerRef = useRef<any>(null);
+  const graphicsRef = useRef<GraphicsSettings>(graphics);
+  useEffect(() => {
+    graphicsRef.current = graphics;
+  }, [graphics]);
 
   // Rain dropping pool
   const rainDropsRef = useRef<Array<{
@@ -66,6 +72,10 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
   // Set up procedural lightning strikes
   useEffect(() => {
     const triggerLightning = () => {
+      if (!graphicsRef.current.rainEffects) {
+        scheduleNextLightning();
+        return;
+      }
       // Trigger lightning flash state
       setWeather(prev => ({ ...prev, lightningFlash: true }));
       
@@ -120,17 +130,25 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    let logicalWidth = containerRef.current?.clientWidth || window.innerWidth;
+    let logicalHeight = containerRef.current?.clientHeight || window.innerHeight;
+    let appliedScale = graphicsRef.current.resolutionScale || 1;
+
     // Resize monitoring
     const handleResize = () => {
       if (!containerRef.current || !canvas) return;
-      canvas.width = containerRef.current.clientWidth;
-      canvas.height = containerRef.current.clientHeight;
+      const scale = Math.max(0.5, Math.min(2, graphicsRef.current.resolutionScale || 1));
+      appliedScale = scale;
+      logicalWidth = Math.max(1, containerRef.current.clientWidth);
+      logicalHeight = Math.max(1, containerRef.current.clientHeight);
+      canvas.width = Math.round(logicalWidth * scale);
+      canvas.height = Math.round(logicalHeight * scale);
 
       // Populate dust
       if (dustRef.current.length === 0) {
         dustRef.current = Array.from({ length: 60 }, () => ({
-          x: Math.random() * canvas.width,
-          y: Math.random() * canvas.height,
+          x: Math.random() * logicalWidth,
+          y: Math.random() * logicalHeight,
           vx: (Math.random() * 0.4 - 0.2),
           vy: -(Math.random() * 0.3 + 0.1),
           size: Math.random() * 2.5 + 0.5,
@@ -163,14 +181,21 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
     };
 
     const render = () => {
+      const gfx = graphicsRef.current;
+      const desiredScale = Math.max(0.5, Math.min(2, gfx.resolutionScale || 1));
+      if (Math.abs(desiredScale - appliedScale) > 0.01) {
+        handleResize();
+      }
+      ctx.setTransform(appliedScale, 0, 0, appliedScale, 0, 0);
+
       timeRef.current += 0.05;
       const t = timeRef.current;
-      const width = canvas.width;
-      const height = canvas.height;
+      const width = logicalWidth;
+      const height = logicalHeight;
 
       // Draw background Sky Atmosphere (Rain World iconic rust/midnight purple sunset palette)
       const skyGrad = ctx.createLinearGradient(0, 0, 0, height);
-      if (weather.lightningFlash) {
+      if (weather.lightningFlash && gfx.rainEffects) {
         // Highly illuminated sky during lightning
         skyGrad.addColorStop(0, '#585973');
         skyGrad.addColorStop(0.5, '#2e3047');
@@ -224,24 +249,26 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
       ctx.fillRect(0, height * 0.5, width, height * 0.5);
 
       // 2. DRAW FLOATING DUST SPECKS (Warm micro-particles floating)
-      ctx.save();
-      dustRef.current.forEach((dust) => {
-        // move
-        dust.y += dust.vy + (Math.sin(t + dust.x) * 0.05);
-        dust.x += dust.vx + Math.sin(t + dust.y) * 0.1;
+      if (gfx.particles) {
+        ctx.save();
+        dustRef.current.forEach((dust) => {
+          // move
+          dust.y += dust.vy + (Math.sin(t + dust.x) * 0.05);
+          dust.x += dust.vx + Math.sin(t + dust.y) * 0.1;
 
-        if (dust.y < -10) dust.y = height + 10;
-        if (dust.x < -10) dust.x = width + 10;
-        if (dust.x > width + 10) dust.x = -10;
+          if (dust.y < -10) dust.y = height + 10;
+          if (dust.x < -10) dust.x = width + 10;
+          if (dust.x > width + 10) dust.x = -10;
 
-        ctx.fillStyle = `rgba(250, 160, 90, ${dust.alpha * (weather.lightningFlash ? 2.5 : 1.0)})`;
-        ctx.shadowBlur = weather.lightningFlash ? 8 : 2;
-        ctx.shadowColor = '#f97316';
-        ctx.beginPath();
-        ctx.arc(dust.x, dust.y, dust.size, 0, Math.PI * 2);
-        ctx.fill();
-      });
-      ctx.restore();
+          ctx.fillStyle = `rgba(250, 160, 90, ${dust.alpha * (weather.lightningFlash && gfx.rainEffects ? 2.5 : 1.0)})`;
+          ctx.shadowBlur = gfx.glowEffects ? (weather.lightningFlash ? 8 : 2) : 0;
+          ctx.shadowColor = '#f97316';
+          ctx.beginPath();
+          ctx.arc(dust.x, dust.y, dust.size, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.restore();
+      }
 
       // 3. DRAW MIDGROUND STRUCTURES (Ropes and heavy Cables)
       ctx.save();
@@ -392,8 +419,8 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
       ctx.fill();
 
       // Soft breathing glow around the Slugcat during lightning strikes
-      if (weather.lightningFlash) {
-        ctx.shadowBlur = 40;
+      if (weather.lightningFlash && gfx.rainEffects) {
+        ctx.shadowBlur = gfx.glowEffects ? 40 : 0;
         ctx.shadowColor = '#ffffff';
         ctx.strokeStyle = 'rgba(255,255,255,0.4)';
         ctx.lineWidth = 1.5;
@@ -404,8 +431,9 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
 
       // 7. DRAW DETAILED RAIN AND COLLISION SYSTEM
       // Generate individual droplets based on current scene intensity setting
-      const targetCount = weather.intensity * 120 + 30;
-      while (rainDropsRef.current.length < targetCount) {
+      if (gfx.rainEffects) {
+        const targetCount = weather.intensity * 120 + 30;
+        while (rainDropsRef.current.length < targetCount) {
         rainDropsRef.current.push({
           x: Math.random() * width,
           y: Math.random() * -200, // enter from overhead
@@ -482,55 +510,60 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
         return drop;
       });
       ctx.restore();
-
-      // 8. ANIMATE ACCUMULATED RUNTIME SPLASH ACCRETIONS
-      ctx.save();
-      splashesRef.current.forEach((sp, idx) => {
-        // Apply gravity to splash particles
-        sp.y += sp.vy;
-        sp.x += sp.vx;
-        sp.vy += 0.22; // gravity drop multiplier
-        sp.life++;
-
-        // Draw splash particle
-        ctx.fillStyle = sp.color;
-        ctx.fillRect(sp.x, sp.y, 1.8, 1.8);
-      });
-
-      // Erase dead splashes
-      splashesRef.current = splashesRef.current.filter((sp) => sp.life < sp.maxLife);
-      ctx.restore();
-
-      // 9. CONDENSATION WATER DRIPS (Procedural dripping from pipe corners)
-      if (t % 12 < 0.1 && Math.random() > 0.4) {
-        // Spawn a slow vertical drip from the pipe under slugcat's platform ledge
-        splashesRef.current.push({
-          x: pipeLeft + 60,
-          y: pipeY + 9,
-          vx: 0,
-          vy: 2.2, // falling down
-          life: 0,
-          maxLife: 80, // survives longer to fall to bottom
-          color: 'rgba(255,255,255,0.45)'
-        });
+      } else {
+        rainDropsRef.current.length = 0;
       }
 
-      // Draw subtle steam/mist at slugcat's mouth (breathing mist!)
-      // Spawns on a slow frequency
-      if (Math.sin(t * 0.7) > 0.95 && Math.random() > 0.6) {
-        const mistX = scX + 2;
-        const mistY = scY - 26;
-        for (let m = 0; m < 5; m++) {
+      // 8. ANIMATE ACCUMULATED RUNTIME SPLASH ACCRETIONS
+      if (gfx.particles || gfx.rainEffects) {
+        ctx.save();
+        splashesRef.current.forEach((sp) => {
+          // Apply gravity to splash particles
+          sp.y += sp.vy;
+          sp.x += sp.vx;
+          sp.vy += 0.22; // gravity drop multiplier
+          sp.life++;
+
+          // Draw splash particle
+          ctx.fillStyle = sp.color;
+          ctx.fillRect(sp.x, sp.y, 1.8, 1.8);
+        });
+
+        // Erase dead splashes
+        splashesRef.current = splashesRef.current.filter((sp) => sp.life < sp.maxLife);
+        ctx.restore();
+
+        // 9. CONDENSATION WATER DRIPS (Procedural dripping from pipe corners)
+        if (gfx.rainEffects && t % 12 < 0.1 && Math.random() > 0.4) {
           splashesRef.current.push({
-            x: mistX,
-            y: mistY,
-            vx: Math.random() * 0.6 + 0.2, // drift forward
-            vy: -(Math.random() * 0.4 + 0.1), // drift up
+            x: pipeLeft + 60,
+            y: pipeY + 9,
+            vx: 0,
+            vy: 2.2,
             life: 0,
-            maxLife: Math.random() * 20 + 15,
-            color: `rgba(255, 255, 255, ${Math.random() * 0.12 + 0.05})`
+            maxLife: 80,
+            color: 'rgba(255,255,255,0.45)'
           });
         }
+
+        // Draw subtle steam/mist at slugcat's mouth (breathing mist!)
+        if (gfx.particles && Math.sin(t * 0.7) > 0.95 && Math.random() > 0.6) {
+          const mistX = scX + 2;
+          const mistY = scY - 26;
+          for (let m = 0; m < 5; m++) {
+            splashesRef.current.push({
+              x: mistX,
+              y: mistY,
+              vx: Math.random() * 0.6 + 0.2,
+              vy: -(Math.random() * 0.4 + 0.1),
+              life: 0,
+              maxLife: Math.random() * 20 + 15,
+              color: `rgba(255, 255, 255, ${Math.random() * 0.12 + 0.05})`
+            });
+          }
+        }
+      } else {
+        splashesRef.current.length = 0;
       }
 
       // 10. LIGHTNING FORERUNNER SPARKS (Glowing neon points / broken conduits far away)
@@ -538,9 +571,9 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted }: RainCa
       const conduitY = height * 0.45;
       
       // Flickering active wire spark
-      if (Math.random() > 0.92) {
+      if (gfx.particles && Math.random() > 0.92) {
         ctx.save();
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = gfx.glowEffects ? 10 : 0;
         ctx.shadowColor = '#06b6d2';
         ctx.fillStyle = '#06b6d2';
         ctx.beginPath();

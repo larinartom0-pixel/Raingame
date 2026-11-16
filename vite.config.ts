@@ -9,12 +9,15 @@ function readAppVersion(): string {
     const raw = fs.readFileSync(path.resolve(__dirname, 'public/version.json'), 'utf-8');
     const parsed = JSON.parse(raw);
     if (parsed && parsed.version) {
-      return String(parsed.version).replace(/^v/i, '').trim();
+      const cleaned = String(parsed.version).replace(/^v/i, '').trim();
+      if (/^\d+(\.\d+)+$/.test(cleaned)) {
+        return cleaned;
+      }
     }
   } catch {
     // Fallback if version.json is temporarily unreadable
   }
-  return '1.0.0';
+  return '1.4.4';
 }
 
 function versionJsonSingleSourcePlugin(isServe: boolean): Plugin {
