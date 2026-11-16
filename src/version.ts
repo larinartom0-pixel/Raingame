@@ -1,5 +1,14 @@
-// Dedicated Current Version Configuration for Rain Game
-export const APP_VERSION = '1.4.4';
+// Dedicated Current Version Configuration for Rain Game (single source: public/version.json)
+declare const __APP_VERSION__: string;
+
+const devInjectedVersion =
+  typeof window !== 'undefined'
+    ? (window as unknown as { __DEV_APP_VERSION__?: string }).__DEV_APP_VERSION__
+    : undefined;
+
+export const APP_VERSION: string =
+  (devInjectedVersion && devInjectedVersion.trim()) ||
+  (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.0.0');
 
 export function compareVersions(a: string, b: string): number {
   const cleanA = String(a || '0.0.0').replace(/^v/i, '').trim();

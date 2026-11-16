@@ -11,7 +11,7 @@ import MultiplayerLobbyModal from './components/MultiplayerLobbyModal';
 import LoadingScreen from './components/LoadingScreen';
 import { musicManager } from './audio/MusicManager';
 import { webRTCManager } from './network/WebRTCManager';
-import { APP_VERSION } from './version';
+import { APP_VERSION, compareVersions } from './version';
 
 export default function App() {
   const [hasEntered, setHasEntered] = useState(false);
@@ -49,6 +49,44 @@ export default function App() {
     lightningFlash: false,
     fogDensity: 0.35
   });
+
+  // Menu update check & silent on-screen reload state
+  const [menuUpdateAvailable, setMenuUpdateAvailable] = useState<string | null>(null);
+  const [menuReloading, setMenuReloading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (isGameplayActive) return;
+    let isCancelled = false;
+    const checkVersion = async () => {
+      try {
+        const base = (((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL) || './').replace(/\/?$/, '/');
+        const res = await fetch(`${base}version.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const serverVer = data.version ? String(data.version).trim() : null;
+        if (!serverVer || isCancelled) return;
+        if (compareVersions(serverVer, APP_VERSION) > 0) {
+          setMenuUpdateAvailable(serverVer);
+        }
+      } catch {
+        // Ignore transient fetch errors
+      }
+    };
+    checkVersion();
+    const timer = setInterval(checkVersion, 20000);
+    return () => {
+      isCancelled = true;
+      clearInterval(timer);
+    };
+  }, [isGameplayActive]);
+
+  const triggerMenuReload = () => {
+    if (menuReloading) return;
+    setMenuReloading(true);
+    window.setTimeout(() => {
+      window.location.reload();
+    }, 1000);
+  };
 
   // Single authoritative menu music lifecycle when not in gameplay
   useEffect(() => {
@@ -508,6 +546,48 @@ export default function App() {
       <div className="fixed bottom-1.5 left-3 z-[60] pointer-events-none select-none font-mono text-[10px] tracking-wider text-zinc-400/80 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]">
         v{APP_VERSION}
       </div>
+
+      {/* 10. MAIN MENU UPDATE BANNER & SILENT RELOAD OVERLAY */}
+      <AnimatePresence>
+        {!isGameplayActive && menuUpdateAvailable && !menuReloading && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-3 left-1/2 -translate-x-1/2 z-[80] bg-amber-950/90 border border-amber-500/70 rounded-xl px-3.5 py-2 flex items-center gap-3 shadow-2xl font-mono text-xs text-amber-100"
+          >
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+            <span>Доступне оновлення v{menuUpdateAvailable}!</span>
+            <button
+              onClick={triggerMenuReload}
+              className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold text-[10px] uppercase cursor-pointer active:scale-95"
+            >
+              Оновити
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {menuReloading && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] bg-black/92 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center select-none"
+          >
+            <div className="max-w-md w-full space-y-4 border border-amber-500/40 bg-zinc-950/90 rounded-2xl p-6 shadow-2xl">
+              <div className="w-10 h-10 mx-auto rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
+              <div className="font-mono text-xl sm:text-2xl font-black tracking-[0.2em] text-amber-400 uppercase">
+                ПЕРЕЗАВАНТАЖЕННЯ...
+              </div>
+              <p className="text-xs sm:text-sm font-mono text-zinc-300 leading-relaxed">
+                Оновлення гри до нової версії v{menuUpdateAvailable}...
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );
