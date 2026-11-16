@@ -4,23 +4,32 @@
 
 export type MusicCategory = 'menu' | 'game' | 'battle' | 'none';
 
+const BASE_URL = (((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL) || './').replace(/\/?$/, '/');
+
+function resolveAssetUrl(relativePath: string): string {
+  const clean = relativePath.replace(/^\/+/, '');
+  return `${BASE_URL}${clean}`;
+}
+
 const TRACKS: Record<'menu' | 'game' | 'battle', string[]> = {
   menu: [
-    '/Music/Main_menu/main_menu1.mp3',
-    '/Music/Main_menu/main_menu2.mp3'
+    resolveAssetUrl('Music/Main_menu/main_menu1.mp3'),
+    resolveAssetUrl('Music/Main_menu/main_menu2.mp3')
   ],
   game: [
-    '/Music/In_game/in_game1.mp3',
-    '/Music/In_game/in_game2.mp3',
-    '/Music/In_game/in_game3.mp3'
+    resolveAssetUrl('Music/In_game/in_game1.mp3'),
+    resolveAssetUrl('Music/In_game/in_game2.mp3'),
+    resolveAssetUrl('Music/In_game/in_game3.mp3')
   ],
   battle: [
-    '/Music/In_battle/in_battle1.mp3',
-    '/Music/In_battle/in_battle2.mp3',
-    '/Music/In_battle/in_battle3.mp3',
-    '/Music/In_battle/in_battle4.mp3'
+    resolveAssetUrl('Music/In_battle/in_battle1.mp3'),
+    resolveAssetUrl('Music/In_battle/in_battle2.mp3'),
+    resolveAssetUrl('Music/In_battle/in_battle3.mp3'),
+    resolveAssetUrl('Music/In_battle/in_battle4.mp3')
   ]
 };
+
+const FAILED_RETRY_COOLDOWN_MS = 15000;
 
 class MusicManager {
   private ctx: AudioContext | null = null;
@@ -39,6 +48,10 @@ class MusicManager {
   private volume: number = 0.65;
   private isUnlocked: boolean = false;
   private currentHpRatio: number = 1.0;
+
+  // Loading & retry state so periodic callers never spam or abort in-flight downloads
+  private isLoading: boolean = false;
+  private failedCooldowns: Map<string, number> = new Map();
 
   // Monotonic token to cancel out-of-order asynchronous loads
   private requestToken: number = 0;
@@ -64,8 +77,8 @@ class MusicManager {
 
       // Preload first menu and game tracks in background
       setTimeout(() => {
-        this.preloadTrack('/Music/Main_menu/main_menu1.mp3');
-        this.preloadTrack('/Music/In_game/in_game1.mp3');
+        this.preloadTrack(TRACKS.menu[0]);
+        this.preloadTrack(TRACKS.game[0]);
       }, 500);
     }
   }
@@ -88,6 +101,12 @@ class MusicManager {
     }
   }
 
+  private computeFilterFreq(hpRatio: number): number {
+    const minFreq = 380;
+    const maxFreq = 20000;
+    return minFreq * Math.pow(maxFreq / minFreq, hpRatio);
+  }
+
   private getAudioContext(): AudioContext {
     if (!this.ctx) {
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -97,7 +116,7 @@ class MusicManager {
       // "чим менше хп тип приглушоней звук ну ніби під водою"
       this.hpFilter = this.ctx.createBiquadFilter();
       this.hpFilter.type = 'lowpass';
-      this.hpFilter.frequency.setValueAtTime(20000, this.ctx.currentTime);
+      this.hpFilter.frequency.setValueAtTime(this.computeFilterFreq(this.currentHpRatio), this.ctx.currentTime);
       this.hpFilter.Q.setValueAtTime(1.0, this.ctx.currentTime);
 
       this.masterGain = this.ctx.createGain();
@@ -116,22 +135,18 @@ class MusicManager {
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
     }
-    if (this.currentCategory !== 'none' && !this.currentSource) {
+    if (this.currentCategory !== 'none' && !this.currentSource && !this.isLoading) {
       this.playCategory(this.currentCategory, true);
     }
   }
 
   public setHealthFilter(hpRatio: number) {
     this.currentHpRatio = Math.max(0, Math.min(1, Number.isFinite(hpRatio) ? hpRatio : 1));
-    const ctx = this.getAudioContext();
-    if (!ctx || !this.hpFilter) return;
+    if (!this.ctx || !this.hpFilter) return;
 
     // Exponential frequency curve from 380 Hz (muffled underwater) to 20,000 Hz (crystal clear full health)
-    const minFreq = 380;
-    const maxFreq = 20000;
-    const targetFreq = minFreq * Math.pow(maxFreq / minFreq, this.currentHpRatio);
-
-    const now = ctx.currentTime;
+    const targetFreq = this.computeFilterFreq(this.currentHpRatio);
+    const now = this.ctx.currentTime;
     this.hpFilter.frequency.cancelScheduledValues(now);
     this.hpFilter.frequency.setTargetAtTime(targetFreq, now, 0.2);
   }
@@ -173,7 +188,11 @@ class MusicManager {
         // slice to avoid detached buffer issues in some engines
         const decoded = await ctx.decodeAudioData(arrayBuf.slice(0));
         this.bufferCache.set(url, decoded);
+        this.failedCooldowns.delete(url);
         return decoded;
+      } catch (err) {
+        this.failedCooldowns.set(url, Date.now() + FAILED_RETRY_COOLDOWN_MS);
+        throw err;
       } finally {
         this.loadingPromises.delete(url);
       }
@@ -188,8 +207,8 @@ class MusicManager {
   }
 
   public playCategory(category: MusicCategory, forceRestart: boolean = false) {
-    // Already playing this exact category, don't restart or layer another song
-    if (category === this.currentCategory && !forceRestart && this.currentSource) {
+    // Already playing or loading this exact category, don't restart or layer another song
+    if (category === this.currentCategory && !forceRestart && (this.currentSource || this.isLoading)) {
       return;
     }
 
@@ -201,18 +220,29 @@ class MusicManager {
     const playlist = TRACKS[category];
     if (!playlist || playlist.length === 0) return;
 
+    // Filter out tracks that recently failed (unless cooldown expired)
+    const nowMs = Date.now();
+    const availableIndices = playlist
+      .map((url, idx) => ({ url, idx }))
+      .filter(entry => (this.failedCooldowns.get(entry.url) || 0) <= nowMs);
+
+    if (availableIndices.length === 0) {
+      this.currentCategory = category;
+      return;
+    }
+
     this.currentCategory = category;
     const token = ++this.requestToken;
 
-    // Pick random track index from category
-    const trackIndex = Math.floor(Math.random() * playlist.length);
-    this.currentTrackIndex = trackIndex;
-    const trackUrl = playlist[trackIndex];
+    // Pick random available track index from category
+    const chosen = availableIndices[Math.floor(Math.random() * availableIndices.length)];
+    this.currentTrackIndex = chosen.idx;
 
-    this.loadAndPlay(trackUrl, category, token);
+    this.loadAndPlay(chosen.url, category, token);
   }
 
   private async loadAndPlay(trackUrl: string, category: MusicCategory, token: number) {
+    this.isLoading = true;
     try {
       const buffer = await this.loadTrackBuffer(trackUrl);
 
@@ -221,8 +251,12 @@ class MusicManager {
         return;
       }
 
+      this.isLoading = false;
       this.executeCrossFade(buffer, trackUrl, category, token);
     } catch (err) {
+      if (this.requestToken === token) {
+        this.isLoading = false;
+      }
       console.warn('Could not load soundtrack:', trackUrl, err);
     }
   }
@@ -275,6 +309,10 @@ class MusicManager {
 
     // Auto-advance to next track in category when current finishes
     newSource.onended = () => {
+      if (this.currentSource === newSource) {
+        this.currentSource = null;
+        this.currentGain = null;
+      }
       if (this.requestToken === token && this.currentCategory === category) {
         const playlist = TRACKS[category];
         this.currentTrackIndex = (this.currentTrackIndex + 1) % playlist.length;
@@ -293,6 +331,7 @@ class MusicManager {
 
   public stop(fadeSeconds: number = 0.8) {
     this.currentCategory = 'none';
+    this.isLoading = false;
     this.requestToken++;
 
     if (this.ctx && this.currentGain && this.currentSource) {

@@ -384,7 +384,8 @@ export default function OutskirtsLocation({ onBack, isSoundMuted, toggleSound, c
 
     const checkVersion = async () => {
       try {
-        const res = await fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' });
+        const base = (((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL) || './').replace(/\/?$/, '/');
+        const res = await fetch(`${base}version.json?t=${Date.now()}`, { cache: 'no-store' });
         if (!res.ok) return;
         const data = await res.json();
         const serverVer = data.version ? String(data.version) : null;
