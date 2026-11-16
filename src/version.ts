@@ -1,5 +1,5 @@
 // Dedicated Current Version Configuration for Rain Game
-export const APP_VERSION = '1.4.1';
+export const APP_VERSION = '1.4.2';
 
 export function compareVersions(a: string, b: string): number {
   const cleanA = String(a || '0.0.0').replace(/^v/i, '').trim();
