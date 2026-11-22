@@ -1,6 +1,7 @@
-// Persistent Settings & Identity Manager (Nickname, Graphics, Audio, Keybindings)
+// Persistent Settings & Identity Manager (Language, Nickname, Graphics, Audio, Keybindings)
 import { useEffect, useState } from 'react';
 
+export type AppLanguage = 'uk' | 'en';
 export type GraphicsPreset = 'low' | 'medium' | 'high';
 
 export interface GraphicsSettings {
@@ -10,7 +11,7 @@ export interface GraphicsSettings {
   scanlines: boolean;
   vignette: boolean;
   glowEffects: boolean;
-  resolutionScale: number; // 0.65 | 0.85 | 1 | 1.5
+  resolutionScale: number; // 0.7 | 0.85 | 1 | 1.5
 }
 
 export interface AudioSettings {
@@ -32,12 +33,16 @@ export interface KeyBindings {
 }
 
 export interface GameSettings {
+  language: AppLanguage;
+  hasChosenLanguage: boolean;
   nickname: string;
   graphics: GraphicsSettings;
   audio: AudioSettings;
   keybinds: KeyBindings;
 }
 
+export const LANGUAGE_STORAGE_KEY = 'rw_language';
+export const LANGUAGE_CHOSEN_STORAGE_KEY = 'rw_language_chosen';
 export const NICKNAME_STORAGE_KEY = 'rw_player_name';
 export const SETTINGS_STORAGE_KEY = 'rw_game_settings_v1';
 
@@ -122,9 +127,26 @@ export function setPersistentNickname(name: string): string {
   return cleaned;
 }
 
+function loadLanguageState(): { language: AppLanguage; hasChosenLanguage: boolean } {
+  if (typeof window === 'undefined') {
+    return { language: 'uk', hasChosenLanguage: false };
+  }
+  try {
+    const savedLang = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    const chosen = localStorage.getItem(LANGUAGE_CHOSEN_STORAGE_KEY) === '1';
+    const language: AppLanguage = savedLang === 'en' ? 'en' : 'uk';
+    return { language, hasChosenLanguage: chosen };
+  } catch {
+    return { language: 'uk', hasChosenLanguage: false };
+  }
+}
+
 function loadInitialSettings(): GameSettings {
   const nickname = getPersistentNickname();
+  const langState = loadLanguageState();
   const fallback: GameSettings = {
+    language: langState.language,
+    hasChosenLanguage: langState.hasChosenLanguage,
     nickname,
     graphics: { ...GRAPHICS_PRESETS.high },
     audio: { musicVolume: 0.65, sfxVolume: 0.75 },
@@ -145,6 +167,8 @@ function loadInitialSettings(): GameSettings {
         : 'high';
 
     return {
+      language: langState.language,
+      hasChosenLanguage: langState.hasChosenLanguage,
       nickname,
       graphics: {
         preset,
@@ -226,6 +250,21 @@ export function getGameSettings(): GameSettings {
   return currentSettings;
 }
 
+export function setLanguageSetting(language: AppLanguage) {
+  try {
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+    localStorage.setItem(LANGUAGE_CHOSEN_STORAGE_KEY, '1');
+  } catch {
+    // ignore storage errors
+  }
+  currentSettings = {
+    ...currentSettings,
+    language,
+    hasChosenLanguage: true,
+  };
+  emitSettings();
+}
+
 export function updateNicknameSetting(name: string): string {
   const saved = setPersistentNickname(name);
   currentSettings = {
@@ -270,7 +309,6 @@ export function updateKeybind(action: keyof KeyBindings, newCode: string) {
   const prevCode = currentSettings.keybinds[action];
   const nextKeybinds = { ...currentSettings.keybinds };
 
-  // Swap cleanly if another action already uses this key code
   (Object.keys(nextKeybinds) as Array<keyof KeyBindings>).forEach((k) => {
     if (k !== action && nextKeybinds[k] === newCode) {
       nextKeybinds[k] = prevCode;
@@ -307,9 +345,9 @@ export function useGameSettings(): GameSettings {
   return settings;
 }
 
-export function formatKeyCode(code: string): string {
+export function formatKeyCode(code: string, lang: AppLanguage = 'uk'): string {
   if (!code) return '—';
-  if (code === 'Space') return 'ПРОБІЛ';
+  if (code === 'Space') return lang === 'en' ? 'SPACE' : 'ПРОБІЛ';
   if (code === 'ArrowLeft') return '←';
   if (code === 'ArrowRight') return '→';
   if (code === 'ArrowUp') return '↑';

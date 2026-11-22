@@ -14,6 +14,7 @@ import {
   Check,
   Sparkles,
   AlertCircle,
+  Globe,
 } from 'lucide-react';
 import {
   useGameSettings,
@@ -23,14 +24,16 @@ import {
   updateAudioSettings,
   updateKeybind,
   resetKeybinds,
+  setLanguageSetting,
   formatKeyCode,
-  KEYBIND_LABELS,
   KeyBindings,
   GraphicsPreset,
+  AppLanguage,
 } from '../settings';
 import { musicManager, MUSIC_TRACK_CATALOG, MusicManagerState } from '../audio/MusicManager';
 import { soundEngine } from './RainWorldSynth';
 import { webRTCManager } from '../network/WebRTCManager';
+import { KEYBIND_LABELS_I18N, MUSIC_TRACK_TITLES_I18N, t } from '../i18n';
 
 type SettingsTab = 'profile' | 'graphics' | 'controls' | 'music';
 
@@ -50,6 +53,7 @@ export default function SettingsModal({
   resumeMusicCategory = 'menu',
 }: SettingsModalProps) {
   const settings = useGameSettings();
+  const lang = settings.language;
   const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
   const [nicknameInput, setNicknameInput] = useState(settings.nickname);
   const [nicknameSavedToast, setNicknameSavedToast] = useState(false);
@@ -110,17 +114,20 @@ export default function SettingsModal({
   if (!isOpen) return null;
 
   const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
-    { id: 'profile', label: 'Профіль', icon: <User className="w-3.5 h-3.5" /> },
-    { id: 'graphics', label: 'Графіка', icon: <Monitor className="w-3.5 h-3.5" /> },
-    { id: 'controls', label: 'Кнопки', icon: <Keyboard className="w-3.5 h-3.5" /> },
-    { id: 'music', label: 'Музика', icon: <Music className="w-3.5 h-3.5" /> },
+    { id: 'profile', label: t(lang, 'tabProfile'), icon: <User className="w-3.5 h-3.5" /> },
+    { id: 'graphics', label: t(lang, 'tabGraphics'), icon: <Monitor className="w-3.5 h-3.5" /> },
+    { id: 'controls', label: t(lang, 'tabControls'), icon: <Keyboard className="w-3.5 h-3.5" /> },
+    { id: 'music', label: t(lang, 'tabMusic'), icon: <Music className="w-3.5 h-3.5" /> },
   ];
 
   const categories: Array<{ id: 'menu' | 'game' | 'battle'; title: string; badgeClass: string }> = [
-    { id: 'menu', title: 'Головне меню', badgeClass: 'text-amber-300 border-amber-700/60 bg-amber-950/40' },
-    { id: 'game', title: 'Дослідження (У грі)', badgeClass: 'text-emerald-300 border-emerald-700/60 bg-emerald-950/40' },
-    { id: 'battle', title: 'Бойова тема', badgeClass: 'text-rose-300 border-rose-700/60 bg-rose-950/40' },
+    { id: 'menu', title: t(lang, 'catMenu'), badgeClass: 'text-amber-300 border-amber-700/60 bg-amber-950/40' },
+    { id: 'game', title: t(lang, 'catGame'), badgeClass: 'text-emerald-300 border-emerald-700/60 bg-emerald-950/40' },
+    { id: 'battle', title: t(lang, 'catBattle'), badgeClass: 'text-rose-300 border-rose-700/60 bg-rose-950/40' },
   ];
+
+  const keybindLabels = KEYBIND_LABELS_I18N[lang];
+  const trackTitles = MUSIC_TRACK_TITLES_I18N[lang];
 
   return (
     <AnimatePresence>
@@ -143,10 +150,10 @@ export default function SettingsModal({
               </div>
               <div>
                 <h2 className="text-sm font-bold font-mono tracking-wider text-white">
-                  НАЛАШТУВАННЯ // SETTINGS
+                  {t(lang, 'settingsTitle')}
                 </h2>
                 <p className="text-[10px] font-mono text-zinc-400">
-                  Постійний профіль, графіка, керування та тест саундтреків
+                  {t(lang, 'settingsSubtitle')}
                 </p>
               </div>
             </div>
@@ -154,7 +161,6 @@ export default function SettingsModal({
               type="button"
               onClick={handleClose}
               className="p-1.5 rounded-lg border border-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors cursor-pointer"
-              title="Закрити налаштування"
             >
               <X className="w-4 h-4" />
             </button>
@@ -187,19 +193,56 @@ export default function SettingsModal({
 
           {/* Content */}
           <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
-            {/* TAB 1: PROFILE / PERSISTENT NICKNAME */}
+            {/* TAB 1: PROFILE / LANGUAGE & PERSISTENT NICKNAME */}
             {activeTab === 'profile' && (
               <div className="space-y-4">
+                {/* Language Switcher */}
                 <div className="p-4 rounded-xl bg-zinc-900/50 border border-zinc-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-xs font-mono font-bold text-amber-300 uppercase tracking-wider">
-                        Постійний нікнейм гравця
-                      </h3>
-                      <p className="text-[11px] text-zinc-400 mt-0.5">
-                        Зберігається у браузері назавжди (навіть після перезавантаження) та синхронізується з іншими гравцями у мережі.
-                      </p>
-                    </div>
+                  <div>
+                    <h3 className="text-xs font-mono font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5" />
+                      <span>{t(lang, 'languageTitle')}</span>
+                    </h3>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                      {t(lang, 'languageDesc')}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([
+                      { id: 'uk' as AppLanguage, label: 'Українська', sub: 'UA' },
+                      { id: 'en' as AppLanguage, label: 'English', sub: 'EN' },
+                    ]).map((opt) => {
+                      const active = lang === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setLanguageSetting(opt.id)}
+                          className={`p-2.5 rounded-xl border font-mono text-left transition-all cursor-pointer flex items-center justify-between ${
+                            active
+                              ? 'bg-cyan-950/60 border-cyan-400 text-cyan-100 shadow-[0_0_12px_rgba(6,182,212,0.2)]'
+                              : 'bg-zinc-950/80 border-zinc-800 text-zinc-400 hover:border-zinc-600'
+                          }`}
+                        >
+                          <span className="text-xs font-bold">{opt.label}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/60 border border-zinc-700 text-zinc-300">
+                            {opt.sub}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Persistent Nickname */}
+                <div className="p-4 rounded-xl bg-zinc-900/50 border border-zinc-800 space-y-3">
+                  <div>
+                    <h3 className="text-xs font-mono font-bold text-amber-300 uppercase tracking-wider">
+                      {t(lang, 'nicknameTitle')}
+                    </h3>
+                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                      {t(lang, 'nicknameDesc')}
+                    </p>
                   </div>
 
                   <div className="flex flex-col sm:flex-row gap-2">
@@ -211,7 +254,7 @@ export default function SettingsModal({
                         if (e.key === 'Enter') handleSaveNickname();
                       }}
                       maxLength={20}
-                      placeholder="Введіть нікнейм..."
+                      placeholder={t(lang, 'nicknamePlaceholder')}
                       className="flex-1 px-3 py-2 rounded-xl bg-black/80 border border-zinc-700 font-mono text-sm text-white focus:border-amber-400 focus:outline-none"
                     />
                     <button
@@ -222,21 +265,21 @@ export default function SettingsModal({
                       {nicknameSavedToast ? (
                         <>
                           <Check className="w-3.5 h-3.5" />
-                          <span>ЗБЕРЕЖЕНО</span>
+                          <span>{t(lang, 'savedNick')}</span>
                         </>
                       ) : (
-                        <span>ЗБЕРЕГТИ НІК</span>
+                        <span>{t(lang, 'saveNick')}</span>
                       )}
                     </button>
                   </div>
 
                   <div className="text-[10px] font-mono text-zinc-500 flex flex-wrap items-center gap-3 pt-1">
                     <span>
-                      Поточний нік: <strong className="text-zinc-200">{settings.nickname}</strong>
+                      {t(lang, 'currentNick')}: <strong className="text-zinc-200">{settings.nickname}</strong>
                     </span>
                     <span>•</span>
                     <span>
-                      ID мережі: <strong className="text-cyan-400">{webRTCManager.localPlayerId}</strong>
+                      {t(lang, 'networkId')}: <strong className="text-cyan-400">{webRTCManager.localPlayerId}</strong>
                     </span>
                   </div>
                 </div>
@@ -248,13 +291,13 @@ export default function SettingsModal({
               <div className="space-y-4">
                 <div className="p-4 rounded-xl bg-zinc-900/50 border border-zinc-800 space-y-3">
                   <div className="text-xs font-mono font-bold text-amber-300 uppercase tracking-wider">
-                    Пресет якості графіки
+                    {t(lang, 'graphicsPresetTitle')}
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     {([
-                      { id: 'low', label: 'Низька', desc: 'Макс. FPS' },
-                      { id: 'medium', label: 'Середня', desc: 'Баланс' },
-                      { id: 'high', label: 'Висока', desc: 'Всі ефекти' },
+                      { id: 'low', label: t(lang, 'presetLow'), desc: t(lang, 'presetLowDesc') },
+                      { id: 'medium', label: t(lang, 'presetMed'), desc: t(lang, 'presetMedDesc') },
+                      { id: 'high', label: t(lang, 'presetHigh'), desc: t(lang, 'presetHighDesc') },
                     ] as Array<{ id: GraphicsPreset; label: string; desc: string }>).map((p) => {
                       const active = settings.graphics.preset === p.id;
                       return (
@@ -278,35 +321,15 @@ export default function SettingsModal({
 
                 <div className="p-4 rounded-xl bg-zinc-900/50 border border-zinc-800 space-y-2.5">
                   <div className="text-xs font-mono font-bold text-zinc-200 uppercase tracking-wider mb-1">
-                    Детальні параметри зображення
+                    {t(lang, 'graphicsDetailsTitle')}
                   </div>
 
                   {([
-                    {
-                      key: 'rainEffects',
-                      label: 'Дощ та блискавки',
-                      desc: 'Краплі дощу, бризки та атмосферні спалахи грози',
-                    },
-                    {
-                      key: 'particles',
-                      label: 'Частинки, пил та трава',
-                      desc: 'Пил у повітрі, анімація трави та іскри',
-                    },
-                    {
-                      key: 'glowEffects',
-                      label: 'Світіння та мʼякі тіні',
-                      desc: 'Світіння світлячків, труб і контурів на канвасі',
-                    },
-                    {
-                      key: 'scanlines',
-                      label: 'CRT-сканлайни',
-                      desc: 'Ретро-сітка екрану поверх інтерфейсу меню',
-                    },
-                    {
-                      key: 'vignette',
-                      label: 'Затемнення кутів (Віньєтка)',
-                      desc: 'Атмосферне затемнення по краях екрану',
-                    },
+                    { key: 'rainEffects', label: t(lang, 'gfxRain'), desc: t(lang, 'gfxRainDesc') },
+                    { key: 'particles', label: t(lang, 'gfxParticles'), desc: t(lang, 'gfxParticlesDesc') },
+                    { key: 'glowEffects', label: t(lang, 'gfxGlow'), desc: t(lang, 'gfxGlowDesc') },
+                    { key: 'scanlines', label: t(lang, 'gfxScanlines'), desc: t(lang, 'gfxScanlinesDesc') },
+                    { key: 'vignette', label: t(lang, 'gfxVignette'), desc: t(lang, 'gfxVignetteDesc') },
                   ] as const).map((item) => {
                     const enabled = settings.graphics[item.key];
                     return (
@@ -320,16 +343,14 @@ export default function SettingsModal({
                         </div>
                         <button
                           type="button"
-                          onClick={() =>
-                            updateGraphicsSettings({ [item.key]: !enabled })
-                          }
+                          onClick={() => updateGraphicsSettings({ [item.key]: !enabled })}
                           className={`px-3 py-1 rounded-lg border font-mono text-[10px] font-bold transition-all cursor-pointer shrink-0 ${
                             enabled
                               ? 'bg-emerald-950/70 border-emerald-500/70 text-emerald-300'
                               : 'bg-zinc-950 border-zinc-700 text-zinc-500'
                           }`}
                         >
-                          {enabled ? 'УВІМК' : 'ВИМК'}
+                          {enabled ? t(lang, 'enabled') : t(lang, 'disabled')}
                         </button>
                       </div>
                     );
@@ -339,10 +360,10 @@ export default function SettingsModal({
                   <div className="pt-2 flex items-center justify-between gap-3">
                     <div>
                       <div className="text-xs font-mono font-bold text-zinc-200">
-                        Роздільна здатність рендеру
+                        {t(lang, 'gfxResTitle')}
                       </div>
                       <div className="text-[10px] text-zinc-500">
-                        Зменшіть для підвищення FPS або збільште для чіткості
+                        {t(lang, 'gfxResDesc')}
                       </div>
                     </div>
                     <div className="flex items-center gap-1">
@@ -369,9 +390,9 @@ export default function SettingsModal({
             {/* TAB 3: KEYBIND REMAPPING */}
             {activeTab === 'controls' && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <p className="text-[11px] text-zinc-400">
-                    Натисніть на кнопку праворуч від дії, а потім натисніть нову клавішу (ESC — скасувати).
+                    {t(lang, 'controlsHint')}
                   </p>
                   <button
                     type="button"
@@ -382,12 +403,12 @@ export default function SettingsModal({
                     className="px-2.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-mono text-[10px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
                   >
                     <RotateCcw className="w-3 h-3" />
-                    <span>Скинути</span>
+                    <span>{t(lang, 'resetDefaults')}</span>
                   </button>
                 </div>
 
                 <div className="space-y-1.5">
-                  {(Object.keys(KEYBIND_LABELS) as Array<keyof KeyBindings>).map((actionKey) => {
+                  {(Object.keys(keybindLabels) as Array<keyof KeyBindings>).map((actionKey) => {
                     const isListening = listeningAction === actionKey;
                     return (
                       <div
@@ -395,7 +416,7 @@ export default function SettingsModal({
                         className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-zinc-900/50 border border-zinc-800/80"
                       >
                         <span className="text-xs font-mono text-zinc-200">
-                          {KEYBIND_LABELS[actionKey]}
+                          {keybindLabels[actionKey]}
                         </span>
                         <button
                           type="button"
@@ -406,7 +427,7 @@ export default function SettingsModal({
                               : 'bg-black/80 text-amber-300 border-zinc-700 hover:border-amber-500/70'
                           }`}
                         >
-                          {isListening ? 'Натисніть...' : formatKeyCode(settings.keybinds[actionKey])}
+                          {isListening ? t(lang, 'pressKey') : formatKeyCode(settings.keybinds[actionKey], lang)}
                         </button>
                       </div>
                     );
@@ -418,11 +439,10 @@ export default function SettingsModal({
             {/* TAB 4: MUSIC TESTER & VOLUME */}
             {activeTab === 'music' && (
               <div className="space-y-4">
-                {/* Volume & Mute Controls */}
                 <div className="p-4 rounded-xl bg-zinc-900/50 border border-zinc-800 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono font-bold text-amber-300 uppercase tracking-wider">
-                      Гучність аудіо
+                      {t(lang, 'audioVolumeTitle')}
                     </span>
                     <button
                       type="button"
@@ -434,13 +454,13 @@ export default function SettingsModal({
                       }`}
                     >
                       {isSoundMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                      <span>{isSoundMuted ? 'ЗВУК ВИМКНЕНО' : 'ЗВУК УВІМКНЕНО'}</span>
+                      <span>{isSoundMuted ? t(lang, 'soundOff') : t(lang, 'soundOn')}</span>
                     </button>
                   </div>
 
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-xs font-mono">
-                      <span className="text-zinc-300">Гучність музики</span>
+                      <span className="text-zinc-300">{t(lang, 'musicVolume')}</span>
                       <span className="text-amber-300 font-bold">
                         {Math.round(settings.audio.musicVolume * 100)}%
                       </span>
@@ -461,7 +481,7 @@ export default function SettingsModal({
 
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-xs font-mono">
-                      <span className="text-zinc-300">Гучність ефектів та дощу (SFX)</span>
+                      <span className="text-zinc-300">{t(lang, 'sfxVolume')}</span>
                       <span className="text-cyan-300 font-bold">
                         {Math.round(settings.audio.sfxVolume * 100)}%
                       </span>
@@ -481,15 +501,14 @@ export default function SettingsModal({
                   </div>
                 </div>
 
-                {/* Music Tester */}
                 <div className="p-4 rounded-xl bg-zinc-900/50 border border-zinc-800 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <h3 className="text-xs font-mono font-bold text-zinc-200 uppercase tracking-wider">
-                        Тестування саундтреків
+                        {t(lang, 'musicTesterTitle')}
                       </h3>
                       <p className="text-[10px] text-zinc-400">
-                        Оберіть будь-яку мелодію, щоб прослухати її прямо зараз
+                        {t(lang, 'musicTesterDesc')}
                       </p>
                     </div>
                     {musicState.isPreviewing && (
@@ -499,7 +518,7 @@ export default function SettingsModal({
                         className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-zinc-200 font-mono text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                       >
                         <Square className="w-3 h-3 fill-current" />
-                        <span>Зупинити тест</span>
+                        <span>{t(lang, 'stopTest')}</span>
                       </button>
                     )}
                   </div>
@@ -507,13 +526,13 @@ export default function SettingsModal({
                   {musicState.lastError && (
                     <div className="px-3 py-2 rounded-lg bg-red-950/60 border border-red-700/60 text-red-300 text-[11px] font-mono flex items-center gap-2">
                       <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>{musicState.lastError}</span>
+                      <span>{t(lang, 'trackError')}</span>
                     </div>
                   )}
 
                   <div className="space-y-3">
                     {categories.map((cat) => {
-                      const tracks = MUSIC_TRACK_CATALOG.filter((t) => t.category === cat.id);
+                      const tracks = MUSIC_TRACK_CATALOG.filter((tr) => tr.category === cat.id);
                       return (
                         <div key={cat.id} className="space-y-1.5">
                           <div className={`inline-block px-2 py-0.5 rounded border text-[10px] font-mono font-bold ${cat.badgeClass}`}>
@@ -534,15 +553,15 @@ export default function SettingsModal({
                                 >
                                   <div className="min-w-0">
                                     <div className="text-xs font-mono text-zinc-200 truncate">
-                                      {track.title}
+                                      {trackTitles[track.id] || track.title}
                                     </div>
                                     {isCurrent && (
                                       <div className="text-[10px] font-mono text-amber-400">
                                         {musicState.isLoading
-                                          ? 'Завантаження...'
+                                          ? t(lang, 'trackLoading')
                                           : musicState.isPreviewing
-                                          ? 'Прослуховується (тест)'
-                                          : 'Зараз грає у фоні'}
+                                          ? t(lang, 'trackPreviewing')
+                                          : t(lang, 'trackPlayingBg')}
                                       </div>
                                     )}
                                   </div>
@@ -567,12 +586,12 @@ export default function SettingsModal({
                                     {isCurrent && musicState.isPreviewing && isActivelyPlaying ? (
                                       <>
                                         <Square className="w-3 h-3 fill-current" />
-                                        <span>СТОП</span>
+                                        <span>{t(lang, 'stopTrack')}</span>
                                       </>
                                     ) : (
                                       <>
                                         <Play className="w-3 h-3 fill-current" />
-                                        <span>ГРАТИ</span>
+                                        <span>{t(lang, 'playTrack')}</span>
                                       </>
                                     )}
                                   </button>
@@ -592,14 +611,14 @@ export default function SettingsModal({
           {/* Footer */}
           <div className="px-4 py-3 border-t border-zinc-800 bg-black/60 flex items-center justify-between">
             <span className="text-[10px] font-mono text-zinc-500">
-              Зміни зберігаються автоматично
+              {t(lang, 'autoSaveNote')}
             </span>
             <button
               type="button"
               onClick={handleClose}
               className="px-4 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-mono font-bold text-xs cursor-pointer"
             >
-              ГОТОВО
+              {t(lang, 'doneBtn')}
             </button>
           </div>
         </motion.div>

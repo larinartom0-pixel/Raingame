@@ -38,11 +38,23 @@ export interface EditorTransitPipe {
   targetSpawnY?: number; // Where slugcat spawns in target room
 }
 
+export type ItemType =
+  | 'spear'
+  | 'explosive_spear'
+  | 'rock'
+  | 'berry'
+  | 'cherrybomb'
+  | 'pearl'
+  | 'batfly';
+
+export type WeaponItemType = 'spear' | 'explosive_spear' | 'rock' | 'cherrybomb';
+
 export interface EditorSpawnItem {
   id: string;
-  type: 'spear' | 'rock' | 'berry';
+  type: ItemType;
   x: number;
   y: number;
+  pearlVariant?: number;
 }
 
 export interface CustomLocationData {
@@ -134,6 +146,14 @@ export const SLUGCAT_CHARACTERS: Record<SlugcatCharacterId, SlugcatCharacterConf
   }
 };
 
+export interface ShelterPearlSave {
+  id: string;
+  pearlVariant: number;
+  roomId: string;
+  x: number;
+  y: number;
+}
+
 export interface PlayerSaveData {
   karma: number; // 1 to 5
   maxKarma: number; // 5
@@ -143,6 +163,7 @@ export interface PlayerSaveData {
   playerSpawnX?: number;
   playerSpawnY?: number;
   hibernated: boolean;
+  shelterPearls?: ShelterPearlSave[];
 }
 
 export const DEFAULT_PLAYER_SAVE: PlayerSaveData = {
@@ -153,7 +174,8 @@ export const DEFAULT_PLAYER_SAVE: PlayerSaveData = {
   lastLocationId: 'shelter-outskirts',
   playerSpawnX: 280,
   playerSpawnY: 295,
-  hibernated: true
+  hibernated: true,
+  shelterPearls: []
 };
 
 export {

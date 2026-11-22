@@ -293,11 +293,11 @@ class RainWorldSynth {
     osc.stop(now + 0.16);
   }
 
-  public playHit(type: 'spear' | 'rock') {
+  public playHit(type: 'spear' | 'explosive_spear' | 'rock' | 'cherrybomb') {
     if (!this.ctx || !this.masterGain || this.isMuted) return;
     const now = this.ctx.currentTime;
 
-    if (type === 'spear') {
+    if (type === 'spear' || type === 'explosive_spear') {
       // Metallic resonant piercing thud
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
@@ -312,6 +312,8 @@ class RainWorldSynth {
       gain.connect(this.masterGain);
       osc.start(now);
       osc.stop(now + 0.3);
+    } else if (type === 'cherrybomb') {
+      this.playCherryPop();
     } else {
       // Blunt stone clack
       const osc = this.ctx.createOscillator();
@@ -328,6 +330,132 @@ class RainWorldSynth {
       osc.start(now);
       osc.stop(now + 0.15);
     }
+  }
+
+  public playRicochet() {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const osc2 = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1450 + Math.random() * 350, now);
+    osc.frequency.exponentialRampToValueAtTime(780, now + 0.18);
+
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(2350, now);
+    osc2.frequency.exponentialRampToValueAtTime(1120, now + 0.14);
+
+    gain.gain.setValueAtTime(0.16, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+
+    osc.connect(gain);
+    osc2.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc2.start(now);
+    osc.stop(now + 0.23);
+    osc2.stop(now + 0.16);
+  }
+
+  public playExplosion() {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    // Deep blast thump
+    const bassOsc = this.ctx.createOscillator();
+    const bassGain = this.ctx.createGain();
+    bassOsc.type = 'sawtooth';
+    bassOsc.frequency.setValueAtTime(125, now);
+    bassOsc.frequency.exponentialRampToValueAtTime(26, now + 0.65);
+
+    const bassFilter = this.ctx.createBiquadFilter();
+    bassFilter.type = 'lowpass';
+    bassFilter.frequency.setValueAtTime(340, now);
+    bassFilter.frequency.exponentialRampToValueAtTime(70, now + 0.65);
+
+    bassGain.gain.setValueAtTime(0.45, now);
+    bassGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+
+    bassOsc.connect(bassFilter);
+    bassFilter.connect(bassGain);
+    bassGain.connect(this.masterGain);
+    bassOsc.start(now);
+    bassOsc.stop(now + 0.72);
+
+    // Filtered explosion noise burst
+    const bufferSize = Math.floor(0.55 * this.ctx.sampleRate);
+    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+    }
+
+    const noiseSrc = this.ctx.createBufferSource();
+    noiseSrc.buffer = noiseBuffer;
+    const noiseFilter = this.ctx.createBiquadFilter();
+    noiseFilter.type = 'bandpass';
+    noiseFilter.frequency.setValueAtTime(850, now);
+    noiseFilter.Q.setValueAtTime(0.7, now);
+
+    const noiseGain = this.ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.38, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+
+    noiseSrc.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(this.masterGain);
+    noiseSrc.start(now);
+    noiseSrc.stop(now + 0.56);
+  }
+
+  public playCherryPop() {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    const bufferSize = Math.floor(0.14 * this.ctx.sampleRate);
+    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 2);
+    }
+    const src = this.ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.setValueAtTime(950, now);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.28, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.15);
+  }
+
+  public playPearlChime() {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    const freqs = [880, 1174.66];
+    freqs.forEach((f, i) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(f, now + i * 0.045);
+      gain.gain.setValueAtTime(0.06, now + i * 0.045);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.045 + 0.25);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + i * 0.045);
+      osc.stop(now + i * 0.045 + 0.27);
+    });
   }
 
   public playCreatureHurt() {

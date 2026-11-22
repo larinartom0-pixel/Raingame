@@ -4,14 +4,14 @@
 import { webRTCManager } from './WebRTCManager';
 import { NetworkPacket } from './types';
 import { soundEngine } from '../components/RainWorldSynth';
-import { roundToOneDecimal } from '../types';
+import { roundToOneDecimal, WeaponItemType } from '../types';
 
 export interface HitResult {
   attackerId: string;
   targetId: string;
   damage: number;
   stunDuration: number;
-  weaponType: 'spear' | 'rock';
+  weaponType: WeaponItemType;
   impactX: number;
   impactY: number;
 }
@@ -133,14 +133,26 @@ export class DistributedSimulationManager {
   // Invoked locally by the attacking player when their thrown spear/rock overlaps a remote player's hitbox
   public registerClientSideHit(
     targetId: string,
-    itemType: 'spear' | 'rock',
+    itemType: WeaponItemType,
     impactX: number,
     impactY: number,
     outgoingDamageMult: number = 1.0,
     outgoingStunMult: number = 1.0
   ): boolean {
-    const baseDamage = itemType === 'spear' ? 1.0 : 0.01;
-    const baseStun = itemType === 'spear' ? 1.8 : 1.2;
+    const baseDamage =
+      itemType === 'spear' || itemType === 'explosive_spear'
+        ? 1.0
+        : itemType === 'cherrybomb'
+        ? 0.35
+        : 0.01;
+    const baseStun =
+      itemType === 'explosive_spear'
+        ? 2.2
+        : itemType === 'cherrybomb'
+        ? 3.0
+        : itemType === 'spear'
+        ? 1.8
+        : 1.2;
     const damage = Math.round(baseDamage * outgoingDamageMult * 1000) / 1000;
     const stunDuration = roundToOneDecimal(baseStun * outgoingStunMult);
 

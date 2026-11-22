@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { soundEngine } from './RainWorldSynth';
-import { WeatherState } from '../types';
+import { WeatherState, SlugcatCharacterId, SLUGCAT_CHARACTERS } from '../types';
 import { GraphicsSettings, GRAPHICS_PRESETS } from '../settings';
 
 interface RainCanvasProps {
@@ -8,9 +8,16 @@ interface RainCanvasProps {
   setWeather: React.Dispatch<React.SetStateAction<WeatherState>>;
   isSoundMuted: boolean;
   graphics?: GraphicsSettings;
+  characterId?: SlugcatCharacterId;
 }
 
-export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics = GRAPHICS_PRESETS.high }: RainCanvasProps) {
+export default function RainCanvas({
+  weather,
+  setWeather,
+  isSoundMuted,
+  graphics = GRAPHICS_PRESETS.high,
+  characterId = 'survivor',
+}: RainCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mouseRef = useRef({ x: 0, y: 0 });
@@ -20,6 +27,10 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics
   useEffect(() => {
     graphicsRef.current = graphics;
   }, [graphics]);
+  const characterIdRef = useRef<SlugcatCharacterId>(characterId);
+  useEffect(() => {
+    characterIdRef.current = characterId;
+  }, [characterId]);
 
   // Rain dropping pool
   const rainDropsRef = useRef<Array<{
@@ -323,7 +334,14 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics
       ctx.strokeRect(pipeLeft - 50, pipeY, 120, height - pipeY + 100);
       ctx.restore();
 
-      // 5. DRAW THE SLUGCAT SILHOUETTE
+      // 5. DRAW THE SLUGCAT SILHOUETTE (Reflects currently selected character)
+      const charCfg = SLUGCAT_CHARACTERS[characterIdRef.current] || SLUGCAT_CHARACTERS.survivor;
+      const isMonk = charCfg.id === 'monk';
+      const bodyColor = isMonk ? charCfg.bodyColorMid : '#fdfdf6';
+      const headColor = isMonk ? charCfg.bodyColorTop : '#fdfdf6';
+      const tailColor = isMonk ? charCfg.bodyColorBottom : '#f1eedb';
+      const contourStroke = isMonk ? 'rgba(161, 98, 7, 0.55)' : 'rgba(133, 81, 64, 0.22)';
+
       // Slugcat is positioned at pipeLeft + 10
       const scX = pipeLeft + 10;
       const scY = pipeY; // sitting on top of pipe
@@ -336,7 +354,7 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics
       
       // Smooth tail
       ctx.beginPath();
-      ctx.strokeStyle = '#f1eedb';
+      ctx.strokeStyle = tailColor;
       ctx.lineWidth = 10;
       ctx.lineCap = 'round';
       ctx.moveTo(scX, scY + 30);
@@ -349,27 +367,34 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics
       ctx.stroke();
 
       // Core body (round and squishy, slightly offset based on breath)
-      ctx.fillStyle = '#fdfdf6'; // Soft pearly white slugcat
+      ctx.fillStyle = bodyColor;
+      ctx.strokeStyle = contourStroke;
+      ctx.lineWidth = 1.4;
       ctx.beginPath();
       // Body shape
       const rx = 18 + slugcat.breathFactor * 0.3;
       const ry = 28 + slugcat.breathFactor;
       ctx.ellipse(scX, scY - 12 + slugcat.breathFactor * 0.5, rx, ry, 0, 0, Math.PI * 2);
       ctx.fill();
+      if (isMonk) ctx.stroke();
 
       // Head shape (merges nicely)
+      ctx.fillStyle = headColor;
       ctx.beginPath();
       ctx.arc(scX, scY - 33 + slugcat.breathFactor * 0.8, 15, 0, Math.PI * 2);
       ctx.fill();
+      if (isMonk) ctx.stroke();
 
-      // Ears (cute pointed white nubs)
+      // Ears (cute pointed nubs)
       const earBreath = slugcat.breathFactor * 0.4;
+      ctx.fillStyle = headColor;
       // Left ear
       ctx.beginPath();
       ctx.moveTo(scX - 12, scY - 42);
       ctx.quadraticCurveTo(scX - 13, scY - 62 + earBreath, scX - 3, scY - 45);
       ctx.closePath();
       ctx.fill();
+      if (isMonk) ctx.stroke();
 
       // Right ear
       ctx.beginPath();
@@ -377,8 +402,10 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics
       ctx.quadraticCurveTo(scX + 11, scY - 62 + earBreath, scX + 12, scY - 42);
       ctx.closePath();
       ctx.fill();
+      if (isMonk) ctx.stroke();
 
       // Small chubby crawling arms resting on pipe
+      ctx.fillStyle = bodyColor;
       ctx.beginPath();
       ctx.ellipse(scX - 10, scY + 10, 6, 8, Math.PI / 4, 0, Math.PI * 2);
       ctx.ellipse(scX + 10, scY + 10, 6, 8, -Math.PI / 4, 0, Math.PI * 2);
@@ -421,8 +448,8 @@ export default function RainCanvas({ weather, setWeather, isSoundMuted, graphics
       // Soft breathing glow around the Slugcat during lightning strikes
       if (weather.lightningFlash && gfx.rainEffects) {
         ctx.shadowBlur = gfx.glowEffects ? 40 : 0;
-        ctx.shadowColor = '#ffffff';
-        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+        ctx.shadowColor = isMonk ? '#fef08a' : '#ffffff';
+        ctx.strokeStyle = isMonk ? 'rgba(254,240,138,0.55)' : 'rgba(255,255,255,0.4)';
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }

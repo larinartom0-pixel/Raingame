@@ -1,5 +1,5 @@
 // WebRTC Multiplayer Types and Protocols for Rain World P2P
-import type { SlugcatCharacterId } from '../types';
+import type { ItemType, SlugcatCharacterId, WeaponItemType } from '../types';
 
 export interface RemotePlayer {
   id: string;
@@ -15,7 +15,7 @@ export interface RemotePlayer {
   stunTimer: number;
   hp: number;
   maxHp: number;
-  heldItem: 'spear' | 'rock' | 'berry' | null;
+  heldItem: ItemType | null;
   crouching: boolean;
   isClimbing: boolean;
   isGrounded: boolean;
@@ -68,7 +68,7 @@ export type NetworkPacket =
       state: 'normal' | 'stunned' | 'dead' | 'sleeping';
       stunTimer: number;
       hp: number;
-      heldItem: 'spear' | 'rock' | 'berry' | null;
+      heldItem: ItemType | null;
       crouching: boolean;
       isClimbing: boolean;
       isGrounded: boolean;
@@ -84,7 +84,7 @@ export type NetworkPacket =
       type: 'THROW_ITEM';
       senderId: string;
       itemId?: string;
-      itemType: 'spear' | 'rock' | 'berry';
+      itemType: ItemType;
       startX?: number;
       startY?: number;
       x: number;
@@ -98,7 +98,7 @@ export type NetworkPacket =
       type: 'ITEM_PICKUP';
       senderId: string;
       itemId: string;
-      itemType: 'spear' | 'rock' | 'berry';
+      itemType: ItemType;
       x: number;
       y: number;
       room: string;
@@ -107,7 +107,7 @@ export type NetworkPacket =
       type: 'ITEM_DROP';
       senderId: string;
       itemId: string;
-      itemType: 'spear' | 'rock' | 'berry';
+      itemType: ItemType;
       x: number;
       y: number;
       vx: number;
@@ -133,7 +133,7 @@ export type NetworkPacket =
       room: string;
       items: Array<{
         id: string;
-        type: 'spear' | 'rock' | 'berry';
+        type: ItemType;
         x: number;
         y: number;
         vx: number;
@@ -144,13 +144,15 @@ export type NetworkPacket =
         isStuck: boolean;
         stuckTarget?: 'player' | 'npc' | string;
         isAirborne: boolean;
+        pearlVariant?: number;
+        flyAlive?: boolean;
       }>;
     }
   | {
       type: 'HIT_CONFIRM';
       attackerId: string;
       targetId: string;
-      itemType: 'spear' | 'rock';
+      itemType: WeaponItemType;
       damage: number;
       stunDuration: number;
       impactX: number;
@@ -236,7 +238,7 @@ export type NetworkPacket =
       senderId: string;
       lizardId: string;
       room: string;
-      weaponType: 'spear' | 'rock';
+      weaponType: WeaponItemType;
       damage: number;
       stunDuration: number;
       knockbackVx: number;

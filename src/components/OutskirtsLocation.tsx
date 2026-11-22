@@ -5,7 +5,7 @@ import {
   Skull, RotateCcw, AlertTriangle, Activity, X, 
   Sword, CircleDot, User, PlusCircle, Trash2, Crosshair,
   ZoomIn, ZoomOut, Gamepad2, Eye, EyeOff, Maximize2, Minimize2,
-  Map as MapIcon, Compass, Globe, Users, Clock, Wifi, ExternalLink,
+  Map as MapIcon, Compass, Globe, Users, Clock, Wifi, Settings,
   Shield, Home, Lock, Unlock, CloudRain, Layers, Moon
 } from 'lucide-react';
 import { soundEngine } from './RainWorldSynth';
@@ -19,9 +19,13 @@ import {
   PlayerSaveData, DEFAULT_PLAYER_SAVE, BUILTIN_LOCATIONS,
   DEFAULT_OUTSKIRTS_LOCATION, SHELTER_OUTSKIRTS_LOCATION,
   getLocationById, getLocationFloorY, resolveSafeSpawn, resolveSafeLizardSpawn,
-  SlugcatCharacterId, SLUGCAT_CHARACTERS, roundToOneDecimal
+  SlugcatCharacterId, SLUGCAT_CHARACTERS, roundToOneDecimal,
+  ItemType, WeaponItemType, ShelterPearlSave
 } from '../types';
 import { APP_VERSION, compareVersions } from '../version';
+import SettingsModal from './SettingsModal';
+import { useGameSettings, formatKeyCode, KeyBindings, GameSettings } from '../settings';
+import { t } from '../i18n';
 
 interface OutskirtsLocationProps {
   onBack: () => void;
@@ -44,7 +48,7 @@ const CANVAS_WIDTH = 1000;
 const CANVAS_HEIGHT = 580;
 
 export type SlugcatState = 'normal' | 'stunned' | 'dead';
-export type ItemType = 'spear' | 'rock' | 'berry';
+export type { ItemType };
 
 interface Platform {
   x: number;
@@ -92,10 +96,21 @@ export interface WorldItem {
   stuckOffsetX?: number;
   stuckOffsetY?: number;
   stuckAngle?: number;
+  stuckWallNormal?: number; // -1 pointing left out of wall, 1 pointing right out of wall
   isAirborne: boolean; // Thrown and active for collision
   thrownBy?: 'player' | 'npc' | string;
   stuckLizardId?: string;
   sleeping?: boolean; // Resting on floor/platform, physics calculations paused
+  pearlVariant?: number; // 0: White, 1: Cyan Data, 2: Pink, 3: Gold
+  explosiveArmed?: boolean;
+  fuseTimer?: number;
+  cherryPopCount?: number;
+  flyAlive?: boolean;
+  flyStunTimer?: number;
+  wingPhase?: number;
+  flyTargetVx?: number;
+  flyTargetVy?: number;
+  flyDecisionTimer?: number;
 }
 
 interface SlugcatSkeleton {
@@ -135,6 +150,8 @@ interface DebugTelemetry {
   spearsCount: number;
   rocksCount: number;
   berriesCount: number;
+  pearlsCount: number;
+  batfliesCount: number;
   foodCount: number;
   isEating: boolean;
   eatingProgress: number;
@@ -155,6 +172,23 @@ export default function OutskirtsLocation({
   customLocation,
   characterId = 'survivor'
 }: OutskirtsLocationProps) {
+  const settings = useGameSettings();
+  const lang = settings.language;
+  const settingsRef = useRef<GameSettings>(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const isSettingsOpenRef = useRef(false);
+  const resetControlsActionRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    isSettingsOpenRef.current = showSettingsModal;
+    if (showSettingsModal) {
+      resetControlsActionRef.current?.();
+    }
+  }, [showSettingsModal]);
+
   const charConfig = SLUGCAT_CHARACTERS[characterId] || SLUGCAT_CHARACTERS.survivor;
   const charConfigRef = useRef(charConfig);
   useEffect(() => {
@@ -279,6 +313,8 @@ export default function OutskirtsLocation({
     spearsCount: 1,
     rocksCount: 1,
     berriesCount: 5,
+    pearlsCount: 0,
+    batfliesCount: 0,
     foodCount: 0,
     isEating: false,
     eatingProgress: 0,
@@ -301,7 +337,8 @@ export default function OutskirtsLocation({
           lastLocationId: p.lastLocationId || 'shelter-outskirts',
           playerSpawnX: typeof p.playerSpawnX === 'number' ? p.playerSpawnX : undefined,
           playerSpawnY: typeof p.playerSpawnY === 'number' ? p.playerSpawnY : undefined,
-          hibernated: !!p.hibernated
+          hibernated: !!p.hibernated,
+          shelterPearls: Array.isArray(p.shelterPearls) ? p.shelterPearls : []
         };
       }
     } catch (e) {
@@ -494,7 +531,8 @@ export default function OutskirtsLocation({
           lastLocationId: currentLocation.id,
           playerSpawnX: 160,
           playerSpawnY: 280,
-          hibernated: true
+          hibernated: true,
+          shelterPearls: playerSave.shelterPearls || []
         };
         try {
           localStorage.setItem('rain_world_player_progress', JSON.stringify(emergencySave));
@@ -601,6 +639,7 @@ export default function OutskirtsLocation({
   const triggerEatRef = useRef<(() => void) | null>(null);
   const triggerHibernateRef = useRef<(() => void) | null>(null);
   const triggerChangeLocationRef = useRef<((loc: CustomLocationData) => void) | null>(null);
+  const getShelterPearlsSnapshotRef = useRef<(() => ShelterPearlSave[]) | null>(null);
 
   // Trigger manual lightning for visual ambiance
   const [isFlashing, setIsFlashing] = useState(false);
@@ -791,6 +830,21 @@ export default function OutskirtsLocation({
     };
     refreshActiveRoomLizard();
 
+    const getItemLabel = (type: ItemType): string => {
+      switch (type) {
+        case 'spear': return 'Спис';
+        case 'explosive_spear': return 'Вибуховий спис';
+        case 'rock': return 'Камінь';
+        case 'berry': return 'Ягоду';
+        case 'cherrybomb': return 'Бомбу-рослину';
+        case 'pearl': return 'Перлину';
+        case 'batfly': return 'Муху-кажана';
+      }
+    };
+
+    const isEdibleItemType = (type?: ItemType | null): boolean =>
+      type === 'berry' || type === 'batfly';
+
     // Persistent Room Items Generator & Cache across room transitions within the same cycle
     let itemIdCounter = 1;
     const getOrInitRoomItems = (loc: CustomLocationData): WorldItem[] => {
@@ -807,7 +861,12 @@ export default function OutskirtsLocation({
           ];
       const spawned: WorldItem[] = [];
       candidates.forEach((cand, idx) => {
-        const spawnChance = (loc.isShelterRoom || idx < 3) ? 1.0 : 0.78;
+        const isSpecialItem =
+          cand.type === 'pearl' ||
+          cand.type === 'explosive_spear' ||
+          cand.type === 'cherrybomb' ||
+          cand.type === 'batfly';
+        const spawnChance = (loc.isShelterRoom || idx < 3 || isSpecialItem) ? 1.0 : 0.78;
         if (Math.random() <= spawnChance) {
           spawned.push({
             id: cand.id || `${loc.id}-item-${itemIdCounter++}`,
@@ -816,14 +875,41 @@ export default function OutskirtsLocation({
             y: cand.y,
             vx: 0,
             vy: 0,
-            rotation: cand.type === 'spear' ? 0.1 : 0,
+            rotation: (cand.type === 'spear' || cand.type === 'explosive_spear') ? 0.1 : 0,
             isHeld: false,
             isStuck: false,
             isAirborne: false,
-            sleeping: true,
+            sleeping: cand.type !== 'batfly',
+            pearlVariant: cand.type === 'pearl' ? (cand.pearlVariant ?? (idx % 4)) : undefined,
+            flyAlive: cand.type === 'batfly' ? true : undefined,
+            wingPhase: cand.type === 'batfly' ? Math.random() * 10 : undefined,
+            flyDecisionTimer: cand.type === 'batfly' ? 0 : undefined,
           });
         }
       });
+
+      // Restore pearls permanently stored inside this shelter room across cycles/reloads
+      if (loc.isShelterRoom && Array.isArray(playerSaveRef.current.shelterPearls)) {
+        for (const savedPearl of playerSaveRef.current.shelterPearls) {
+          if (savedPearl.roomId === loc.id && !spawned.some(s => s.id === savedPearl.id)) {
+            spawned.push({
+              id: savedPearl.id,
+              type: 'pearl',
+              x: savedPearl.x,
+              y: savedPearl.y,
+              vx: 0,
+              vy: 0,
+              rotation: 0,
+              isHeld: false,
+              isStuck: false,
+              isAirborne: false,
+              sleeping: true,
+              pearlVariant: savedPearl.pearlVariant ?? 0,
+            });
+          }
+        }
+      }
+
       cycleRoomItemsCache.current.set(loc.id, spawned.map(it => ({ ...it })));
       return spawned;
     };
@@ -840,6 +926,50 @@ export default function OutskirtsLocation({
         roomId,
         list.filter(it => !it.isHeld || it.heldBy !== 'player').map(it => ({ ...it }))
       );
+    };
+
+    // Visual Explosions, Ricochet Sparks & Screen Shake FX
+    interface SparkParticle {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      life: number;
+      maxLife: number;
+      size: number;
+      color: string;
+    }
+    interface ShockwaveEffect {
+      x: number;
+      y: number;
+      radius: number;
+      maxRadius: number;
+      life: number;
+      maxLife: number;
+      color: string;
+    }
+    const sparks: SparkParticle[] = [];
+    const shockwaves: ShockwaveEffect[] = [];
+    let cameraShakeTimer = 0;
+    let cameraShakeIntensity = 0;
+
+    const spawnSparks = (cx: number, cy: number, count: number, palette: string[], baseSpeed: number = 4.5) => {
+      if (!settingsRef.current.graphics.particles) return;
+      for (let i = 0; i < count; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spd = baseSpeed * (0.4 + Math.random() * 0.9);
+        const life = 0.22 + Math.random() * 0.35;
+        sparks.push({
+          x: cx,
+          y: cy,
+          vx: Math.cos(ang) * spd,
+          vy: Math.sin(ang) * spd - 0.8,
+          life,
+          maxLife: life,
+          size: 1.4 + Math.random() * 2.4,
+          color: palette[Math.floor(Math.random() * palette.length)]
+        });
+      }
     };
 
     // Seamless transition between rooms preserving HP, stun, state, heldItem, and cached world state
@@ -1011,12 +1141,15 @@ export default function OutskirtsLocation({
         isStuck: false,
         isAirborne: false,
         sleeping: false,
+        pearlVariant: type === 'pearl' ? Math.floor(Math.random() * 4) : undefined,
+        flyAlive: type === 'batfly' ? true : undefined,
+        wingPhase: type === 'batfly' ? Math.random() * 10 : undefined,
+        flyDecisionTimer: type === 'batfly' ? 0 : undefined,
       };
       items.push(newItem);
       syncRoomItemsCache();
       soundEngine.playPickup();
-      const typeLabel = type === 'spear' ? 'Спис' : type === 'rock' ? 'Камінь' : 'Ягоду';
-      setLastAction(`Заспавнено: ${typeLabel} на (${Math.round(sx)}, ${Math.round(sy)})`);
+      setLastAction(`Заспавнено: ${getItemLabel(type)} на (${Math.round(sx)}, ${Math.round(sy)})`);
       if (isWorldAuthority() && webRTCManager.remotePlayers.size > 0) {
         sendAuthoritativeItemsSync();
       }
@@ -1025,7 +1158,7 @@ export default function OutskirtsLocation({
     // Damage & Stun application function with Monk damage/stun resistance & 1-decimal rounding
     const applyHit = (
       target: typeof player,
-      weapon: 'spear' | 'rock',
+      weapon: WeaponItemType,
       overrideBaseDamage?: number,
       overrideBaseInitStun?: number,
       overrideBaseAddStun?: number
@@ -1033,9 +1166,10 @@ export default function OutskirtsLocation({
       if (target.state === 'dead') return;
       const cfg = charConfigRef.current;
 
-      const baseDmg = overrideBaseDamage ?? (weapon === 'spear' ? 1.0 : 0.01);
-      const baseInitStun = overrideBaseInitStun ?? (weapon === 'spear' ? 1.8 : 1.2);
-      const baseAddStun = overrideBaseAddStun ?? (weapon === 'spear' ? 0.8 : 0.5);
+      const isSpearWeapon = weapon === 'spear' || weapon === 'explosive_spear';
+      const baseDmg = overrideBaseDamage ?? (isSpearWeapon ? 1.0 : weapon === 'cherrybomb' ? 0.35 : 0.01);
+      const baseInitStun = overrideBaseInitStun ?? (isSpearWeapon ? 1.8 : weapon === 'cherrybomb' ? 3.0 : 1.2);
+      const baseAddStun = overrideBaseAddStun ?? (isSpearWeapon ? 0.8 : 0.5);
 
       const damage = Math.round(baseDmg * cfg.incomingDamageMult * 1000) / 1000;
       const initialStun = roundToOneDecimal(baseInitStun * cfg.incomingStunMult);
@@ -1046,26 +1180,35 @@ export default function OutskirtsLocation({
       // Apply HP damage
       target.hp = Math.max(0, target.hp - damage);
 
+      const wLabel =
+        weapon === 'explosive_spear'
+          ? 'вибухового списа'
+          : weapon === 'cherrybomb'
+          ? 'бомби-рослини'
+          : weapon === 'spear'
+          ? 'списа'
+          : 'каменя';
+
       if (target.hp <= 0) {
         target.state = 'dead';
         target.stunTimer = 0;
         target.vy = -3.5;
         player.isClimbing = false;
         setIsDead(true);
-        if (weapon === 'spear') {
+        if (isSpearWeapon) {
           soundEngine.triggerConcussionMuffle();
         }
         soundEngine.playHit(weapon);
         soundEngine.playThunder();
-        setLastAction(`Слимакокіт загинув від ${weapon === 'spear' ? 'списа' : 'каменя'}!`);
+        setLastAction(`Слимакокіт загинув від ${wLabel}!`);
       } else {
         if (wasAlreadyStunned) {
           target.stunTimer = roundToOneDecimal(target.stunTimer + addedStun);
-          setLastAction(`${weapon === 'spear' ? 'Спис' : 'Камінь'} додав +${addedStun.toFixed(1)}с стану гравцю!`);
+          setLastAction(`Удар (${wLabel}) додав +${addedStun.toFixed(1)}с стану гравцю!`);
         } else {
           target.state = 'stunned';
           target.stunTimer = initialStun;
-          setLastAction(`Слимакокіт оглушений ${weapon === 'spear' ? 'списом' : 'каменем'} (${initialStun.toFixed(1)}с)!`);
+          setLastAction(`Слимакокіт оглушений (${initialStun.toFixed(1)}с)!`);
         }
         target.vy = -2.0;
         player.isClimbing = false;
@@ -1073,7 +1216,135 @@ export default function OutskirtsLocation({
       }
     };
 
-    // Grab / Pick up item handler (including pulling stuck spears out of bodies/walls)
+    const detonateExplosion = (
+      cx: number,
+      cy: number,
+      radius: number,
+      maxDmg: number,
+      maxStun: number,
+      mode: 'explosive_spear' | 'cherrybomb',
+      thrownBy?: string
+    ) => {
+      if (mode === 'explosive_spear') {
+        soundEngine.playExplosion();
+        shockwaves.push({ x: cx, y: cy, radius: 10, maxRadius: radius, life: 0.34, maxLife: 0.34, color: '#fb923c' });
+        shockwaves.push({ x: cx, y: cy, radius: 4, maxRadius: radius * 0.65, life: 0.24, maxLife: 0.24, color: '#fef08a' });
+        spawnSparks(cx, cy, 26, ['#fef08a', '#fb923c', '#ef4444', '#ffffff'], 7.5);
+        cameraShakeTimer = 0.38;
+        cameraShakeIntensity = 8.5;
+      } else {
+        soundEngine.playCherryPop();
+        setTimeout(() => soundEngine.playCherryPop(), 75);
+        setTimeout(() => soundEngine.playCherryPop(), 150);
+        shockwaves.push({ x: cx, y: cy, radius: 8, maxRadius: radius, life: 0.28, maxLife: 0.28, color: '#f87171' });
+        spawnSparks(cx, cy, 22, ['#fca5a5', '#ef4444', '#fef08a', '#ffffff'], 6.2);
+        cameraShakeTimer = 0.24;
+        cameraShakeIntensity = 5.5;
+      }
+
+      const cfg = charConfigRef.current;
+      const dmgMult = thrownBy === 'player' ? cfg.outgoingDamageMult : 1.0;
+      const stunMult = thrownBy === 'player' ? cfg.outgoingStunMult : 1.0;
+
+      // Damage, stun & knockback lizards within blast radius
+      let hitLizCount = 0;
+      for (const lizEntry of activeRoomLizards) {
+        const liz = lizEntry.lizard;
+        if (liz.state === 'dead' || liz.pipeTransit) continue;
+        const lx = liz.x + liz.width / 2;
+        const ly = liz.y + liz.height / 2;
+        const dist = Math.hypot(lx - cx, ly - cy);
+        if (dist <= radius) {
+          hitLizCount++;
+          const falloff = Math.max(0.45, 1 - (dist / radius) * 0.55);
+          const dmg = Math.round(maxDmg * falloff * dmgMult * 100) / 100;
+          const stun = roundToOneDecimal(maxStun * falloff * stunMult);
+          const pushDirX = dist > 1 ? (lx - cx) / dist : (liz.facingRight ? -1 : 1);
+          const kbVx = pushDirX * (mode === 'explosive_spear' ? 11.5 : 8.5) * falloff;
+          const kbVy = -(mode === 'explosive_spear' ? 6.2 : 4.8) * falloff;
+
+          if (isWorldAuthority()) {
+            liz.takeDamage(dmg, stun);
+            liz.vx += kbVx;
+            liz.vy += kbVy;
+            sendAuthoritativeLizardsSync();
+          } else {
+            webRTCManager.broadcastPacket({
+              type: 'LIZARD_HIT',
+              senderId: webRTCManager.localPlayerId,
+              lizardId: liz.id,
+              room: activeLoc.id,
+              weaponType: mode,
+              damage: dmg,
+              stunDuration: stun,
+              knockbackVx: kbVx,
+              knockbackVy: kbVy
+            });
+          }
+        }
+      }
+
+      // Blast knockback / self-damage if player stands right next to blast
+      const pCx = player.x + player.width / 2;
+      const pCy = player.y + player.height / 2;
+      const pDist = Math.hypot(pCx - cx, pCy - cy);
+      if (pDist <= radius * 0.72 && player.state !== 'dead') {
+        const falloff = Math.max(0.3, 1 - (pDist / (radius * 0.72)) * 0.7);
+        const pushDirX = pDist > 1 ? (pCx - cx) / pDist : 1;
+        player.vx += pushDirX * (mode === 'explosive_spear' ? 8.5 : 6.0) * falloff;
+        player.vy = -4.5 * falloff;
+        player.isGrounded = false;
+        player.isClimbing = false;
+        if (pDist < radius * 0.45) {
+          applyHit(player, mode, mode === 'explosive_spear' ? 0.55 : 0.08, mode === 'explosive_spear' ? 2.0 : 1.4, 0.8);
+        }
+      }
+
+      // Remote peer blast hit sync
+      if (thrownBy === 'player') {
+        for (const rp of webRTCManager.remotePlayers.values()) {
+          if (rp.room !== activeLoc.id || rp.state === 'dead') continue;
+          const rDist = Math.hypot((rp.x + 12) - cx, (rp.y + 19) - cy);
+          if (rDist <= radius * 0.85) {
+            distributedSimulation.registerClientSideHit(
+              rp.id,
+              mode,
+              cx,
+              cy,
+              cfg.outgoingDamageMult,
+              cfg.outgoingStunMult
+            );
+          }
+        }
+      }
+
+      // Knock nearby loose items and stun nearby batflies
+      for (const other of items) {
+        if (other.isHeld || other.isStuck) continue;
+        const oDist = Math.hypot(other.x - cx, other.y - cy);
+        if (oDist <= radius && oDist > 1) {
+          const push = (1 - oDist / radius) * 7.5;
+          other.sleeping = false;
+          other.vx += ((other.x - cx) / oDist) * push;
+          other.vy -= 2.5 + push * 0.4;
+          if (other.type === 'batfly') {
+            other.flyStunTimer = 5.0;
+          }
+        }
+      }
+
+      if (hitLizCount > 0) {
+        setLastAction(
+          mode === 'explosive_spear'
+            ? `💥 Вибуховий спис підірвав ящера (стан до ${maxStun.toFixed(1)}с)!`
+            : `🍒💥 Бомба-рослина оглушила ящера (${maxStun.toFixed(1)}с) і відкинула його!`
+        );
+      } else {
+        setLastAction(mode === 'explosive_spear' ? '💥 Потужний вибух списа!' : '🍒💥 Гучний хлопок бомби-рослини!');
+      }
+    };
+
+    // Grab / Pick up item handler (including pulling stuck spears out of bodies/walls & catching batflies)
     let lastGrabTimestamp = 0;
     const handleGrab = () => {
       if (player.state !== 'normal') return;
@@ -1090,6 +1361,9 @@ export default function OutskirtsLocation({
         eatingTimer = 0;
         setIsEating(false);
         setEatingProgress(0);
+        if (!controlsRef.current.down) {
+          player.crouching = false;
+        }
       }
 
       // If already holding an item, drop it
@@ -1099,17 +1373,21 @@ export default function OutskirtsLocation({
         item.heldBy = undefined;
         item.isStuck = false;
         item.stuckTarget = undefined;
+        item.stuckWallNormal = undefined;
         item.x = player.x + (player.facingRight ? 18 : -18);
         item.y = player.y + 12;
         item.vx = player.facingRight ? 1.8 : -1.8;
         item.vy = 0.5;
         item.isAirborne = false;
         item.sleeping = false;
+        if (item.type === 'batfly' && item.flyAlive !== false) {
+          item.flyStunTimer = 0.45; // Brief flutter release delay
+        }
         player.heldItem = null;
         setHeldItemType(null);
-        soundEngine.playPickup();
-        const typeLabel = item.type === 'spear' ? 'Спис' : item.type === 'rock' ? 'Камінь' : 'Ягоду';
-        setLastAction(`Покладено: ${typeLabel}`);
+        if (item.type === 'pearl') soundEngine.playPearlChime();
+        else soundEngine.playPickup();
+        setLastAction(`Покладено: ${getItemLabel(item.type)}`);
 
         // Broadcast drop across WebRTC
         webRTCManager.broadcastPacket({
@@ -1130,9 +1408,9 @@ export default function OutskirtsLocation({
         return;
       }
 
-      // Find closest item within reach (generous reach for fluid running, jumping, and momentum)
+      // Find closest item within reach (generous reach for running, jumping, and mid-air batfly catching)
       let closestItem: WorldItem | null = null;
-      let closestDist = 85;
+      let closestDist = 92;
 
       const px = player.x + player.width / 2;
       const py = player.y + player.height / 2;
@@ -1140,17 +1418,19 @@ export default function OutskirtsLocation({
       const reachFrontX = px + forwardDir * 18;
 
       for (const item of items) {
-        if (item.isHeld) continue;
+        if (item.isHeld || item.explosiveArmed) continue;
 
         let effItemX = item.x;
-        if (item.type === 'spear' && !item.isStuck) {
+        if ((item.type === 'spear' || item.type === 'explosive_spear') && !item.isStuck) {
           effItemX = Math.max(item.x - 18, Math.min(item.x + 18, reachFrontX));
         }
 
         const dx = Math.abs(effItemX - reachFrontX);
         const dy = Math.abs(item.y - py);
+        const reachX = item.type === 'batfly' ? 92 : 85;
+        const reachY = item.type === 'batfly' ? 74 : 60;
 
-        if (dx <= 85 && dy <= 60) {
+        if (dx <= reachX && dy <= reachY) {
           const dist = Math.hypot(dx, dy);
           if (dist < closestDist) {
             closestDist = dist;
@@ -1167,13 +1447,15 @@ export default function OutskirtsLocation({
         closestItem.heldBy = 'player';
         closestItem.isStuck = false;
         closestItem.stuckTarget = undefined;
+        closestItem.stuckWallNormal = undefined;
         closestItem.isAirborne = false;
         closestItem.sleeping = false;
         closestItem.vx = 0;
         closestItem.vy = 0;
         player.heldItem = closestItem;
         setHeldItemType(closestItem.type);
-        soundEngine.playPickup();
+        if (closestItem.type === 'pearl') soundEngine.playPearlChime();
+        else soundEngine.playPickup();
 
         webRTCManager.broadcastPacket({
           type: 'ITEM_PICKUP',
@@ -1189,14 +1471,22 @@ export default function OutskirtsLocation({
           sendAuthoritativeItemsSync();
         }
 
-        const typeLabel = closestItem.type === 'spear' ? 'Спис' : closestItem.type === 'rock' ? 'Камінь' : 'Ягоду';
+        const typeLabel = getItemLabel(closestItem.type);
 
         if (wasStuckInCreature) {
-          setLastAction(`Витягнуто ${closestItem.type === 'spear' ? 'спис' : 'предмет'} з тіла!`);
+          setLastAction(`Витягнуто ${typeLabel.toLowerCase()} з тіла!`);
         } else if (wasStuckInWall) {
-          setLastAction(`Витягнуто ${closestItem.type === 'spear' ? 'спис' : 'предмет'} зі стіни!`);
+          setLastAction(`Витягнуто ${typeLabel.toLowerCase()} зі стіни!`);
         } else if (closestItem.type === 'berry') {
           setLastAction(`Підібрано Ягоду! Натисніть кнопку «ЇСТИ» щоб поповнити їжу.`);
+        } else if (closestItem.type === 'batfly') {
+          setLastAction(`🦇 Спіймано Муху-кажана! Натисніть «ЇСТИ» (+1 їжі).`);
+        } else if (closestItem.type === 'pearl') {
+          setLastAction(`🦪 Знайдено Перлину! Віднесіть в укриття, щоб зберегти між циклами.`);
+        } else if (closestItem.type === 'explosive_spear') {
+          setLastAction(`🧨 Взято Вибуховий спис! Кидок [X] підірве ціль!`);
+        } else if (closestItem.type === 'cherrybomb') {
+          setLastAction(`🍒 Взято Бомбу-рослину! Кидок [X] оглушить ящера!`);
         } else {
           setLastAction(`Підібрано: ${typeLabel} (Клавіша X або кнопка КИД)`);
         }
@@ -1217,6 +1507,9 @@ export default function OutskirtsLocation({
         eatingTimer = 0;
         setIsEating(false);
         setEatingProgress(0);
+        if (!controlsRef.current.down) {
+          player.crouching = false;
+        }
       }
 
       const item = player.heldItem;
@@ -1226,27 +1519,41 @@ export default function OutskirtsLocation({
       item.heldBy = undefined;
       item.isStuck = false;
       item.stuckTarget = undefined;
+      item.stuckWallNormal = undefined;
       item.x = player.chest.x + (dir * 16);
       item.y = player.chest.y + 1;
-      item.isAirborne = true;
+      item.isAirborne = item.type !== 'batfly';
       item.sleeping = false;
       item.thrownBy = 'player';
 
-      if (item.type === 'spear') {
+      if (item.type === 'spear' || item.type === 'explosive_spear') {
         item.vx = dir * 26.5;
         item.vy = 0.55;
         item.rotation = Math.atan2(item.vy, item.vx);
+      } else if (item.type === 'cherrybomb') {
+        item.vx = dir * 16.5;
+        item.vy = -1.6;
+        item.rotation = 0;
+        item.explosiveArmed = true;
+        item.fuseTimer = 0.55;
+        item.cherryPopCount = 2;
+        soundEngine.playCherryPop();
       } else if (item.type === 'rock') {
         item.vx = dir * 18.5;
         item.vy = 0.75;
         item.rotation = 0;
+      } else if (item.type === 'batfly') {
+        item.vx = dir * 5.2;
+        item.vy = -2.2;
+        item.rotation = 0;
+        item.flyStunTimer = item.flyAlive === false ? 0 : 0.5;
       } else {
         item.vx = dir * 14.5;
         item.vy = 0.65;
         item.rotation = 0;
       }
 
-      if (item.type === 'spear' || item.type === 'rock') {
+      if (item.type === 'spear' || item.type === 'explosive_spear' || item.type === 'rock' || item.type === 'cherrybomb') {
         const speed = Math.hypot(item.vx, item.vy);
         if (speed > 1) {
           const dirX = item.vx / speed;
@@ -1283,8 +1590,7 @@ export default function OutskirtsLocation({
       setHeldItemType(null);
       syncRoomItemsCache();
       soundEngine.playThrow();
-      const typeLabel = item.type === 'spear' ? 'Спис' : item.type === 'rock' ? 'Камінь' : 'Ягоду';
-      setLastAction(`Кинуто: ${typeLabel}!`);
+      setLastAction(`Кинуто: ${getItemLabel(item.type)}!`);
 
       webRTCManager.broadcastPacket({
         type: 'THROW_ITEM',
@@ -1303,7 +1609,7 @@ export default function OutskirtsLocation({
       }
     };
 
-    // Eating berry handler
+    // Eating food handler (Berries & Batflies)
     let isEating = false;
     let eatingTimer = 0;
     let nibbleTimer = 0;
@@ -1312,8 +1618,8 @@ export default function OutskirtsLocation({
     const handleToggleEat = () => {
       if (player.state !== 'normal') return;
 
-      if (!player.heldItem || player.heldItem.type !== 'berry') {
-        setLastAction("Щоб їсти, спочатку візьміть ягоду в лапи!");
+      if (!player.heldItem || !isEdibleItemType(player.heldItem.type)) {
+        setLastAction("Щоб їсти, візьміть ягоду або муху-кажана в лапи!");
         return;
       }
 
@@ -1328,14 +1634,21 @@ export default function OutskirtsLocation({
         eatingTimer = 0;
         setIsEating(false);
         setEatingProgress(0);
-        setLastAction("Поїдання ягоди перервано.");
+        if (!controlsRef.current.down) {
+          player.crouching = false;
+        }
+        setLastAction("Поїдання перервано.");
       } else {
         isEating = true;
         eatingTimer = 0;
         nibbleTimer = 0;
         setIsEating(true);
         setEatingProgress(0);
-        setLastAction("Початок поїдання ягоди... Не рухайтесь під час їжі!");
+        setLastAction(
+          player.heldItem.type === 'batfly'
+            ? "Поїдання мухи-кажана... Не рухайтесь!"
+            : "Початок поїдання ягоди... Не рухайтесь під час їжі!"
+        );
         if (!isSoundMutedRef.current) soundEngine.playEatNibble();
       }
     };
@@ -1343,6 +1656,18 @@ export default function OutskirtsLocation({
     triggerGrabRef.current = handleGrab;
     triggerThrowRef.current = handleThrow;
     triggerEatRef.current = handleToggleEat;
+    getShelterPearlsSnapshotRef.current = () => {
+      const shelterId = activeLoc.id;
+      return items
+        .filter((it) => it.type === 'pearl' && (!it.isHeld || it.heldBy === 'player'))
+        .map((it, idx) => ({
+          id: it.id,
+          pearlVariant: it.pearlVariant ?? (idx % 4),
+          roomId: shelterId,
+          x: Math.round(it.isHeld ? Math.max(80, Math.min(activeEnv.width - 80, player.x + 12)) : it.x),
+          y: Math.round(it.isHeld ? Math.min(activeEnv.floorY - 8, player.y + 24) : it.y),
+        }));
+    };
 
     // Piggyback carrying mechanic:
     // "додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз то його можна взять на спину..."
@@ -1385,6 +1710,9 @@ export default function OutskirtsLocation({
         eatingTimer = 0;
         setIsEating(false);
         setEatingProgress(0);
+        if (!controlsRef.current.down) {
+          player.crouching = false;
+        }
       }
       syncRoomItemsCache();
       setLastAction('Всі предмети очищено з карти');
@@ -1526,7 +1854,9 @@ export default function OutskirtsLocation({
           heldBy: it.heldBy,
           isStuck: !!it.isStuck,
           stuckTarget: it.stuckTarget,
-          isAirborne: !!it.isAirborne
+          isAirborne: !!it.isAirborne,
+          pearlVariant: it.pearlVariant,
+          flyAlive: it.flyAlive
         }))
       };
       if (targetPeerId) {
@@ -1613,20 +1943,28 @@ export default function OutskirtsLocation({
         }
       } else if (packet.type === 'THROW_ITEM') {
         if (packet.room === activeLoc.id) {
+          const isSpearNet = packet.itemType === 'spear' || packet.itemType === 'explosive_spear';
+          const isCherryNet = packet.itemType === 'cherrybomb';
           let existing = items.find(it => (packet.itemId && it.id === packet.itemId) || it.heldBy === packet.senderId);
           if (existing) {
             existing.isHeld = false;
             existing.heldBy = undefined;
             existing.isStuck = false;
             existing.stuckTarget = undefined;
-            existing.isAirborne = true;
+            existing.stuckWallNormal = undefined;
+            existing.isAirborne = packet.itemType !== 'batfly';
             existing.sleeping = false;
             existing.thrownBy = 'npc';
             existing.x = packet.x;
             existing.y = packet.y;
             existing.vx = packet.vx;
             existing.vy = packet.vy;
-            existing.rotation = packet.rotation ?? (packet.itemType === 'spear' ? Math.atan2(packet.vy, packet.vx) : 0);
+            existing.rotation = packet.rotation ?? (isSpearNet ? Math.atan2(packet.vy, packet.vx) : 0);
+            if (isCherryNet) {
+              existing.explosiveArmed = true;
+              existing.fuseTimer = 0.55;
+              existing.cherryPopCount = 2;
+            }
           } else {
             items.push({
               id: packet.itemId || `net-throw-${Date.now()}-${Math.random()}`,
@@ -1635,12 +1973,16 @@ export default function OutskirtsLocation({
               y: packet.y,
               vx: packet.vx,
               vy: packet.vy,
-              rotation: packet.rotation ?? (packet.itemType === 'spear' ? Math.atan2(packet.vy, packet.vx) : 0),
+              rotation: packet.rotation ?? (isSpearNet ? Math.atan2(packet.vy, packet.vx) : 0),
               isHeld: false,
               isStuck: false,
-              isAirborne: true,
+              isAirborne: packet.itemType !== 'batfly',
               sleeping: false,
               thrownBy: 'npc',
+              explosiveArmed: isCherryNet ? true : undefined,
+              fuseTimer: isCherryNet ? 0.55 : undefined,
+              cherryPopCount: isCherryNet ? 2 : undefined,
+              flyAlive: packet.itemType === 'batfly' ? true : undefined,
             });
           }
 
@@ -1668,7 +2010,7 @@ export default function OutskirtsLocation({
           if (rp) rp.heldItem = null;
           syncRoomItemsCache();
           soundEngine.playThrow();
-          setLastAction(`Гравець кинув ${packet.itemType === 'spear' ? 'спис' : 'камінь'}!`);
+          setLastAction(`Гравець кинув ${getItemLabel(packet.itemType).toLowerCase()}!`);
         } else if (isWorldAuthority()) {
           const roomLoc = getLocationById(packet.room);
           if (roomLoc) {
@@ -1780,7 +2122,7 @@ export default function OutskirtsLocation({
         }
       } else if (packet.type === 'ITEM_CONSUMED') {
         if (packet.room === activeLoc.id) {
-          const idx = items.findIndex(it => it.id === packet.itemId || (it.heldBy === packet.senderId && it.type === 'berry'));
+          const idx = items.findIndex(it => it.id === packet.itemId || (it.heldBy === packet.senderId && isEdibleItemType(it.type)));
           if (idx >= 0) items.splice(idx, 1);
           const rp = webRTCManager.remotePlayers.get(packet.senderId);
           if (rp) rp.heldItem = null;
@@ -1789,7 +2131,7 @@ export default function OutskirtsLocation({
           const roomLoc = getLocationById(packet.room);
           if (roomLoc) {
             const roomItems = getOrInitRoomItems(roomLoc);
-            const idx = roomItems.findIndex(it => it.id === packet.itemId || (it.heldBy === packet.senderId && it.type === 'berry'));
+            const idx = roomItems.findIndex(it => it.id === packet.itemId || (it.heldBy === packet.senderId && isEdibleItemType(it.type)));
             if (idx >= 0) roomItems.splice(idx, 1);
             syncRoomItemsCache(packet.room, roomItems);
           }
@@ -1814,6 +2156,7 @@ export default function OutskirtsLocation({
           for (const sItem of packet.items) {
             if (sItem.id === localHeldId) continue;
             let localItem = items.find(it => it.id === sItem.id);
+            const isFlyAlive = sItem.type === 'batfly' && sItem.flyAlive !== false;
             if (localItem) {
               localItem.type = sItem.type;
               localItem.x = sItem.x;
@@ -1821,12 +2164,14 @@ export default function OutskirtsLocation({
               localItem.vx = sItem.vx;
               localItem.vy = sItem.vy;
               if (sItem.rotation !== undefined) localItem.rotation = sItem.rotation;
+              if (sItem.pearlVariant !== undefined) localItem.pearlVariant = sItem.pearlVariant;
+              if (sItem.flyAlive !== undefined) localItem.flyAlive = sItem.flyAlive;
               localItem.isHeld = sItem.isHeld;
               localItem.heldBy = sItem.heldBy;
               localItem.isStuck = sItem.isStuck;
               localItem.stuckTarget = sItem.stuckTarget;
               localItem.isAirborne = sItem.isAirborne;
-              localItem.sleeping = !sItem.isAirborne && !sItem.isHeld && Math.abs(sItem.vx) < 0.1 && Math.abs(sItem.vy) < 0.1;
+              localItem.sleeping = !isFlyAlive && !sItem.isAirborne && !sItem.isHeld && Math.abs(sItem.vx) < 0.1 && Math.abs(sItem.vy) < 0.1;
             } else {
               items.push({
                 id: sItem.id,
@@ -1841,7 +2186,10 @@ export default function OutskirtsLocation({
                 isStuck: sItem.isStuck,
                 stuckTarget: sItem.stuckTarget,
                 isAirborne: sItem.isAirborne,
-                sleeping: !sItem.isAirborne && !sItem.isHeld,
+                sleeping: !isFlyAlive && !sItem.isAirborne && !sItem.isHeld,
+                pearlVariant: sItem.pearlVariant,
+                flyAlive: sItem.flyAlive ?? (sItem.type === 'batfly' ? true : undefined),
+                wingPhase: sItem.type === 'batfly' ? Math.random() * 10 : undefined,
               });
             }
           }
@@ -1974,7 +2322,7 @@ export default function OutskirtsLocation({
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (isTypingTarget(e.target)) return;
+      if (isTypingTarget(e.target) || isSettingsOpenRef.current) return;
 
       // Prevent focused UI buttons from stealing Space / Enter / WASD
       if (document.activeElement instanceof HTMLButtonElement || document.activeElement instanceof HTMLAnchorElement) {
@@ -1982,42 +2330,50 @@ export default function OutskirtsLocation({
       }
 
       const code = e.code;
-      const key = e.key.toLowerCase();
+      const kb: KeyBindings = settingsRef.current.keybinds;
+      const usedCodes = new Set<string>(Object.values(kb));
 
-      // Toggle Holographic Map on 'M' or 'Tab'
-      if (code === 'KeyM' || code === 'Tab' || key === 'm' || key === 'ь' || e.key === 'Tab') {
+      const isLeft = code === kb.moveLeft || (!usedCodes.has('ArrowLeft') && code === 'ArrowLeft');
+      const isRight = code === kb.moveRight || (!usedCodes.has('ArrowRight') && code === 'ArrowRight');
+      const isUp = code === kb.moveUp || (!usedCodes.has('ArrowUp') && code === 'ArrowUp');
+      const isDown = code === kb.moveDown || (!usedCodes.has('ArrowDown') && code === 'ArrowDown');
+      const isJump = code === kb.jump;
+      const isMap = code === kb.toggleMap || (!usedCodes.has('Tab') && code === 'Tab');
+      const isEat = code === kb.eatBerry;
+      const isGrab =
+        code === kb.grab ||
+        (!usedCodes.has('KeyC') && code === 'KeyC') ||
+        (!usedCodes.has('KeyF') && code === 'KeyF') ||
+        (kb.eatBerry === 'KeyE' && code === 'KeyE');
+      const isThrow = code === kb.throwItem || (!usedCodes.has('KeyQ') && code === 'KeyQ');
+      const isCarry = code === kb.carryPeer;
+
+      if (isMap) {
         e.preventDefault();
         if (!e.repeat) setShowMapOverlay(prev => !prev);
         return;
       }
 
-      // Eat berry on 'E' when holding a berry
-      if ((code === 'KeyE' || key === 'e' || key === 'у') && player.heldItem?.type === 'berry') {
+      if (isEat && isEdibleItemType(player.heldItem?.type)) {
         e.preventDefault();
         if (!e.repeat) triggerEatRef.current?.();
         return;
       }
 
-      // Pickup / Drop item on 'Z', 'C', 'E', or 'F'
-      if (
-        code === 'KeyZ' || code === 'KeyC' || code === 'KeyE' || code === 'KeyF' ||
-        ['z', 'c', 'e', 'f', 'я', 'с', 'у', 'а'].includes(key)
-      ) {
-        const isZKey = code === 'KeyZ' || key === 'z' || key === 'я';
-        if (!e.repeat && (!isZKey || (player.isGrounded && controlsRef.current.down))) {
+      if (isGrab) {
+        const isJumpOverlap = code === kb.jump;
+        if (!e.repeat && (!isJumpOverlap || (player.isGrounded && controlsRef.current.down))) {
           triggerGrabRef.current?.();
         }
       }
 
-      // Throw item on 'X', 'Q'
-      if (code === 'KeyX' || code === 'KeyQ' || ['x', 'q', 'ч', 'й'].includes(key)) {
+      if (isThrow) {
         e.preventDefault();
         if (!e.repeat) triggerThrowRef.current?.();
         return;
       }
 
-      // Piggyback / carry action on 'G'
-      if (code === 'KeyG' || key === 'g' || key === 'п') {
+      if (isCarry) {
         e.preventDefault();
         if (!e.repeat) triggerPiggybackRef.current?.();
         return;
@@ -2030,39 +2386,31 @@ export default function OutskirtsLocation({
         e.preventDefault();
       }
 
-      if (code === 'ArrowLeft' || code === 'KeyA' || e.key === 'ArrowLeft' || key === 'a' || key === 'ф') {
-        setControlFlag('left', true);
-      }
-      if (code === 'ArrowRight' || code === 'KeyD' || e.key === 'ArrowRight' || key === 'd' || key === 'в') {
-        setControlFlag('right', true);
-      }
-      if (code === 'ArrowUp' || code === 'KeyW' || e.key === 'ArrowUp' || key === 'w' || key === 'ц') {
-        setControlFlag('up', true);
-      }
-      if (code === 'ArrowDown' || code === 'KeyS' || e.key === 'ArrowDown' || key === 's' || key === 'і' || key === 'ы') {
-        setControlFlag('down', true);
-      }
-      if (code === 'Space' || code === 'KeyZ' || e.key === ' ' || key === 'z' || key === 'я') {
-        setControlFlag('jump', true);
-      }
+      if (isLeft) setControlFlag('left', true);
+      if (isRight) setControlFlag('right', true);
+      if (isUp) setControlFlag('up', true);
+      if (isDown) setControlFlag('down', true);
+      if (isJump) setControlFlag('jump', true);
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
       const code = e.code;
-      const key = e.key.toLowerCase();
-      if (code === 'ArrowLeft' || code === 'KeyA' || e.key === 'ArrowLeft' || key === 'a' || key === 'ф') {
+      const kb: KeyBindings = settingsRef.current.keybinds;
+      const usedCodes = new Set<string>(Object.values(kb));
+
+      if (code === kb.moveLeft || (!usedCodes.has('ArrowLeft') && code === 'ArrowLeft')) {
         setControlFlag('left', false);
       }
-      if (code === 'ArrowRight' || code === 'KeyD' || e.key === 'ArrowRight' || key === 'd' || key === 'в') {
+      if (code === kb.moveRight || (!usedCodes.has('ArrowRight') && code === 'ArrowRight')) {
         setControlFlag('right', false);
       }
-      if (code === 'ArrowUp' || code === 'KeyW' || e.key === 'ArrowUp' || key === 'w' || key === 'ц') {
+      if (code === kb.moveUp || (!usedCodes.has('ArrowUp') && code === 'ArrowUp')) {
         setControlFlag('up', false);
       }
-      if (code === 'ArrowDown' || code === 'KeyS' || e.key === 'ArrowDown' || key === 's' || key === 'і' || key === 'ы') {
+      if (code === kb.moveDown || (!usedCodes.has('ArrowDown') && code === 'ArrowDown')) {
         setControlFlag('down', false);
       }
-      if (code === 'Space' || code === 'KeyZ' || e.key === ' ' || key === 'z' || key === 'я') {
+      if (code === kb.jump) {
         setControlFlag('jump', false);
       }
     };
@@ -2075,6 +2423,7 @@ export default function OutskirtsLocation({
       controlsRef.current.jump = false;
       setControls({ left: false, right: false, up: false, down: false, jump: false });
     };
+    resetControlsActionRef.current = resetAllControls;
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
@@ -2644,6 +2993,7 @@ export default function OutskirtsLocation({
           eatingTimer = 0;
           setIsEating(false);
           setEatingProgress(0);
+          player.crouching = false;
           eatingSlowdownTimer = 1.0; // 1 second of slowdown penalty
           player.vx *= 0.2; // sudden stumble / momentum loss
           setLastAction("Рух перервав їжу! Слимакокіт спіткнувся.");
@@ -2897,6 +3247,32 @@ export default function OutskirtsLocation({
           }
         }
 
+        // Wall-stuck horizontal spears act as climbable/standable horizontal rungs!
+        if (!ctrl.down && player.vy >= 0) {
+          for (const stuckSpear of items) {
+            if (
+              (stuckSpear.type !== 'spear' && stuckSpear.type !== 'explosive_spear') ||
+              !stuckSpear.isStuck ||
+              stuckSpear.stuckTarget ||
+              Math.abs(Math.cos(stuckSpear.rotation)) <= 0.75
+            ) {
+              continue;
+            }
+            const spearLeft = stuckSpear.x - 24;
+            const spearRight = stuckSpear.x + 24;
+            const barY = stuckSpear.y - 2;
+            if (player.x + player.width > spearLeft && player.x < spearRight) {
+              const wasAbove = (player.y + player.height - player.vy) <= barY + 6;
+              const isAtBar = player.y + player.height >= barY && player.y + player.height <= barY + 14;
+              if (wasAbove && isAtBar) {
+                player.y = barY - player.height;
+                player.vy = 0;
+                player.isGrounded = true;
+              }
+            }
+          }
+        }
+
         // Screen boundary collisions across dynamic room width & floor/ceiling
         if (player.x < 10) {
           player.x = 10;
@@ -3034,7 +3410,33 @@ export default function OutskirtsLocation({
 
       playerPosRef.current = { x: player.x, y: player.y };
 
+      // ---------------- Update Explosions, Sparks, Shockwaves & Camera Shake ----------------
+      if (cameraShakeTimer > 0) {
+        cameraShakeTimer = Math.max(0, cameraShakeTimer - delta);
+      }
+      for (let si = shockwaves.length - 1; si >= 0; si--) {
+        const sw = shockwaves[si];
+        sw.life -= delta;
+        const progress = 1 - Math.max(0, sw.life / sw.maxLife);
+        sw.radius = 6 + (sw.maxRadius - 6) * (1 - Math.pow(1 - progress, 2));
+        if (sw.life <= 0) {
+          shockwaves.splice(si, 1);
+        }
+      }
+      for (let pi = sparks.length - 1; pi >= 0; pi--) {
+        const sp = sparks[pi];
+        sp.life -= delta;
+        sp.vy += 0.14;
+        sp.x += sp.vx;
+        sp.y += sp.vy;
+        sp.vx *= 0.96;
+        if (sp.life <= 0) {
+          sparks.splice(pi, 1);
+        }
+      }
+
       // ---------------- Update World Items Physics & Collisions ----------------
+      const itemsToRemove = new Set<string>();
       for (const item of items) {
         if (item.isHeld) {
           item.sleeping = false;
@@ -3058,6 +3460,31 @@ export default function OutskirtsLocation({
           continue;
         }
 
+        // Countdown armed fuse for explosive_spear and cherrybomb
+        if (item.explosiveArmed) {
+          item.fuseTimer = (item.fuseTimer ?? 0.35) - delta;
+          if (Math.random() < 0.65) {
+            spawnSparks(item.x, item.y, 2, ['#fef08a', '#fb923c', '#ef4444'], 2.4);
+          }
+          if (item.type === 'cherrybomb' && (item.cherryPopCount ?? 0) > 0 && item.fuseTimer < 0.32) {
+            item.cherryPopCount = 0;
+            soundEngine.playCherryPop();
+          }
+          if (item.fuseTimer <= 0) {
+            detonateExplosion(
+              item.x,
+              item.y,
+              item.type === 'explosive_spear' ? 145 : 130,
+              item.type === 'explosive_spear' ? 2.4 : 0.45,
+              item.type === 'explosive_spear' ? 4.2 : 4.5,
+              item.type === 'explosive_spear' ? 'explosive_spear' : 'cherrybomb',
+              item.thrownBy
+            );
+            itemsToRemove.add(item.id);
+            continue;
+          }
+        }
+
         if (item.isStuck) {
           item.sleeping = true;
           // Attached to stuck target (Lizard or Player)
@@ -3075,7 +3502,98 @@ export default function OutskirtsLocation({
             item.y = player.chest.y + (item.stuckOffsetY ?? 0);
             item.rotation = (item.stuckAngle ?? 0) + (player.ragdollAngle ?? 0);
           }
-          // Firmly stuck (in creature or wall/floor), static until picked up
+          // Firmly stuck (in creature or wall/floor), static until picked up or detonated
+          continue;
+        }
+
+        // Living Batfly autonomous flight / knocked-down stun behavior
+        if (item.type === 'batfly' && item.flyAlive !== false) {
+          item.sleeping = false;
+          if ((item.flyStunTimer ?? 0) > 0) {
+            item.flyStunTimer = Math.max(0, (item.flyStunTimer ?? 0) - delta);
+            item.vy += 0.34;
+            if (item.vy > 9) item.vy = 9;
+            item.vx *= 0.90;
+            item.x += item.vx;
+            item.y += item.vy;
+            item.rotation = Math.sin(t * 6) * 0.35;
+          } else {
+            item.wingPhase = (item.wingPhase ?? 0) + delta * 26;
+            item.flyDecisionTimer = (item.flyDecisionTimer ?? 0) - delta;
+
+            const pxMid = player.x + player.width / 2;
+            const pyMid = player.y + player.height / 2;
+            const distToPlayer = Math.hypot(item.x - pxMid, item.y - pyMid);
+
+            let nearestLizDist = 9999;
+            let nearestLizX = 0;
+            let nearestLizY = 0;
+            for (const lizEntry of activeRoomLizards) {
+              const l = lizEntry.lizard;
+              if (l.state === 'dead') continue;
+              const d = Math.hypot(item.x - (l.x + l.width / 2), item.y - (l.y + l.height / 2));
+              if (d < nearestLizDist) {
+                nearestLizDist = d;
+                nearestLizX = l.x + l.width / 2;
+                nearestLizY = l.y + l.height / 2;
+              }
+            }
+
+            if (distToPlayer < 82) {
+              const awayAng = Math.atan2(item.y - pyMid, item.x - pxMid);
+              item.flyTargetVx = Math.cos(awayAng) * 3.1;
+              item.flyTargetVy = Math.sin(awayAng) * 2.4 - 0.6;
+              item.flyDecisionTimer = 0.35;
+            } else if (nearestLizDist < 105) {
+              const awayAng = Math.atan2(item.y - nearestLizY, item.x - nearestLizX);
+              item.flyTargetVx = Math.cos(awayAng) * 3.4;
+              item.flyTargetVy = Math.sin(awayAng) * 2.6 - 0.6;
+              item.flyDecisionTimer = 0.45;
+            } else if ((item.flyDecisionTimer ?? 0) <= 0) {
+              item.flyDecisionTimer = 0.65 + Math.random() * 1.1;
+              const randAng = Math.random() * Math.PI * 2;
+              item.flyTargetVx = Math.cos(randAng) * (1.4 + Math.random() * 1.5);
+              item.flyTargetVy = Math.sin(randAng) * 1.3;
+            }
+
+            if (item.x < 65) item.flyTargetVx = Math.abs(item.flyTargetVx ?? 1.8) + 0.8;
+            if (item.x > activeEnv.width - 65) item.flyTargetVx = -Math.abs(item.flyTargetVx ?? 1.8) - 0.8;
+            if (item.y < 55) item.flyTargetVy = Math.abs(item.flyTargetVy ?? 1.0) + 0.5;
+            if (item.y > activeEnv.floorY - 42) item.flyTargetVy = -Math.abs(item.flyTargetVy ?? 1.2) - 0.8;
+
+            item.vx += ((item.flyTargetVx ?? 0) - item.vx) * 0.12;
+            item.vy += ((item.flyTargetVy ?? 0) - item.vy) * 0.12 + Math.sin(item.wingPhase * 0.5) * 0.16;
+            item.x += item.vx;
+            item.y += item.vy;
+            item.rotation = item.vx * 0.12;
+
+            // Keep batfly out of solid blocks
+            for (const plat of activeEnv.platforms) {
+              if (plat.type === 'wall' || plat.type === 'shelter' || plat.h >= 30) {
+                if (item.x > plat.x - 8 && item.x < plat.x + plat.w + 8 && item.y > plat.y - 8 && item.y < plat.y + plat.h + 8) {
+                  if (item.y < plat.y + 12) {
+                    item.y = plat.y - 10;
+                    item.vy = -1.6;
+                    item.flyTargetVy = -1.4;
+                  } else {
+                    const centerPlatX = plat.x + plat.w / 2;
+                    item.vx = item.x < centerPlatX ? -2.2 : 2.2;
+                    item.flyTargetVx = item.vx;
+                    item.x += item.vx * 2;
+                  }
+                }
+              }
+            }
+          }
+
+          if (item.x < 18) { item.x = 18; item.vx = Math.abs(item.vx); }
+          if (item.x > activeEnv.width - 18) { item.x = activeEnv.width - 18; item.vx = -Math.abs(item.vx); }
+          if (item.y < 24) { item.y = 24; item.vy = Math.abs(item.vy); }
+          if (item.y >= activeEnv.floorY - 5) {
+            item.y = activeEnv.floorY - 5;
+            item.vy = (item.flyStunTimer ?? 0) > 0 ? 0 : -1.5;
+            item.vx *= 0.8;
+          }
           continue;
         }
 
@@ -3084,19 +3602,19 @@ export default function OutskirtsLocation({
           continue;
         }
 
-        // Aerodynamics and gravity during flight:
-        // "польот коп'я і камня при броскі должен бути прямо і по чучуть в низ"
+        const isSpearItem = item.type === 'spear' || item.type === 'explosive_spear';
+
+        // Aerodynamics and gravity during flight
         if (item.isAirborne) {
-          if (item.type === 'spear') {
-            item.vy += 0.08; // Very slight downward gravity
+          if (isSpearItem) {
+            item.vy += 0.08;
             item.vx *= 0.998;
             item.rotation = Math.atan2(item.vy, item.vx);
-          } else if (item.type === 'rock') {
-            item.vy += 0.22; // Direct stone throw with gentle downward drop
+          } else if (item.type === 'rock' || item.type === 'cherrybomb' || item.type === 'pearl') {
+            item.vy += 0.22;
             item.vx *= 0.995;
             item.rotation += item.vx * 0.08;
           } else {
-            // Berry throw with gentle arc
             item.vy += 0.20;
             item.vx *= 0.992;
             item.rotation += item.vx * 0.05;
@@ -3110,9 +3628,49 @@ export default function OutskirtsLocation({
         item.x += item.vx;
         item.y += item.vy;
 
-        // Airborne spear / rock hit test against characters & creatures
+        // Airborne weapon hit test against Batflies, Lizards, Players, and Walls
         if (item.isAirborne) {
-          // Check collision with ALL Pink Lizards currently in this room
+          // 0. Check collision with Batflies in flight (Rock stuns, Spear knocks/kills, Cherrybomb detonates)
+          let hitBatfly = false;
+          if (item.type === 'rock' || isSpearItem || item.type === 'cherrybomb') {
+            for (const other of items) {
+              if (other === item || other.type !== 'batfly' || other.isHeld) continue;
+              const bDist = Math.hypot(item.x - other.x, item.y - other.y);
+              if (bDist < 28) {
+                hitBatfly = true;
+                if (item.type === 'cherrybomb') {
+                  detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+                  itemsToRemove.add(item.id);
+                } else if (item.type === 'rock') {
+                  other.flyStunTimer = 5.0;
+                  other.vx = item.vx * 0.18;
+                  other.vy = 1.8;
+                  item.isAirborne = false;
+                  item.vx = -item.vx * 0.35;
+                  item.vy = -1.6;
+                  soundEngine.playHit('rock');
+                  spawnSparks(other.x, other.y, 6, ['#e2e8f0', '#94a3b8'], 3.0);
+                  setLastAction('🪨 Ви збили Муху-кажана каменем! Підбирайте [Z/E]!');
+                } else {
+                  other.flyAlive = false;
+                  other.flyStunTimer = 0;
+                  other.sleeping = false;
+                  other.vx = item.vx * 0.25;
+                  other.vy = 2.0;
+                  soundEngine.playHit(item.type === 'explosive_spear' ? 'explosive_spear' : 'spear');
+                  if (item.type === 'explosive_spear') {
+                    item.explosiveArmed = true;
+                    item.fuseTimer = 0.25;
+                  }
+                  setLastAction('🦇 Спис збив Муху-кажана!');
+                }
+                break;
+              }
+            }
+          }
+          if (hitBatfly && itemsToRemove.has(item.id)) continue;
+
+          // 1. Check collision with ALL Pink Lizards currently in this room
           let hitAnyLizard = false;
           for (const lizEntry of activeRoomLizards) {
             const targetLiz = lizEntry.lizard;
@@ -3120,20 +3678,27 @@ export default function OutskirtsLocation({
             const lizDist = Math.hypot(item.x - (targetLiz.x + targetLiz.width / 2), item.y - (targetLiz.y + targetLiz.height / 2));
             if (lizDist < 36) {
               hitAnyLizard = true;
-              if (item.type === 'berry') {
+              if (item.type === 'berry' || item.type === 'pearl') {
                 item.isAirborne = false;
-                item.vx = -item.vx * 0.25;
-                item.vy = -1.5;
-                soundEngine.playPickup();
+                item.vx = -item.vx * 0.28;
+                item.vy = -1.6;
+                if (item.type === 'pearl') soundEngine.playPearlChime();
+                else soundEngine.playPickup();
+                break;
+              }
+              if (item.type === 'cherrybomb') {
+                detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+                itemsToRemove.add(item.id);
                 break;
               }
               const cfg = charConfigRef.current;
               const kbVx = item.vx * 0.14;
               const kbVy = -2.2;
-              if (item.type === 'spear') {
-                const dmg = Math.round(1.0 * cfg.outgoingDamageMult * 100) / 100;
-                const stun = roundToOneDecimal(2.5 * cfg.outgoingStunMult);
-                soundEngine.playHit('spear');
+              if (isSpearItem) {
+                const isExpl = item.type === 'explosive_spear';
+                const dmg = Math.round((isExpl ? 0.85 : 1.0) * cfg.outgoingDamageMult * 100) / 100;
+                const stun = roundToOneDecimal((isExpl ? 2.0 : 2.5) * cfg.outgoingStunMult);
+                soundEngine.playHit(isExpl ? 'explosive_spear' : 'spear');
                 if (isWorldAuthority()) {
                   targetLiz.takeDamage(dmg, stun);
                   targetLiz.vx += kbVx;
@@ -3145,7 +3710,7 @@ export default function OutskirtsLocation({
                     senderId: webRTCManager.localPlayerId,
                     lizardId: targetLiz.id,
                     room: activeLoc.id,
-                    weaponType: 'spear',
+                    weaponType: isExpl ? 'explosive_spear' : 'spear',
                     damage: dmg,
                     stunDuration: stun,
                     knockbackVx: kbVx,
@@ -3161,7 +3726,13 @@ export default function OutskirtsLocation({
                 item.stuckAngle = item.rotation;
                 item.vx = 0;
                 item.vy = 0;
-                setLastAction(`Спис влучив у ящера (-${dmg.toFixed(1)} HP, стан ${stun.toFixed(1)}с)!`);
+                if (isExpl) {
+                  item.explosiveArmed = true;
+                  item.fuseTimer = 0.28;
+                  setLastAction(`🧨 Вибуховий спис упʼявся в ящера — детонація!`);
+                } else {
+                  setLastAction(`Спис влучив у ящера (-${dmg.toFixed(1)} HP, стан ${stun.toFixed(1)}с)!`);
+                }
               } else {
                 const dmg = Math.round(0.2 * cfg.outgoingDamageMult * 100) / 100;
                 const stun = roundToOneDecimal(1.8 * cfg.outgoingStunMult);
@@ -3194,18 +3765,24 @@ export default function OutskirtsLocation({
           }
           if (hitAnyLizard) continue;
 
-          // Check collision with Player
+          // 2. Check collision with Player
           const playerDist = Math.hypot(item.x - (player.x + player.width / 2), item.y - (player.y + player.height / 2));
           if (playerDist < 26 && item.thrownBy !== 'player') {
-            if (item.type === 'berry') {
+            if (item.type === 'berry' || item.type === 'pearl') {
               item.isAirborne = false;
-              item.vx = -item.vx * 0.25;
-              item.vy = -1.5;
-              soundEngine.playPickup();
+              item.vx = -item.vx * 0.28;
+              item.vy = -1.6;
+              if (item.type === 'pearl') soundEngine.playPearlChime();
+              else soundEngine.playPickup();
               continue;
             }
-            applyHit(player, item.type);
-            if (item.type === 'spear') {
+            if (item.type === 'cherrybomb') {
+              detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+              itemsToRemove.add(item.id);
+              continue;
+            }
+            applyHit(player, item.type as WeaponItemType);
+            if (isSpearItem) {
               item.isAirborne = false;
               item.isStuck = true;
               item.stuckTarget = 'player';
@@ -3217,6 +3794,10 @@ export default function OutskirtsLocation({
               item.vy = 0;
               player.vx += hitDir * 2.8;
               player.vy = -2.0;
+              if (item.type === 'explosive_spear') {
+                item.explosiveArmed = true;
+                item.fuseTimer = 0.28;
+              }
             } else {
               item.isAirborne = false;
               item.vx = -item.vx * 0.35;
@@ -3225,23 +3806,29 @@ export default function OutskirtsLocation({
             continue;
           }
 
-          // Check collision with Remote Players
+          // 3. Check collision with Remote Players
           if (item.isAirborne && item.thrownBy === 'player') {
             for (const rp of webRTCManager.remotePlayers.values()) {
               if (rp.room !== activeLoc.id || rp.state === 'dead') continue;
               const remoteDist = Math.hypot(item.x - (rp.x + 12), item.y - (rp.y + 19));
               if (remoteDist < 26) {
-                if (item.type === 'berry') {
+                if (item.type === 'berry' || item.type === 'pearl') {
                   item.isAirborne = false;
-                  item.vx = -item.vx * 0.25;
-                  item.vy = -1.5;
-                  soundEngine.playPickup();
+                  item.vx = -item.vx * 0.28;
+                  item.vy = -1.6;
+                  if (item.type === 'pearl') soundEngine.playPearlChime();
+                  else soundEngine.playPickup();
                   continue;
+                }
+                if (item.type === 'cherrybomb') {
+                  detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+                  itemsToRemove.add(item.id);
+                  break;
                 }
                 const cfg = charConfigRef.current;
                 distributedSimulation.registerClientSideHit(
                   rp.id,
-                  item.type,
+                  item.type as WeaponItemType,
                   item.x,
                   item.y,
                   cfg.outgoingDamageMult,
@@ -3250,41 +3837,82 @@ export default function OutskirtsLocation({
                 pvpCombatTimerRef.current = 60.0;
                 pvpTargetPeerIdRef.current = rp.id;
                 musicManager.playCategory('battle');
-                if (item.type === 'spear') {
+                if (isSpearItem) {
                   item.isAirborne = false;
                   item.isStuck = true;
                   item.vx = 0;
                   item.vy = 0;
+                  if (item.type === 'explosive_spear') {
+                    item.explosiveArmed = true;
+                    item.fuseTimer = 0.28;
+                  }
                 } else {
                   item.isAirborne = false;
                   item.vx = -item.vx * 0.35;
                   item.vy = -1.8;
                 }
-                setLastAction(`ВЛУЧАННЯ! Ваш ${item.type === 'spear' ? 'спис' : 'камінь'} вразив гравця ${rp.name}!`);
+                setLastAction(`ВЛУЧАННЯ! Ваш ${getItemLabel(item.type).toLowerCase()} вразив гравця ${rp.name}!`);
                 break;
               }
             }
+            if (itemsToRemove.has(item.id)) continue;
           }
 
-          // Airborne solid wall/monolith collision
+          // 4. Airborne solid wall/monolith/metal collision (Ricochet & Wall-Stuck Spear Ledges!)
           let hitSolidWall = false;
           for (const plat of activeEnv.platforms) {
-            if (plat.type === 'wall' || plat.type === 'shelter' || plat.h >= 45) {
+            if (plat.type === 'wall' || plat.type === 'shelter' || plat.type === 'metal' || plat.h >= 30) {
               if (item.x >= plat.x && item.x <= plat.x + plat.w && item.y >= plat.y && item.y <= plat.y + plat.h) {
-                if (item.type === 'spear') {
-                  item.isStuck = true;
-                  item.isAirborne = false;
-                  item.sleeping = true;
-                  item.x = item.vx >= 0 ? plat.x + 2 : plat.x + plat.w - 2;
-                  item.vx = 0;
-                  item.vy = 0;
-                  soundEngine.playHit('spear');
+                if (item.type === 'cherrybomb') {
+                  detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+                  itemsToRemove.add(item.id);
+                  hitSolidWall = true;
+                  break;
+                }
+                if (isSpearItem) {
+                  if (plat.type === 'metal') {
+                    // Metal deflects spears with bright sparks & metallic clang!
+                    const prevVx = item.vx;
+                    item.vx = -prevVx * 0.58;
+                    item.vy = -2.8;
+                    item.isAirborne = false;
+                    item.rotation = Math.atan2(item.vy, item.vx);
+                    item.x = prevVx >= 0 ? plat.x - 4 : plat.x + plat.w + 4;
+                    soundEngine.playRicochet();
+                    spawnSparks(item.x, item.y, 12, ['#fde68a', '#fbbf24', '#ffffff'], 4.5);
+                    if (item.type === 'explosive_spear') {
+                      item.explosiveArmed = true;
+                      item.fuseTimer = 0.35;
+                    } else {
+                      setLastAction('⚡ Спис зрикошетив від металу з іскрами!');
+                    }
+                  } else {
+                    // Concrete/Wall/Shelter embeds horizontally so Slugcat can climb onto it!
+                    const hitFromLeft = item.vx >= 0;
+                    item.isStuck = true;
+                    item.isAirborne = false;
+                    item.sleeping = true;
+                    item.stuckWallNormal = hitFromLeft ? -1 : 1;
+                    item.x = hitFromLeft ? plat.x - 14 : plat.x + plat.w + 14;
+                    item.rotation = hitFromLeft ? 0 : Math.PI;
+                    item.vx = 0;
+                    item.vy = 0;
+                    soundEngine.playHit(item.type === 'explosive_spear' ? 'explosive_spear' : 'spear');
+                    if (item.type === 'explosive_spear') {
+                      item.explosiveArmed = true;
+                      item.fuseTimer = 0.35;
+                      setLastAction('🧨 Вибуховий спис встромився у стіну — вибух!');
+                    } else {
+                      setLastAction('🪜 Спис застряг у стіні — на нього можна залізти!');
+                    }
+                  }
                 } else {
                   item.isAirborne = false;
-                  item.vx = -item.vx * 0.35;
-                  item.vy = -1.5;
+                  item.vx = -item.vx * 0.38;
+                  item.vy = -1.6;
                   item.x = item.vx <= 0 ? plat.x - 2 : plat.x + plat.w + 2;
                   if (item.type === 'rock') soundEngine.playHit('rock');
+                  else if (item.type === 'pearl') soundEngine.playPearlChime();
                 }
                 hitSolidWall = true;
                 break;
@@ -3295,25 +3923,46 @@ export default function OutskirtsLocation({
         }
 
         // Dynamic room boundary collisions:
-        if (item.type === 'spear' && item.isAirborne) {
+        if (item.type === 'cherrybomb' && item.isAirborne && (item.x <= 20 || item.x >= activeEnv.width - 20)) {
+          detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+          itemsToRemove.add(item.id);
+          continue;
+        }
+        if (isSpearItem && item.isAirborne) {
           if (item.x <= 20 && item.vx < 0) {
             item.isStuck = true;
             item.isAirborne = false;
-            item.x = 22;
+            item.sleeping = true;
+            item.stuckWallNormal = 1;
+            item.x = 24;
             item.vx = 0;
             item.vy = 0;
             item.rotation = Math.PI;
-            soundEngine.playHit('spear');
+            soundEngine.playHit(item.type === 'explosive_spear' ? 'explosive_spear' : 'spear');
+            if (item.type === 'explosive_spear') {
+              item.explosiveArmed = true;
+              item.fuseTimer = 0.35;
+            } else {
+              setLastAction('🪜 Спис застряг у стіні — на нього можна залізти!');
+            }
             continue;
           }
           if (item.x >= activeEnv.width - 20 && item.vx > 0) {
             item.isStuck = true;
             item.isAirborne = false;
-            item.x = activeEnv.width - 22;
+            item.sleeping = true;
+            item.stuckWallNormal = -1;
+            item.x = activeEnv.width - 24;
             item.vx = 0;
             item.vy = 0;
             item.rotation = 0;
-            soundEngine.playHit('spear');
+            soundEngine.playHit(item.type === 'explosive_spear' ? 'explosive_spear' : 'spear');
+            if (item.type === 'explosive_spear') {
+              item.explosiveArmed = true;
+              item.fuseTimer = 0.35;
+            } else {
+              setLastAction('🪜 Спис застряг у стіні — на нього можна залізти!');
+            }
             continue;
           }
         }
@@ -3325,15 +3974,27 @@ export default function OutskirtsLocation({
         const itemFloorY = activeEnv.floorY - 2;
         if (item.y >= itemFloorY) {
           item.y = itemFloorY;
-          if (item.type === 'spear' && item.isAirborne && item.vy > 4.5) {
+          if (item.type === 'cherrybomb' && item.isAirborne) {
+            detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+            itemsToRemove.add(item.id);
+            continue;
+          }
+          if (isSpearItem && item.isAirborne && item.vy > 4.5) {
             item.isStuck = true;
             item.isAirborne = false;
             item.sleeping = true;
             item.vx = 0;
             item.vy = 0;
             item.rotation = Math.PI / 3;
-            soundEngine.playHit('spear');
+            soundEngine.playHit(item.type === 'explosive_spear' ? 'explosive_spear' : 'spear');
+            if (item.type === 'explosive_spear') {
+              item.explosiveArmed = true;
+              item.fuseTimer = 0.35;
+            }
           } else {
+            if (item.type === 'pearl' && Math.abs(item.vy) > 1.8) {
+              soundEngine.playPearlChime();
+            }
             item.vy = 0;
             item.vx *= 0.8;
             item.isAirborne = false;
@@ -3345,20 +4006,35 @@ export default function OutskirtsLocation({
         }
 
         // Platform top landing
-        if (!item.isAirborne) {
+        if (!item.isAirborne || isSpearItem) {
           for (const plat of activeEnv.platforms) {
             if (item.x >= plat.x && item.x <= plat.x + plat.w) {
               const wasAbove = (item.y - item.vy) <= plat.y + 4;
               const isAtTop = item.y >= plat.y && item.y <= plat.y + 8;
               if (wasAbove && isAtTop && item.vy >= 0) {
                 item.y = plat.y - 2;
-                if ((item.type === 'rock' || item.type === 'berry') && Math.abs(item.vy) > 2) {
-                  item.vy = -item.vy * (item.type === 'berry' ? 0.25 : 0.4);
+                if (item.type === 'cherrybomb' && item.isAirborne) {
+                  detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+                  itemsToRemove.add(item.id);
+                  break;
+                }
+                if (isSpearItem && plat.type === 'metal' && (item.isAirborne || Math.abs(item.vy) > 1.6)) {
+                  item.vy = -Math.max(2.2, Math.abs(item.vy) * 0.5);
+                  item.vx *= 0.82;
+                  item.isAirborne = false;
+                  soundEngine.playRicochet();
+                  spawnSparks(item.x, item.y, 6, ['#fde68a', '#fbbf24', '#ffffff'], 3.2);
+                  break;
+                }
+                if ((item.type === 'rock' || item.type === 'berry' || item.type === 'pearl') && Math.abs(item.vy) > 2) {
+                  item.vy = -item.vy * (item.type === 'pearl' ? 0.52 : item.type === 'berry' ? 0.25 : 0.4);
                   item.vx *= 0.65;
                   if (item.type === 'rock') soundEngine.playHit('rock');
+                  else if (item.type === 'pearl') soundEngine.playPearlChime();
                 } else {
                   item.vy = 0;
                   item.vx *= 0.8;
+                  item.isAirborne = false;
                   if (Math.abs(item.vx) < 0.1) {
                     item.vx = 0;
                     item.sleeping = true;
@@ -3370,13 +4046,28 @@ export default function OutskirtsLocation({
         }
       }
 
-      // ---------------- Update Berry Eating Logic (3.5 seconds duration) ----------------
+      if (itemsToRemove.size > 0) {
+        for (let idx = items.length - 1; idx >= 0; idx--) {
+          if (itemsToRemove.has(items[idx].id)) {
+            items.splice(idx, 1);
+          }
+        }
+        syncRoomItemsCache();
+        if (isWorldAuthority() && webRTCManager.remotePlayers.size > 0) {
+          sendAuthoritativeItemsSync();
+        }
+      }
+
+      // ---------------- Update Food Eating Logic (Berries & Batflies, 3.5s) ----------------
       if (isEating) {
-        if (player.state !== 'normal' || !player.heldItem || player.heldItem.type !== 'berry') {
+        if (player.state !== 'normal' || !player.heldItem || !isEdibleItemType(player.heldItem.type)) {
           isEating = false;
           eatingTimer = 0;
           setIsEating(false);
           setEatingProgress(0);
+          if (!ctrl.down) {
+            player.crouching = false;
+          }
         } else {
           eatingTimer += delta;
           nibbleTimer += delta;
@@ -3400,21 +4091,23 @@ export default function OutskirtsLocation({
             eatingTimer = 0;
             setIsEating(false);
             setEatingProgress(0);
+            player.crouching = false;
 
-            const consumedBerry = player.heldItem;
+            const consumedItem = player.heldItem;
+            const wasBatfly = consumedItem?.type === 'batfly';
             player.heldItem = null;
             setHeldItemType(null);
-            const bIdx = items.indexOf(consumedBerry);
+            const bIdx = items.indexOf(consumedItem);
             if (bIdx >= 0) {
               items.splice(bIdx, 1);
             }
             syncRoomItemsCache();
 
-            if (consumedBerry) {
+            if (consumedItem) {
               webRTCManager.broadcastPacket({
                 type: 'ITEM_CONSUMED',
                 senderId: webRTCManager.localPlayerId,
-                itemId: consumedBerry.id,
+                itemId: consumedItem.id,
                 room: activeLoc.id
               });
             }
@@ -3427,7 +4120,9 @@ export default function OutskirtsLocation({
             setTimeout(() => setJustFilledIndex(null), 800);
 
             if (!isSoundMutedRef.current) soundEngine.playEatComplete();
-            setLastAction(`Ягоду з'їдено! +1 ячейка їжі (${nextFood} / ${cfg.maxFood}: ${Math.min(cfg.requiredFood, nextFood)} обов'язк. + ${Math.max(0, nextFood - cfg.requiredFood)} додатк.)`);
+            setLastAction(
+              `${wasBatfly ? "🦇 Муху-кажана з'їдено!" : "Ягоду з'їдено!"} +1 ячейка їжі (${nextFood} / ${cfg.maxFood}: ${Math.min(cfg.requiredFood, nextFood)} обов'язк. + ${Math.max(0, nextFood - cfg.requiredFood)} додатк.)`
+            );
           }
         }
       }
@@ -3486,11 +4181,15 @@ export default function OutskirtsLocation({
         let spears = 0;
         let rocks = 0;
         let berries = 0;
+        let pearls = 0;
+        let batflies = 0;
         for (let i = 0; i < items.length; i++) {
           const it = items[i].type;
-          if (it === 'spear') spears++;
-          else if (it === 'rock') rocks++;
+          if (it === 'spear' || it === 'explosive_spear') spears++;
+          else if (it === 'rock' || it === 'cherrybomb') rocks++;
           else if (it === 'berry') berries++;
+          else if (it === 'pearl') pearls++;
+          else if (it === 'batfly') batflies++;
         }
 
         setTelemetry({
@@ -3524,11 +4223,13 @@ export default function OutskirtsLocation({
           spearsCount: spears,
           rocksCount: rocks,
           berriesCount: berries,
+          pearlsCount: pearls,
+          batfliesCount: batflies,
           foodCount: foodCountRef.current,
           isEating,
           eatingProgress: Math.min(100, Math.round((eatingTimer / 3.5) * 100)),
           fps: currentFps,
-          particles: 0,
+          particles: sparks.length,
         });
 
         setIsDead(player.state === 'dead');
@@ -3571,7 +4272,21 @@ export default function OutskirtsLocation({
       camera.x += (clampedCamX - camera.x) * 0.12;
       camera.y += (clampedCamY - camera.y) * 0.12;
 
+      const shakeDecay = cameraShakeTimer > 0 ? Math.min(1, cameraShakeTimer / 0.35) : 0;
+      const shakeOffsetX = shakeDecay > 0 ? (Math.random() - 0.5) * 2 * cameraShakeIntensity * shakeDecay : 0;
+      const shakeOffsetY = shakeDecay > 0 ? (Math.random() - 0.5) * 2 * cameraShakeIntensity * shakeDecay : 0;
+
       // ---------------- Drawing & Rendering ----------------
+      const gfx = settingsRef.current.graphics;
+      const resScale = gfx.resolutionScale || 1;
+      const targetCanvasW = Math.round(CANVAS_WIDTH * resScale);
+      const targetCanvasH = Math.round(CANVAS_HEIGHT * resScale);
+      if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
+        canvas.width = targetCanvasW;
+        canvas.height = targetCanvasH;
+      }
+      ctx.setTransform(resScale, 0, 0, resScale, 0, 0);
+
       ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
       // Deep dark void background
@@ -3581,7 +4296,7 @@ export default function OutskirtsLocation({
       // Apply Camera Zoom & Translation
       ctx.save();
       ctx.scale(currentZoom, currentZoom);
-      ctx.translate(-camera.x, -camera.y);
+      ctx.translate(-camera.x + shakeOffsetX, -camera.y + shakeOffsetY);
 
       // 1. Storm sky background and depth fog gradients
       ctx.fillStyle = '#1c1822';
@@ -3867,32 +4582,34 @@ export default function OutskirtsLocation({
       });
 
       // 4. Glow Grass (Worm Grass)
-      const groundFloorY = activeEnv.floorY;
-      ctx.strokeStyle = '#12411e';
-      ctx.lineWidth = 2.0;
-      ctx.beginPath();
-      for (let i = 0; i < activeEnv.wormGrasses.length; i++) {
-        const grass = activeEnv.wormGrasses[i];
-        const sway = Math.sin(t * grass.swaySpeed + grass.phase) * 6;
-        ctx.moveTo(grass.x, groundFloorY);
-        ctx.quadraticCurveTo(
-          grass.x + sway * 0.4,
-          groundFloorY - grass.height * 0.5,
-          grass.x + sway,
-          groundFloorY - grass.height
-        );
-      }
-      ctx.stroke();
+      if (gfx.particles) {
+        const groundFloorY = activeEnv.floorY;
+        ctx.strokeStyle = '#12411e';
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        for (let i = 0; i < activeEnv.wormGrasses.length; i++) {
+          const grass = activeEnv.wormGrasses[i];
+          const sway = Math.sin(t * grass.swaySpeed + grass.phase) * 6;
+          ctx.moveTo(grass.x, groundFloorY);
+          ctx.quadraticCurveTo(
+            grass.x + sway * 0.4,
+            groundFloorY - grass.height * 0.5,
+            grass.x + sway,
+            groundFloorY - grass.height
+          );
+        }
+        ctx.stroke();
 
-      ctx.fillStyle = '#22c55e';
-      ctx.beginPath();
-      for (let i = 0; i < activeEnv.wormGrasses.length; i++) {
-        const grass = activeEnv.wormGrasses[i];
-        const sway = Math.sin(t * grass.swaySpeed + grass.phase) * 6;
-        ctx.moveTo(grass.x + sway + 2.5, groundFloorY - grass.height);
-        ctx.arc(grass.x + sway, groundFloorY - grass.height, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath();
+        for (let i = 0; i < activeEnv.wormGrasses.length; i++) {
+          const grass = activeEnv.wormGrasses[i];
+          const sway = Math.sin(t * grass.swaySpeed + grass.phase) * 6;
+          ctx.moveTo(grass.x + sway + 2.5, groundFloorY - grass.height);
+          ctx.arc(grass.x + sway, groundFloorY - grass.height, 2.5, 0, Math.PI * 2);
+        }
+        ctx.fill();
       }
-      ctx.fill();
 
       // 5. Draw World Items (Spears, Stones, Berries) with Frustum / Viewport Culling
       const cullMinX = camera.x - 40;
@@ -3933,17 +4650,19 @@ export default function OutskirtsLocation({
         ctx.lineWidth = 2.5;
         ctx.stroke();
 
-        const glowRad = 22 + Math.sin(t * 3) * 5;
-        const glowGrad = ctx.createRadialGradient(
-          dData.x + dData.w / 2, dData.y + dData.h / 2, 4,
-          dData.x + dData.w / 2, dData.y + dData.h / 2, glowRad
-        );
-        glowGrad.addColorStop(0, 'rgba(236, 72, 153, 0.45)');
-        glowGrad.addColorStop(1, 'rgba(236, 72, 153, 0)');
-        ctx.fillStyle = glowGrad;
-        ctx.beginPath();
-        ctx.arc(dData.x + dData.w / 2, dData.y + dData.h / 2, glowRad, 0, Math.PI * 2);
-        ctx.fill();
+        if (gfx.glowEffects) {
+          const glowRad = 22 + Math.sin(t * 3) * 5;
+          const glowGrad = ctx.createRadialGradient(
+            dData.x + dData.w / 2, dData.y + dData.h / 2, 4,
+            dData.x + dData.w / 2, dData.y + dData.h / 2, glowRad
+          );
+          glowGrad.addColorStop(0, 'rgba(236, 72, 153, 0.45)');
+          glowGrad.addColorStop(1, 'rgba(236, 72, 153, 0)');
+          ctx.fillStyle = glowGrad;
+          ctx.beginPath();
+          ctx.arc(dData.x + dData.w / 2, dData.y + dData.h / 2, glowRad, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
         ctx.font = 'bold 8px monospace';
         ctx.fillStyle = '#f472b6';
@@ -3965,8 +4684,10 @@ export default function OutskirtsLocation({
 
         ctx.save();
         ctx.fillStyle = charConfigRef.current.bodyColorTop;
-        ctx.shadowColor = pipeTransit.isShelter ? '#38bdf8' : '#34d399';
-        ctx.shadowBlur = 12;
+        if (gfx.glowEffects) {
+          ctx.shadowColor = pipeTransit.isShelter ? '#38bdf8' : '#34d399';
+          ctx.shadowBlur = 12;
+        }
         ctx.beginPath();
         ctx.ellipse(curX, curY, 11, 7, transitAngle, 0, Math.PI * 2);
         ctx.fill();
@@ -4020,6 +4741,35 @@ export default function OutskirtsLocation({
         }
       }
 
+      // 8.1 Draw explosion shockwaves and metallic ricochet/explosion sparks
+      if (shockwaves.length > 0 || sparks.length > 0) {
+        ctx.save();
+        for (const sw of shockwaves) {
+          const alpha = Math.max(0, sw.life / sw.maxLife);
+          ctx.strokeStyle = sw.color;
+          ctx.globalAlpha = alpha * 0.85;
+          ctx.lineWidth = 3.5 * alpha + 1;
+          ctx.beginPath();
+          ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.fillStyle = sw.color;
+          ctx.globalAlpha = alpha * 0.18;
+          ctx.beginPath();
+          ctx.arc(sw.x, sw.y, sw.radius * 0.75, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        for (const sp of sparks) {
+          const alpha = Math.max(0, sp.life / sp.maxLife);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = sp.color;
+          ctx.beginPath();
+          ctx.arc(sp.x, sp.y, sp.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
       // Lethal Downpour storm visual rendering on canvas
       if (localStormSeconds > 0) {
         const intensity = Math.min(1.0, localStormSeconds / 25.0);
@@ -4027,28 +4777,32 @@ export default function OutskirtsLocation({
         ctx.fillStyle = `rgba(3, 7, 18, ${Math.min(0.82, 0.15 + intensity * 0.67)})`;
         ctx.fillRect(camera.x - 20, camera.y - 20, viewW + 40, viewH + 40);
 
-        const streakCount = Math.floor(40 + intensity * 240);
-        ctx.strokeStyle = `rgba(186, 230, 253, ${0.25 + intensity * 0.6})`;
-        ctx.lineWidth = 1.2 + intensity * 1.5;
-        ctx.beginPath();
-        const speed = 26 + intensity * 35;
-        const slant = 10 + intensity * 12;
-        for (let s = 0; s < streakCount; s++) {
-          const rx = camera.x + ((s * 41 + t * speed * 22) % (viewW + 100)) - 50;
-          const ry = camera.y + ((s * 23 + t * speed * 38) % viewH);
-          const len = 18 + intensity * 35;
-          ctx.moveTo(rx, ry);
-          ctx.lineTo(rx - slant, ry + len);
-        }
-        ctx.stroke();
-
-        ctx.fillStyle = `rgba(224, 242, 254, ${0.15 + intensity * 0.45})`;
-        for (let s = 0; s < 30; s++) {
-          const sx = camera.x + ((s * 47 + t * 45) % viewW);
-          const sy = activeEnv.floorY + 2 + Math.sin(t * 8 + s) * 6;
+        if (gfx.rainEffects) {
+          const streakCount = Math.floor(40 + intensity * 240);
+          ctx.strokeStyle = `rgba(186, 230, 253, ${0.25 + intensity * 0.6})`;
+          ctx.lineWidth = 1.2 + intensity * 1.5;
           ctx.beginPath();
-          ctx.arc(sx, sy, 1.2 + (s % 3) * 0.6, 0, Math.PI * 2);
-          ctx.fill();
+          const speed = 26 + intensity * 35;
+          const slant = 10 + intensity * 12;
+          for (let s = 0; s < streakCount; s++) {
+            const rx = camera.x + ((s * 41 + t * speed * 22) % (viewW + 100)) - 50;
+            const ry = camera.y + ((s * 23 + t * speed * 38) % viewH);
+            const len = 18 + intensity * 35;
+            ctx.moveTo(rx, ry);
+            ctx.lineTo(rx - slant, ry + len);
+          }
+          ctx.stroke();
+
+          if (gfx.particles) {
+            ctx.fillStyle = `rgba(224, 242, 254, ${0.15 + intensity * 0.45})`;
+            for (let s = 0; s < 30; s++) {
+              const sx = camera.x + ((s * 47 + t * 45) % viewW);
+              const sy = activeEnv.floorY + 2 + Math.sin(t * 8 + s) * 6;
+              ctx.beginPath();
+              ctx.arc(sx, sy, 1.2 + (s % 3) * 0.6, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
         }
         ctx.restore();
       }
@@ -4057,7 +4811,7 @@ export default function OutskirtsLocation({
       ctx.restore();
 
       // Full screen-space flash overlay for lightning storm
-      if (isFlashingRef.current) {
+      if (isFlashingRef.current && gfx.rainEffects) {
         ctx.fillStyle = 'rgba(235, 240, 255, 0.45)';
         ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
       }
@@ -4070,6 +4824,7 @@ export default function OutskirtsLocation({
     return () => {
       syncRoomItemsCache();
       cancelAnimationFrame(animId);
+      resetControlsActionRef.current = null;
       window.removeEventListener('keydown', handleKeyDown, { capture: true });
       window.removeEventListener('keyup', handleKeyUp, { capture: true });
       window.removeEventListener('blur', resetAllControls);
@@ -4214,14 +4969,27 @@ export default function OutskirtsLocation({
     }
   }
 
-  // Draw Items (Spear and Stone)
+  // Draw Items (Spears, Explosive Spears, Rocks, Cherrybombs, Pearls, Berries, Batflies)
   function drawWorldItem(ctx: CanvasRenderingContext2D, item: WorldItem) {
     ctx.save();
     ctx.translate(item.x, item.y);
     ctx.rotate(item.rotation);
 
-    if (item.type === 'spear') {
-      // Sleek Rain World rebar spear: long shaft with wrapped center grip & sharp pointed tip
+    if (item.type === 'spear' || item.type === 'explosive_spear') {
+      const isExplosive = item.type === 'explosive_spear';
+      const isWallClimbingRung = item.isStuck && !item.stuckTarget && Math.abs(Math.cos(item.rotation)) > 0.75;
+
+      // Subtle climbable ledge cue for wall-stuck horizontal spears
+      if (isWallClimbingRung) {
+        ctx.strokeStyle = 'rgba(251, 191, 36, 0.32)';
+        ctx.lineWidth = 7.5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-22, 0);
+        ctx.lineTo(22, 0);
+        ctx.stroke();
+      }
+
       // Shadow
       ctx.strokeStyle = 'rgba(0,0,0,0.45)';
       ctx.lineWidth = 4.0;
@@ -4231,7 +4999,7 @@ export default function OutskirtsLocation({
       ctx.stroke();
 
       // Main metal shaft
-      ctx.strokeStyle = '#64748b'; // slate metal
+      ctx.strokeStyle = isExplosive ? '#475569' : '#64748b';
       ctx.lineWidth = 3.2;
       ctx.lineCap = 'round';
       ctx.beginPath();
@@ -4240,7 +5008,7 @@ export default function OutskirtsLocation({
       ctx.stroke();
 
       // Sharp piercing blade tip
-      ctx.fillStyle = '#cbd5e1';
+      ctx.fillStyle = isExplosive ? '#fca5a5' : '#cbd5e1';
       ctx.strokeStyle = '#334155';
       ctx.lineWidth = 1.0;
       ctx.beginPath();
@@ -4251,17 +5019,34 @@ export default function OutskirtsLocation({
       ctx.fill();
       ctx.stroke();
 
-      // Wrapped handle grip tape in center
-      ctx.strokeStyle = '#b45309'; // weathered leather wrap
+      // Handle wrap
+      ctx.strokeStyle = isExplosive ? '#991b1b' : '#b45309';
       ctx.lineWidth = 3.8;
       ctx.beginPath();
       ctx.moveTo(-4, 0);
       ctx.lineTo(5, 0);
       ctx.stroke();
 
-      // Tiny metallic glint
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(16, -1, 4, 1.2);
+      if (isExplosive) {
+        // Red explosive cloth charge tied near spearhead
+        ctx.fillStyle = item.explosiveArmed && Math.floor(performance.now() / 60) % 2 === 0 ? '#fef08a' : '#dc2626';
+        ctx.strokeStyle = '#7f1d1d';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.roundRect(10, -4.2, 10, 8.4, 2.5);
+        ctx.fill();
+        ctx.stroke();
+
+        // Sparking tip glow
+        ctx.fillStyle = '#fb923c';
+        ctx.beginPath();
+        ctx.arc(15, 0, item.explosiveArmed ? 3.2 : 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // Tiny metallic glint
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(16, -1, 4, 1.2);
+      }
 
     } else if (item.type === 'rock') {
       // Natural textured rubble stone / pebble
@@ -4270,7 +5055,6 @@ export default function OutskirtsLocation({
       ctx.ellipse(0, 4, 7, 3, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Rock body
       ctx.fillStyle = '#475569';
       ctx.strokeStyle = '#1e293b';
       ctx.lineWidth = 1.4;
@@ -4286,7 +5070,6 @@ export default function OutskirtsLocation({
       ctx.fill();
       ctx.stroke();
 
-      // Top specular highlight edge
       ctx.strokeStyle = '#94a3b8';
       ctx.lineWidth = 1.0;
       ctx.beginPath();
@@ -4294,15 +5077,133 @@ export default function OutskirtsLocation({
       ctx.lineTo(2, -4);
       ctx.stroke();
 
+    } else if (item.type === 'cherrybomb') {
+      // Rain World Cherrybomb cluster (3 crimson spheres on branching stems)
+      const isFlickering = item.explosiveArmed && Math.floor(performance.now() / 55) % 2 === 0;
+      ctx.strokeStyle = '#7f1d1d';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, -8);
+      ctx.lineTo(-4, 1);
+      ctx.moveTo(0, -8);
+      ctx.lineTo(4, 1);
+      ctx.moveTo(0, -8);
+      ctx.lineTo(0, 4);
+      ctx.stroke();
+
+      const pods = [
+        { x: -4.2, y: 1.5, r: 4.0 },
+        { x: 4.2, y: 1.5, r: 4.0 },
+        { x: 0, y: 4.5, r: 4.2 },
+      ];
+      for (const pod of pods) {
+        ctx.fillStyle = isFlickering ? '#fef08a' : '#ef4444';
+        ctx.strokeStyle = '#450a0a';
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.arc(pod.x, pod.y, pod.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#fecaca';
+        ctx.beginPath();
+        ctx.arc(pod.x - 1.2, pod.y - 1.2, 1.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+    } else if (item.type === 'pearl') {
+      // Iridescent collectible Data Pearl (4 variants)
+      const palettes = [
+        { hi: '#ffffff', mid: '#f8fafc', rim: '#cbd5e1', glow: 'rgba(248, 250, 252, 0.35)' },
+        { hi: '#fce7f3', mid: '#f472b6', rim: '#9d174d', glow: 'rgba(244, 114, 182, 0.38)' },
+        { hi: '#cffafe', mid: '#22d3ee', rim: '#0e7490', glow: 'rgba(34, 211, 238, 0.38)' },
+        { hi: '#fef3c7', mid: '#fbbf24', rim: '#b45309', glow: 'rgba(251, 191, 36, 0.38)' },
+      ];
+      const pal = palettes[(item.pearlVariant ?? 0) % palettes.length];
+
+      ctx.fillStyle = pal.glow;
+      ctx.beginPath();
+      ctx.arc(0, 0, 10.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      const pGrad = ctx.createRadialGradient(-2.2, -2.5, 1, 0, 0, 6.5);
+      pGrad.addColorStop(0, pal.hi);
+      pGrad.addColorStop(0.55, pal.mid);
+      pGrad.addColorStop(1, pal.rim);
+
+      ctx.fillStyle = pGrad;
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.arc(0, 0, 6.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(-2.0, -2.2, 1.7, 0, Math.PI * 2);
+      ctx.fill();
+
+    } else if (item.type === 'batfly') {
+      // Rain World Batfly: tiny dark body + flapping translucent wings
+      const isKnocked = item.flyAlive === false || (item.flyStunTimer ?? 0) > 0;
+      const flap = isKnocked ? -0.35 : Math.sin(item.wingPhase ?? (performance.now() * 0.025)) * 0.85;
+
+      // Left & right wings
+      ctx.fillStyle = isKnocked ? 'rgba(148, 163, 184, 0.45)' : 'rgba(226, 232, 240, 0.72)';
+      ctx.strokeStyle = '#334155';
+      ctx.lineWidth = 1.0;
+
+      ctx.save();
+      ctx.rotate(-0.4 + flap);
+      ctx.beginPath();
+      ctx.ellipse(-6, -3, 6.5, 2.8, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.rotate(0.4 - flap);
+      ctx.beginPath();
+      ctx.ellipse(6, -3, 6.5, 2.8, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // Body
+      ctx.fillStyle = '#1e293b';
+      ctx.strokeStyle = '#020617';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 4.2, 5.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Tiny ears
+      ctx.fillStyle = '#334155';
+      ctx.beginPath();
+      ctx.moveTo(-2.5, -4);
+      ctx.lineTo(-4, -8);
+      ctx.lineTo(-0.5, -5);
+      ctx.moveTo(2.5, -4);
+      ctx.lineTo(4, -8);
+      ctx.lineTo(0.5, -5);
+      ctx.fill();
+
+      // Glowing eyes (dim if dead/stunned)
+      ctx.fillStyle = isKnocked ? '#64748b' : '#f8fafc';
+      ctx.beginPath();
+      ctx.arc(-1.5, -1.5, 1.0, 0, Math.PI * 2);
+      ctx.arc(1.5, -1.5, 1.0, 0, Math.PI * 2);
+      ctx.fill();
+
     } else if (item.type === 'berry') {
       // Rain World Blue Fruit / Danglefruit (1 berry = 1 food pip, 3.5s eat time)
-      // Soft drop shadow
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
       ctx.beginPath();
       ctx.ellipse(0, 5, 8, 3.5, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Organic stem at top
       ctx.strokeStyle = '#78350f';
       ctx.lineWidth = 1.6;
       ctx.lineCap = 'round';
@@ -4311,13 +5212,11 @@ export default function OutskirtsLocation({
       ctx.quadraticCurveTo(2, -9, 3.5, -11.5);
       ctx.stroke();
 
-      // Tiny green leaf / calyx
       ctx.fillStyle = '#22c55e';
       ctx.beginPath();
       ctx.ellipse(1, -6, 2.5, 1.4, -0.4, 0, Math.PI * 2);
       ctx.fill();
 
-      // Main berry body - Cluster of plump indigo-cyan segments
       const berryGrad = ctx.createRadialGradient(-2, -1, 1, 0, 1, 8.5);
       berryGrad.addColorStop(0, '#7dd3fc');
       berryGrad.addColorStop(0.35, '#38bdf8');
@@ -4328,13 +5227,11 @@ export default function OutskirtsLocation({
       ctx.strokeStyle = '#1e1b4b';
       ctx.lineWidth = 1.2;
 
-      // Base cluster circle
       ctx.beginPath();
       ctx.arc(0, 0, 6.8, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
 
-      // Segmented berry lobes
       ctx.fillStyle = '#38bdf8';
       ctx.beginPath();
       ctx.arc(-2.8, 2, 3.4, 0, Math.PI * 2);
@@ -4342,7 +5239,6 @@ export default function OutskirtsLocation({
       ctx.arc(0, -1.8, 3.8, 0, Math.PI * 2);
       ctx.fill();
 
-      // Specular highlight gleam
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
       ctx.arc(-1.6, -2.4, 1.4, 0, Math.PI * 2);
@@ -4467,9 +5363,9 @@ export default function OutskirtsLocation({
       if (entity.heldItem) {
         const itemType = (typeof entity.heldItem === 'string'
           ? entity.heldItem
-          : entity.heldItem?.type) as ItemType;
+          : entity.heldItem?.type) as ItemType | undefined;
 
-        if (itemType === 'spear' || itemType === 'rock' || itemType === 'berry') {
+        if (itemType) {
           drawWorldItem(ctx, {
             id: 'held-climb-display',
             type: itemType,
@@ -4481,6 +5377,8 @@ export default function OutskirtsLocation({
             isHeld: true,
             isStuck: false,
             isAirborne: false,
+            pearlVariant: typeof entity.heldItem === 'object' ? entity.heldItem?.pearlVariant : 0,
+            flyAlive: typeof entity.heldItem === 'object' ? entity.heldItem?.flyAlive : true,
           });
         }
       }
@@ -4504,9 +5402,9 @@ export default function OutskirtsLocation({
       if (entity.heldItem) {
         const itemType = (typeof entity.heldItem === 'string'
           ? entity.heldItem
-          : entity.heldItem?.type) as ItemType;
+          : entity.heldItem?.type) as ItemType | undefined;
 
-        if (itemType === 'spear' || itemType === 'rock' || itemType === 'berry') {
+        if (itemType) {
           drawWorldItem(ctx, {
             id: 'held-display',
             type: itemType,
@@ -4518,6 +5416,8 @@ export default function OutskirtsLocation({
             isHeld: true,
             isStuck: false,
             isAirborne: false,
+            pearlVariant: typeof entity.heldItem === 'object' ? entity.heldItem?.pearlVariant : 0,
+            flyAlive: typeof entity.heldItem === 'object' ? entity.heldItem?.flyAlive : true,
           });
         }
       }
@@ -4953,6 +5853,10 @@ export default function OutskirtsLocation({
     const liveSave = playerSaveRef.current;
     const saveX = Math.round(playerPosRef.current.x);
     const saveY = Math.round(playerPosRef.current.y);
+    const curRoomId = currentLocationRef.current.id;
+    const existingOtherPearls = (liveSave.shelterPearls || []).filter(p => p.roomId !== curRoomId);
+    const currentShelterPearls = getShelterPearlsSnapshotRef.current?.() || [];
+    const mergedShelterPearls = [...existingOtherPearls, ...currentShelterPearls];
 
     // In multiplayer: player falls asleep, becomes invulnerable, saves progress, and enters spectator mode
     if (isMultiplayerActiveRef.current) {
@@ -4966,10 +5870,11 @@ export default function OutskirtsLocation({
         maxKarma: 5,
         cycle: newCycle,
         food: newFood,
-        lastLocationId: currentLocationRef.current.id,
+        lastLocationId: curRoomId,
         playerSpawnX: saveX,
         playerSpawnY: saveY,
-        hibernated: true
+        hibernated: true,
+        shelterPearls: mergedShelterPearls
       };
 
       playerSaveRef.current = updatedSave;
@@ -4987,7 +5892,11 @@ export default function OutskirtsLocation({
       if (living.length > 0) {
         setSpectatedPeerId(living[0].id);
       }
-      setLastAction("😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано.");
+      setLastAction(
+        currentShelterPearls.length > 0
+          ? `😴 Ви заснули! Перлин збережено в укритті: ${currentShelterPearls.length}. Режим спостерігача.`
+          : "😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано."
+      );
       return;
     }
 
@@ -5009,10 +5918,11 @@ export default function OutskirtsLocation({
         maxKarma: 5,
         cycle: newCycle,
         food: newFood,
-        lastLocationId: currentLocationRef.current.id,
+        lastLocationId: curRoomId,
         playerSpawnX: Math.round(playerPosRef.current.x),
         playerSpawnY: Math.round(playerPosRef.current.y),
-        hibernated: true
+        hibernated: true,
+        shelterPearls: mergedShelterPearls
       };
 
       playerSaveRef.current = updatedSave;
@@ -5046,7 +5956,11 @@ export default function OutskirtsLocation({
         isHibernatingRef.current = false;
         setInShelterChamber(false);
         soundEngine.playShelterDoor();
-        setLastAction(`Успішна гібернація! Карма підвищена до ${newKarma}/5. Цикл ${newCycle} розпочато!`);
+        setLastAction(
+          currentShelterPearls.length > 0
+            ? `Успішна гібернація! Карма ${newKarma}/5 • Цикл ${newCycle} • Перлин в укритті: ${currentShelterPearls.length}!`
+            : `Успішна гібернація! Карма підвищена до ${newKarma}/5. Цикл ${newCycle} розпочато!`
+        );
       }, 1800);
     }, 1200);
   };
@@ -5143,21 +6057,21 @@ export default function OutskirtsLocation({
               onBack();
             }}
             className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border border-zinc-800 bg-zinc-950/80 hover:bg-zinc-900 text-zinc-400 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 text-xs font-mono tracking-wider shadow-sm active:scale-95"
-            title="Повернутися в головне меню"
+            title={t(lang, 'backToMenu')}
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            <span className="font-bold">МЕНЮ</span>
+            <span className="font-bold">{t(lang, 'backToMenu')}</span>
           </button>
 
           {/* Multiplayer Room indicator if connected */}
           {networkStatus === 'connected' && (
             <div 
               className="px-2 py-1 rounded-lg border border-emerald-500/50 bg-emerald-950/70 text-emerald-300 font-mono text-[10px] flex items-center gap-1 shadow-sm"
-              title={`Підключено до кімнати: ${webRTCManager.currentRoomId}`}
+              title={`${webRTCManager.currentRoomId}`}
             >
               <Globe className="w-3 h-3 text-emerald-400" />
               <span className="font-bold">{connectedPeersCount + 1}/12</span>
-              {networkPing > 0 && <span className="text-zinc-500 hidden sm:inline">({networkPing}мс)</span>}
+              {networkPing > 0 && <span className="text-zinc-500 hidden sm:inline">({networkPing}ms)</span>}
             </div>
           )}
 
@@ -5165,7 +6079,7 @@ export default function OutskirtsLocation({
           <button
             onClick={() => setShowLocationModal(true)}
             className="px-2 py-1.5 rounded-lg border border-amber-800/60 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 text-xs font-mono tracking-wider shadow-sm active:scale-95"
-            title="Переглянути та обрати готові локації Rain World"
+            title={t(lang, 'locationsTitle')}
           >
             <MapIcon className="w-3.5 h-3.5 text-amber-400" />
             <span className="font-bold hidden sm:inline">{currentLocation.name.split(' (')[0]}</span>
@@ -5178,7 +6092,7 @@ export default function OutskirtsLocation({
           {telemetry.state === 'dead' ? (
             <div className="px-3 py-1 rounded border border-red-800/80 bg-red-950/70 text-[10px] font-mono text-red-300 flex items-center gap-1.5 animate-pulse">
               <Skull className="w-3.5 h-3.5 text-red-400" />
-              <span>ЗАГИБЕЛЬ (0 HP)</span>
+              <span>0 HP</span>
             </div>
           ) : (
             <div className="px-3 py-1 rounded border border-zinc-800/40 bg-zinc-950/60 text-[10px] font-mono text-zinc-400 max-w-xs truncate flex items-center">
@@ -5189,33 +6103,31 @@ export default function OutskirtsLocation({
 
         {/* Right side compact controls */}
         <div className="flex items-center gap-1 sm:gap-2">
-          {/* Open in Standalone Tab Button */}
-          <a
-            href={window.location.href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="p-1.5 sm:px-2 rounded-lg border border-cyan-800/60 bg-cyan-950/40 hover:bg-cyan-900/60 text-cyan-300 hover:text-white transition-all cursor-pointer flex items-center gap-1 text-xs font-mono active:scale-95 shadow-sm"
-            title="Відкрити гру в окремій вкладці браузера без інтерфейсу Google AI Studio"
-          >
-            <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="hidden sm:inline font-bold">НОВА ВКЛАДКА</span>
-          </a>
-
           {/* Fullscreen Button */}
           <button
             onClick={toggleFullscreen}
             className="p-1.5 sm:px-2 rounded-lg border border-zinc-800 bg-zinc-950/80 hover:bg-zinc-900 text-zinc-300 hover:text-white transition-all cursor-pointer flex items-center gap-1 text-xs font-mono active:scale-95 shadow-sm"
-            title={isFullscreen ? 'Вийти з повного екрана' : 'Відкрити на повний екран'}
+            title={isFullscreen ? t(lang, 'fullscreenExit') : t(lang, 'fullscreenEnter')}
           >
             {isFullscreen ? <Minimize2 className="w-3.5 h-3.5 text-amber-400" /> : <Maximize2 className="w-3.5 h-3.5 text-amber-400" />}
-            <span className="hidden sm:inline font-bold">{isFullscreen ? 'ЗГОРНУТИ' : 'ЕКРАН'}</span>
+            <span className="hidden sm:inline font-bold">{isFullscreen ? t(lang, 'fullscreenExit') : t(lang, 'fullscreenEnter')}</span>
+          </button>
+
+          {/* Settings Button */}
+          <button
+            onClick={() => setShowSettingsModal(true)}
+            className="p-1.5 sm:px-2 rounded-lg border border-zinc-800 bg-zinc-950/80 hover:bg-zinc-900 text-zinc-300 hover:text-amber-300 transition-all cursor-pointer flex items-center gap-1 text-xs font-mono active:scale-95 shadow-sm"
+            title={t(lang, 'settings')}
+          >
+            <Settings className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden lg:inline font-bold">{t(lang, 'settings')}</span>
           </button>
 
           {/* Zoom Level Cycle Button */}
           <button
             onClick={cycleZoom}
             className="px-2 py-1 rounded-lg border border-amber-800/60 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 font-mono text-xs flex items-center gap-1 cursor-pointer transition-all active:scale-95 shadow-sm"
-            title="Змінити наближення камери (1.0x, 1.35x, 1.65x, 2.0x)"
+            title="Zoom (1.0x, 1.35x, 1.65x, 2.0x)"
           >
             <ZoomIn className="w-3 h-3 text-amber-400" />
             <span className="font-bold">{zoomLevel}x</span>
@@ -5229,17 +6141,16 @@ export default function OutskirtsLocation({
                 ? 'border-amber-700/80 bg-amber-950/40 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.2)]'
                 : 'border-zinc-800 bg-zinc-950/60 text-zinc-500 hover:text-zinc-300'
             }`}
-            title={showTouchControls ? 'Сховати екранні кнопки' : 'Показати екранні кнопки'}
+            title="Touch Controls"
           >
             <Gamepad2 className="w-3.5 h-3.5" />
           </button>
-
 
           {/* Mute toggle */}
           <button
             onClick={toggleSound}
             className="p-1.5 rounded-lg border border-zinc-800 bg-zinc-950/80 hover:bg-zinc-900 text-zinc-400 hover:text-white transition-all cursor-pointer active:scale-95"
-            title={isSoundMuted ? "Увімкнути звук" : "Вимкнути звук"}
+            title={isSoundMuted ? t(lang, 'soundOff') : t(lang, 'soundOn')}
           >
             {isSoundMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-amber-500" />}
           </button>
@@ -5250,7 +6161,9 @@ export default function OutskirtsLocation({
       <div className="relative flex-1 w-full max-w-5xl h-full flex items-center justify-center p-2 sm:p-4">
         
         {/* Soft vignette */}
-        <div className="absolute inset-0 pointer-events-none border border-zinc-900/10 rounded-2xl z-20 shadow-[inset_0_0_80px_rgba(0,0,0,0.85)]" />
+        {settings.graphics.vignette && (
+          <div className="absolute inset-0 pointer-events-none border border-zinc-900/10 rounded-2xl z-20 shadow-[inset_0_0_80px_rgba(0,0,0,0.85)]" />
+        )}
         
         {/* Canvas stage */}
         <div className="relative w-full aspect-[1000/580] max-h-[75vh] bg-black rounded-lg sm:rounded-2xl overflow-hidden border border-zinc-800/30 shadow-2xl">
@@ -5261,26 +6174,15 @@ export default function OutskirtsLocation({
             className="w-full h-full object-contain"
           />
 
-          {/* ON-CANVAS QUICK CONTROLS (FULLSCREEN & STANDALONE TAB) */}
+          {/* ON-CANVAS QUICK CONTROLS (FULLSCREEN) */}
           <div className="absolute top-2.5 right-2.5 z-30 flex items-center gap-1.5">
-            <a
-              href={window.location.href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2 py-1.5 rounded-lg bg-black/60 hover:bg-black/85 border border-white/20 text-white/90 hover:text-cyan-300 transition-all cursor-pointer backdrop-blur-sm active:scale-95 flex items-center gap-1.5 text-[10px] font-mono shadow-lg"
-              title="Відкрити гру в окремій чистій вкладці браузера (без інтерфейсу Google AI Studio)"
-            >
-              <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="hidden xs:inline font-bold">НОВА ВКЛАДКА</span>
-            </a>
-
             <button
               onClick={toggleFullscreen}
               className="px-2 py-1.5 rounded-lg bg-black/60 hover:bg-black/85 border border-white/20 text-white/90 hover:text-white transition-all cursor-pointer backdrop-blur-sm active:scale-95 flex items-center gap-1.5 text-[10px] font-mono shadow-lg"
-              title={isFullscreen ? 'Вийти з повного екрана' : 'Відкрити гру на повний екран'}
+              title={isFullscreen ? t(lang, 'fullscreenExit') : t(lang, 'fullscreenEnter')}
             >
               {isFullscreen ? <Minimize2 className="w-3.5 h-3.5 text-amber-400" /> : <Maximize2 className="w-3.5 h-3.5 text-amber-400" />}
-              <span className="hidden xs:inline font-bold">{isFullscreen ? 'ЗГОРНУТИ' : 'ПОВНИЙ ЕКРАН'}</span>
+              <span className="hidden xs:inline font-bold">{isFullscreen ? t(lang, 'fullscreenExit') : t(lang, 'fullscreenEnter')}</span>
             </button>
           </div>
 
@@ -5641,7 +6543,7 @@ export default function OutskirtsLocation({
 
                 {/* Map Footer Legend */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-zinc-800 text-[10px] text-zinc-400">
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
                     <span className="flex items-center gap-1 text-amber-300">
                       <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
                       Ви ({Math.round(telemetry.x)}, {Math.round(telemetry.y)})
@@ -5652,7 +6554,13 @@ export default function OutskirtsLocation({
                     </span>
                     <span className="flex items-center gap-1 text-sky-300">
                       <span className="w-2.5 h-2.5 rounded-full bg-sky-400 inline-block shadow-sm" />
-                      Ягід на карті: {telemetry.berriesCount}
+                      Ягід: {telemetry.berriesCount}
+                    </span>
+                    <span className="flex items-center gap-1 text-indigo-300">
+                      🦇 Кажанів: {telemetry.batfliesCount}
+                    </span>
+                    <span className="flex items-center gap-1 text-cyan-200">
+                      🦪 Перлин: {telemetry.pearlsCount} (у сховищі: {playerSave.shelterPearls?.length ?? 0})
                     </span>
                     <span className="flex items-center gap-1 text-amber-400">
                       <CircleDot className="w-3 h-3 text-amber-400" />
@@ -5710,8 +6618,8 @@ export default function OutskirtsLocation({
                   <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0" />
                   <span className="truncate text-zinc-300 text-[11px] sm:text-xs">
                     {isMultiplayerActive 
-                      ? 'Ви загинули. Очікуйте завершення поточного циклу або початку наступного.' 
-                      : 'Ви загинули. Цикл завершується — повернення до останнього укриття...'}
+                      ? t(lang, 'deadMulti')
+                      : t(lang, 'deadSingle')}
                   </span>
                 </div>
               </motion.div>
@@ -5731,12 +6639,12 @@ export default function OutskirtsLocation({
                   <div className="w-2.5 h-2.5 rounded-full bg-sky-400 animate-ping shrink-0" />
                   <div className="truncate text-left">
                     <span className="text-[10px] text-sky-400 uppercase tracking-widest block font-bold">
-                      😴 СПЛЯЧКА В УКРИТТІ • РЕЖИМ СПОСТЕРІГАЧА
+                      {t(lang, 'spectatorTitle')}
                     </span>
                     <span className="text-[11px] text-zinc-300 font-semibold truncate block">
                       {spectatedPeerId && webRTCManager.remotePlayers.get(spectatedPeerId)
-                        ? `Спостереження: ${webRTCManager.remotePlayers.get(spectatedPeerId)?.name} (${webRTCManager.remotePlayers.get(spectatedPeerId)?.room})`
-                        : 'Очікування активних гравців у циклі...'}
+                        ? `${webRTCManager.remotePlayers.get(spectatedPeerId)?.name} (${webRTCManager.remotePlayers.get(spectatedPeerId)?.room})`
+                        : '...'}
                     </span>
                   </div>
                 </div>
@@ -5845,8 +6753,8 @@ export default function OutskirtsLocation({
               
               {/* UPPER TIER: ITEM ACTIONS (GRAB, THROW) + CLIMB UP */}
               <div className="flex items-center gap-2 sm:gap-2.5">
-                {/* EAT BERRY BUTTON (visible when holding berry - zero latency!) */}
-                {(heldItemType === 'berry' || telemetry.heldItem === 'berry') && (
+                {/* EAT FOOD BUTTON (visible when holding berry or batfly - zero latency!) */}
+                {(heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly') && (
                   <button
                     id="touch-ctrl-eat"
                     type="button"
@@ -5857,7 +6765,7 @@ export default function OutskirtsLocation({
                         ? 'bg-amber-400 text-black border-amber-300 animate-pulse shadow-[0_0_20px_rgba(245,158,11,0.8)]' 
                         : 'bg-sky-950/90 hover:bg-sky-900 border-sky-400 text-sky-200 shadow-[0_0_15px_rgba(56,189,248,0.4)]'
                     } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
-                    title="З'їсти ягоду (заповнює 1 ячейку їжі)"
+                    title="З'їсти ягоду або муху-кажана (заповнює 1 ячейку їжі)"
                   >
                     <div className="w-3.5 h-3.5 rounded-full border-2 border-current mb-0.5 flex items-center justify-center">
                       <div className="w-1.5 h-1.5 rounded-full bg-current" />
@@ -6042,10 +6950,10 @@ export default function OutskirtsLocation({
                       isDangerSleep ? 'text-red-200' : isBlockedDry ? 'text-amber-300' : 'text-cyan-200'
                     }`}>
                       {isBlockedDry
-                        ? `НЕДОСТАТНЬО ЇЖІ (${foodCount}/${charConfig.requiredFood})`
+                        ? `${t(lang, 'sleepNotEnoughFood')} (${foodCount}/${charConfig.requiredFood})`
                         : isDangerSleep
-                        ? (sleepProgress > 0 ? `СМЕРТЬ ЧЕРЕЗ ГОЛОД ${Math.round(sleepProgress * 100)}%` : '⚠️ СПРОБА СНУ (ГОЛОДНИЙ У ЗЛИВУ = СМЕРТЬ)')
-                        : (sleepProgress > 0 ? `ЗАСИНАННЯ ${Math.round(sleepProgress * 100)}%` : 'ЗАТИСНІТЬ ДЛЯ СНУ')}
+                        ? (sleepProgress > 0 ? `${t(lang, 'sleepDeathHunger')} ${Math.round(sleepProgress * 100)}%` : t(lang, 'sleepDangerStorm'))
+                        : (sleepProgress > 0 ? `${t(lang, 'sleepSleeping')} ${Math.round(sleepProgress * 100)}%` : t(lang, 'sleepHoldPrompt'))}
                     </span>
                     {sleepProgress > 0 && (
                       <span className={`inline-block w-2 h-2 rounded-full animate-ping ${isDangerSleep ? 'bg-red-400' : 'bg-cyan-400'}`} />
@@ -6053,10 +6961,10 @@ export default function OutskirtsLocation({
                   </div>
                   <span className={`text-[9px] font-normal ${isDangerSleep ? 'text-red-300/90' : isBlockedDry ? 'text-amber-400/80' : 'text-cyan-300/80'}`}>
                     {isBlockedDry
-                      ? `Заповніть ${charConfig.requiredFood} обовʼязкові ячейки їжі, щоб спати`
+                      ? `${foodCount} / ${charConfig.requiredFood}`
                       : isDangerSleep
-                      ? 'У зливу без їжі сон смертельний!'
-                      : (sleepProgress > 0 ? 'Утримуйте до 100% щоб зберегти цикл' : 'Затисніть кнопку або клавіші [ПРОБІЛ / ВНИЗ]')}
+                      ? t(lang, 'sleepDeathHunger')
+                      : `[${formatKeyCode(settings.keybinds.jump, lang)} / ${formatKeyCode(settings.keybinds.moveDown, lang)}]`}
                   </span>
                 </div>
               </button>
@@ -6066,7 +6974,6 @@ export default function OutskirtsLocation({
       </AnimatePresence>
 
       {/* ---------------- AUTHENTIC RAIN WORLD HIBERNATION CINEMATIC ---------------- */}
-      {/* "типа не долєно на екрані менюшка появляться де можна нажать кнопку і тебе засейве там" */}
       <AnimatePresence>
         {isHibernating && (
           <motion.div
@@ -6108,13 +7015,13 @@ export default function OutskirtsLocation({
                 className="mt-6 space-y-1.5 font-mono"
               >
                 <div className="text-xl sm:text-2xl font-black tracking-widest text-white">
-                  ЦИКЛ {playerSave.cycle} ПРОЙДЕНО
+                  {lang === 'en' ? `CYCLE ${playerSave.cycle} COMPLETE` : `ЦИКЛ ${playerSave.cycle} ПРОЙДЕНО`}
                 </div>
                 <div className="text-xs sm:text-sm font-bold text-amber-400 tracking-wider">
-                  КАРМА ПІДВИЩЕНА ДО {playerSave.karma} / 5
+                  {lang === 'en' ? `KARMA INCREASED TO ${playerSave.karma} / 5` : `КАРМА ПІДВИЩЕНА ДО ${playerSave.karma} / 5`}
                 </div>
                 <div className="text-[11px] text-zinc-400 mt-2">
-                  Прогрес надійно збережено в укритті • Злива закінчується...
+                  {lang === 'en' ? 'Progress saved inside shelter • Storm subsiding...' : 'Прогрес надійно збережено в укритті • Злива закінчується...'}
                 </div>
               </motion.div>
             </motion.div>
@@ -6123,7 +7030,6 @@ export default function OutskirtsLocation({
       </AnimatePresence>
 
       {/* ---------------- LOCATION SELECTOR MODAL ---------------- */}
-      {/* "зроби сам пару локаций" */}
       <AnimatePresence>
         {showLocationModal && (
           <motion.div
@@ -6146,10 +7052,10 @@ export default function OutskirtsLocation({
                   </div>
                   <div>
                     <h2 className="text-sm sm:text-base font-bold text-amber-400">
-                      ГОТОВІ ЛОКАЦІЇ RAIN WORLD
+                      {t(lang, 'locationsTitle')}
                     </h2>
                     <p className="text-[10px] text-zinc-400">
-                      Оберіть одну з офіційно змодельованих кімнат для дослідження
+                      {t(lang, 'locationsSubtitle')}
                     </p>
                   </div>
                 </div>
@@ -6186,18 +7092,18 @@ export default function OutskirtsLocation({
                           </span>
                           {isCurrent && (
                             <span className="px-2 py-0.5 rounded-full text-[8px] font-mono font-bold bg-amber-500 text-black">
-                              ПОТОЧНА
+                              {t(lang, 'currentRoomTag')}
                             </span>
                           )}
                         </div>
                         <div className="text-[10px] text-zinc-400 flex items-center gap-3 font-mono">
-                          <span>Розмір: {loc.width}×{loc.height}</span>
+                          <span>{loc.width}×{loc.height}</span>
                           <span>•</span>
-                          <span>Платформ: {loc.platforms.length}</span>
+                          <span>Platforms: {loc.platforms.length}</span>
                           <span>•</span>
-                          <span>Труб: {loc.transitPipes.length}</span>
+                          <span>Pipes: {loc.transitPipes.length}</span>
                           <span>•</span>
-                          <span>Ягід: {loc.items.filter(i => i.type === 'berry').length}</span>
+                          <span>Berries: {loc.items.filter(i => i.type === 'berry').length}</span>
                         </div>
                       </div>
 
@@ -6212,7 +7118,7 @@ export default function OutskirtsLocation({
                             : 'bg-zinc-800 hover:bg-amber-600 hover:text-black text-zinc-200'
                         }`}
                       >
-                        {isCurrent ? 'ВИБРАНО' : 'УВІЙТИ'}
+                        {isCurrent ? t(lang, 'selectedTag') : t(lang, 'enterRoomBtn')}
                       </button>
                     </div>
                   );
@@ -6221,12 +7127,12 @@ export default function OutskirtsLocation({
 
               {/* Footer */}
               <div className="border-t border-zinc-800 pt-3 flex items-center justify-between text-[10px] font-mono text-zinc-500">
-                <span>Ви також можете створювати власні карти в Редакторі Локацій</span>
+                <span>Rain Game • World Rooms</span>
                 <button
                   onClick={() => setShowLocationModal(false)}
                   className="px-3 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 cursor-pointer"
                 >
-                  Закрити
+                  {t(lang, 'closeBtn')}
                 </button>
               </div>
             </motion.div>
@@ -6234,15 +7140,32 @@ export default function OutskirtsLocation({
         )}
       </AnimatePresence>
 
+      {/* IN-GAME SETTINGS MODAL */}
+      <SettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        isSoundMuted={isSoundMuted}
+        toggleSound={toggleSound}
+        resumeMusicCategory="game"
+      />
+
       {/* Persistent keyboard controls tips banner */}
       <div className="hidden md:flex items-center gap-3 text-[9px] font-mono text-zinc-500 uppercase tracking-widest pb-4 select-none">
-        <span>WASD або стрілочки — рух</span>
+        <span>
+          {formatKeyCode(settings.keybinds.moveUp, lang)}/{formatKeyCode(settings.keybinds.moveLeft, lang)}/{formatKeyCode(settings.keybinds.moveDown, lang)}/{formatKeyCode(settings.keybinds.moveRight, lang)} — {t(lang, 'moveHintWord')}
+        </span>
         <span>•</span>
-        <span>ПРОБІЛ — стрибок</span>
+        <span>
+          {formatKeyCode(settings.keybinds.jump, lang)} — {t(lang, 'jumpHintWord')}
+        </span>
         <span>•</span>
-        <span className="text-amber-400 font-bold">Z / E — взяти / покласти</span>
+        <span className="text-amber-400 font-bold">
+          {formatKeyCode(settings.keybinds.grab, lang)} — {t(lang, 'grabHintWord')}
+        </span>
         <span>•</span>
-        <span className="text-red-400 font-bold">X / Q — кинути спис / камінь</span>
+        <span className="text-red-400 font-bold">
+          {formatKeyCode(settings.keybinds.throwItem, lang)} — {t(lang, 'throwHintWord')}
+        </span>
       </div>
 
     </div>

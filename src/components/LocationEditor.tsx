@@ -28,8 +28,12 @@ type ToolMode =
   | 'vertical_pole'
   | 'transit_pipe'
   | 'spear'
+  | 'explosive_spear'
   | 'rock'
   | 'berry'
+  | 'cherrybomb'
+  | 'pearl'
+  | 'batfly'
   | 'player_spawn'
   | 'npc_spawn'
   | 'eraser';
@@ -263,15 +267,33 @@ export default function LocationEditor({
     }
 
     // Direct Placement Items
-    if (activeTool === 'spear' || activeTool === 'rock' || activeTool === 'berry') {
+    if (
+      activeTool === 'spear' ||
+      activeTool === 'explosive_spear' ||
+      activeTool === 'rock' ||
+      activeTool === 'berry' ||
+      activeTool === 'cherrybomb' ||
+      activeTool === 'pearl' ||
+      activeTool === 'batfly'
+    ) {
       const newItem: EditorSpawnItem = {
         id: `item-${activeTool}-${Date.now()}`,
         type: activeTool,
         x: worldPos.x,
-        y: worldPos.y
+        y: worldPos.y,
+        ...(activeTool === 'pearl' ? { pearlVariant: Math.floor(Math.random() * 4) } : {}),
       };
       setLocation(prev => ({ ...prev, items: [...prev.items, newItem] }));
-      showToast(`Додано: ${activeTool === 'spear' ? 'Спис' : activeTool === 'rock' ? 'Камінь' : 'Ягоду'}`);
+      const labelMap: Record<string, string> = {
+        spear: 'Спис',
+        explosive_spear: 'Вибуховий спис',
+        rock: 'Камінь',
+        berry: 'Ягода',
+        cherrybomb: 'Бомба-рослина',
+        pearl: 'Перлина',
+        batfly: 'Муха-кажан',
+      };
+      showToast(`Додано: ${labelMap[activeTool] || activeTool}`);
       if (!isSoundMuted) soundEngine.playPickup();
       return;
     }
@@ -408,15 +430,33 @@ export default function LocationEditor({
       }
 
       // Direct Placement Items
-      if (activeTool === 'spear' || activeTool === 'rock' || activeTool === 'berry') {
+      if (
+        activeTool === 'spear' ||
+        activeTool === 'explosive_spear' ||
+        activeTool === 'rock' ||
+        activeTool === 'berry' ||
+        activeTool === 'cherrybomb' ||
+        activeTool === 'pearl' ||
+        activeTool === 'batfly'
+      ) {
         const newItem: EditorSpawnItem = {
           id: `item-${activeTool}-${Date.now()}`,
           type: activeTool,
           x: worldPos.x,
-          y: worldPos.y
+          y: worldPos.y,
+          ...(activeTool === 'pearl' ? { pearlVariant: Math.floor(Math.random() * 4) } : {}),
         };
         setLocation(prev => ({ ...prev, items: [...prev.items, newItem] }));
-        showToast(`Додано: ${activeTool === 'spear' ? 'Спис' : activeTool === 'rock' ? 'Камінь' : 'Ягоду'}`);
+        const labelMap: Record<string, string> = {
+          spear: 'Спис',
+          explosive_spear: 'Вибуховий спис',
+          rock: 'Камінь',
+          berry: 'Ягода',
+          cherrybomb: 'Бомба-рослина',
+          pearl: 'Перлина',
+          batfly: 'Муха-кажан',
+        };
+        showToast(`Додано: ${labelMap[activeTool] || activeTool}`);
         if (!isSoundMuted) soundEngine.playPickup();
         return;
       }
@@ -829,6 +869,63 @@ export default function LocationEditor({
         ctx.font = '9px monospace';
         ctx.textAlign = 'center';
         ctx.fillText('КАМІНЬ', item.x, item.y - 8);
+      } else if (item.type === 'explosive_spear') {
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        ctx.moveTo(item.x - 18, item.y);
+        ctx.lineTo(item.x + 18, item.y);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ef4444';
+        ctx.fillRect(item.x + 4, item.y - 3, 12, 6);
+
+        ctx.fillStyle = '#fb7185';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('ВИБ.СПИС', item.x, item.y - 7);
+      } else if (item.type === 'cherrybomb') {
+        ctx.fillStyle = '#dc2626';
+        ctx.beginPath();
+        ctx.arc(item.x - 4, item.y + 1, 4.5, 0, Math.PI * 2);
+        ctx.arc(item.x + 4, item.y + 2, 4.5, 0, Math.PI * 2);
+        ctx.arc(item.x, item.y - 3, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#fda4af';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('БОМБА', item.x, item.y - 9);
+      } else if (item.type === 'pearl') {
+        ctx.fillStyle = '#e0f2fe';
+        ctx.beginPath();
+        ctx.arc(item.x, item.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+
+        ctx.fillStyle = '#bae6fd';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('ПЕРЛИНА', item.x, item.y - 8);
+      } else if (item.type === 'batfly') {
+        ctx.fillStyle = '#18181b';
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.ellipse(item.x - 6, item.y - 2, 6, 3, -0.3, 0, Math.PI * 2);
+        ctx.ellipse(item.x + 6, item.y - 2, 6, 3, 0.3, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(item.x, item.y, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#fde68a';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('МУХА', item.x, item.y - 9);
       } else if (item.type === 'berry') {
         // Blue berry icon
         ctx.fillStyle = '#38bdf8';
@@ -1171,6 +1268,19 @@ export default function LocationEditor({
             </button>
 
             <button
+              onClick={() => setActiveTool('explosive_spear')}
+              className={`p-1.5 rounded-lg border flex flex-col items-center justify-center text-[10px] font-mono font-bold transition-all cursor-pointer ${
+                activeTool === 'explosive_spear'
+                  ? 'bg-rose-500/25 border-rose-400 text-rose-200'
+                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+              title="Поставити Вибуховий спис"
+            >
+              <span className="text-rose-400 font-black">🧨</span>
+              <span>Виб.Спис</span>
+            </button>
+
+            <button
               onClick={() => setActiveTool('rock')}
               className={`p-1.5 rounded-lg border flex flex-col items-center justify-center text-[10px] font-mono font-bold transition-all cursor-pointer ${
                 activeTool === 'rock'
@@ -1194,6 +1304,45 @@ export default function LocationEditor({
             >
               <span className="text-sky-300 font-black">🫐</span>
               <span>Ягода</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTool('cherrybomb')}
+              className={`p-1.5 rounded-lg border flex flex-col items-center justify-center text-[10px] font-mono font-bold transition-all cursor-pointer ${
+                activeTool === 'cherrybomb'
+                  ? 'bg-red-600/25 border-red-400 text-red-200'
+                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+              title="Поставити Вибухову бомбу-рослину"
+            >
+              <span className="text-red-400 font-black">🍒</span>
+              <span>Бомба</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTool('pearl')}
+              className={`p-1.5 rounded-lg border flex flex-col items-center justify-center text-[10px] font-mono font-bold transition-all cursor-pointer ${
+                activeTool === 'pearl'
+                  ? 'bg-cyan-500/25 border-cyan-300 text-cyan-200'
+                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+              title="Поставити Перлину"
+            >
+              <span className="text-cyan-200 font-black">🦪</span>
+              <span>Перлина</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTool('batfly')}
+              className={`col-span-3 p-1.5 rounded-lg border flex items-center justify-center gap-1.5 text-[10px] font-mono font-bold transition-all cursor-pointer ${
+                activeTool === 'batfly'
+                  ? 'bg-amber-500/20 border-amber-300 text-amber-200'
+                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+              title="Поставити Муху-кажана"
+            >
+              <span className="font-black">🦇</span>
+              <span>Муха-кажан</span>
             </button>
           </div>
 
@@ -1380,6 +1529,10 @@ export default function LocationEditor({
                 { id: 'vertical_pole', label: 'Жердина', icon: '║' },
                 { id: 'transit_pipe', label: 'Труба', icon: '◎-◎' },
                 { id: 'spear', label: 'Спис', icon: '🗡️' },
+                { id: 'explosive_spear', label: 'Виб.Спис', icon: '🧨' },
+                { id: 'cherrybomb', label: 'Бомба', icon: '🍒' },
+                { id: 'pearl', label: 'Перлина', icon: '🦪' },
+                { id: 'batfly', label: 'Муха', icon: '🦇' },
                 { id: 'berry', label: 'Ягода', icon: '🫐' },
                 { id: 'select', label: 'Огляд', icon: '✋' },
                 { id: 'eraser', label: 'Гумка', icon: '❌' },

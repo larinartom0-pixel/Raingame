@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Sparkles } from 'lucide-react';
+import { useGameSettings } from '../settings';
+import { LOADING_TIPS_I18N, t } from '../i18n';
 
 interface LoadingScreenProps {
   isLoading: boolean;
@@ -8,16 +10,10 @@ interface LoadingScreenProps {
   title?: string;
 }
 
-const RAIN_WORLD_TIPS = [
-  'Порада: Рожевий ящер може лазити по жердинах і стінах! Тримайте дистанцію.',
-  'Порада: Якщо ящер схопив вас, не здавайтеся — при звільненні від оглушення ящер відпустить вас і буде оглушений на 5 секунд!',
-  'Порада: Затисніть [ВНИЗ] для повзання. Якщо під час повзання затиснути стрибок на 1.8 с — ви зробите високий ривок (Pounce)!',
-  'Порада: Ящери в першу чергу намагаються затягнути у лігво трупи, ніж нападати на живих.',
-  'Порада: Камінь може відбити голову ящера та оглушити його, а спис наносить 1.0 шкоди.',
-  'Порада: Для безпечної сплячки в укритті потрібно щонайменше 4 ячейки їжі.'
-];
-
-export default function LoadingScreen({ isLoading, onFinished, title = 'ЗАВАНТАЖЕННЯ СВІТУ' }: LoadingScreenProps) {
+export default function LoadingScreen({ isLoading, onFinished, title }: LoadingScreenProps) {
+  const { language } = useGameSettings();
+  const tips = LOADING_TIPS_I18N[language];
+  const resolvedTitle = title || t(language, 'loadingDefault');
   const [progress, setProgress] = useState(0);
   const [tipIndex, setTipIndex] = useState(0);
 
@@ -39,14 +35,14 @@ export default function LoadingScreen({ isLoading, onFinished, title = 'ЗАВА
     }, 120);
 
     const tipInterval = setInterval(() => {
-      setTipIndex(prev => (prev + 1) % RAIN_WORLD_TIPS.length);
+      setTipIndex(prev => (prev + 1) % tips.length);
     }, 2800);
 
     return () => {
       clearInterval(interval);
       clearInterval(tipInterval);
     };
-  }, [isLoading]);
+  }, [isLoading, tips.length]);
 
   return (
     <AnimatePresence onExitComplete={onFinished}>
@@ -105,10 +101,10 @@ export default function LoadingScreen({ isLoading, onFinished, title = 'ЗАВА
             {/* Title & Progress Label */}
             <div className="mt-6 text-center space-y-1">
               <h2 className="text-sm sm:text-base font-bold font-mono tracking-[0.25em] text-white">
-                {title}
+                {resolvedTitle}
               </h2>
               <p className="text-[11px] font-mono text-zinc-400">
-                Синхронізація екосистеми та поведінки ящерів... {Math.min(100, progress)}%
+                {t(language, 'loadingProgressLabel')} {Math.min(100, progress)}%
               </p>
             </div>
 
@@ -133,7 +129,7 @@ export default function LoadingScreen({ isLoading, onFinished, title = 'ЗАВА
                 transition={{ duration: 0.35 }}
                 className="text-[11px] sm:text-xs font-mono text-zinc-400 bg-black/60 border border-zinc-800/80 px-4 py-2.5 rounded-xl shadow-lg leading-relaxed"
               >
-                {RAIN_WORLD_TIPS[tipIndex]}
+                {tips[tipIndex % tips.length]}
               </motion.p>
             </AnimatePresence>
           </div>

@@ -13,9 +13,9 @@ export function isValidSemver(ver: string): boolean {
 export const APP_VERSION: string = (() => {
   const candidate =
     (devInjectedVersion && devInjectedVersion.trim()) ||
-    (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.4.4');
+    (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.5.0');
   const clean = String(candidate).replace(/^v/i, '').trim();
-  return isValidSemver(clean) ? clean : '1.4.4';
+  return isValidSemver(clean) ? clean : '1.5.0';
 })();
 
 export function compareVersions(a: string, b: string): number {
