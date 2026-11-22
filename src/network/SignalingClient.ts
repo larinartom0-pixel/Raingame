@@ -61,16 +61,16 @@ export class SignalingClient {
     }
   }
 
-  public async listRooms(): Promise<RoomInfo[]> {
+  public async listRoomsDetailed(): Promise<{ ok: boolean; rooms: RoomInfo[] }> {
     try {
       const res = await fetch(this.withGameId('/api/rooms'), {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(5000)
+        signal: AbortSignal.timeout(8500)
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const raw: RoomInfo[] = await res.json();
-      return (Array.isArray(raw) ? raw : []).map((room) => {
+      const rooms = (Array.isArray(raw) ? raw : []).map((room) => {
         const version = extractRoomVersion(room.name, room.version);
         return {
           ...room,
@@ -78,10 +78,16 @@ export class SignalingClient {
           version,
         };
       });
+      return { ok: true, rooms };
     } catch (err) {
       console.warn('Signaling listRooms error:', err);
-      return [];
+      return { ok: false, rooms: [] };
     }
+  }
+
+  public async listRooms(): Promise<RoomInfo[]> {
+    const res = await this.listRoomsDetailed();
+    return res.rooms;
   }
 
   public async createRoom(params: {

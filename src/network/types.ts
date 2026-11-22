@@ -21,6 +21,7 @@ export interface RemotePlayer {
   isGrounded: boolean;
   lastUpdateTimestamp: number;
   pingMs: number;
+  offline?: boolean;
 
   // Piggyback carrying mechanic
   carriedBy?: string | null;
@@ -268,4 +269,33 @@ export type NetworkPacket =
       senderId: string;
       requiredVersion: string;
       reason: string;
+    }
+  | {
+      type: 'PEER_STATE_RESTORE';
+      senderId: string;
+      targetId: string;
+      room: string;
+      x: number;
+      y: number;
+      facingRight: boolean;
+      state: 'normal' | 'stunned' | 'dead' | 'sleeping';
+      hp: number;
+      maxHp: number;
+      stunTimer: number;
+      heldItem: ItemType | null;
+      foodCount?: number;
+    }
+  | {
+      type: 'OFFLINE_PEERS_SYNC';
+      senderId: string;
+      bodies: RemotePlayer[];
+    }
+  | {
+      type: 'CYCLE_ENDED';
+      hostId: string;
+      outcome: 'hibernation' | 'death';
+      reason?: string;
+      nextCycleDuration: number;
+      survivorIds: string[];
+      deadIds: string[];
     };

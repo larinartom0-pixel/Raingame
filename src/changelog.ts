@@ -13,6 +13,34 @@ export interface ChangelogEntry {
 
 export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
   {
+    version: '1.6.0',
+    date: '2026-11-22',
+    title: {
+      uk: 'Виправлення сну та спостереження, збереження тіла хостом, значки карми й новий екран циклу',
+      en: 'Sleep & Spectator Fixes, Host State Persistence, Karma Symbols & Cycle End Screen',
+    },
+    changes: {
+      uk: [
+        'Виправлено баг телепортації під час спостереження: коли гравець спить в укритті та стежить за іншим гравцем, перемикається лише камера — його слимакокіт фізично залишається у своєму укритті.',
+        'Повністю заблоковано рух, дії та переходи між локаціями під час сну, а сам слимакокіт тепер виразно скручується клубочком, підгинає лапки, заплющує очі й показує анімацію «z Z» і значок 💤 біля ніку.',
+        'Покращено підключення в мультиплеєрному лобі: виправлено помилкове створення окремої кімнати при вході, збільшено таймаути сигналінгу, додано повторну перевірку списку кімнат та вхід по кліку на всю картку кімнати.',
+        'Додано збереження стану гравців у хоста на весь цикл: якщо гравець вийшов або перезавантажив сторінку, його слимакокіт залишається фізично на своєму місці (видимий іншим), а при поверненні відновлюється позиція, кімната, здоровʼя та смерть (не можна ожити перезаходом).',
+        'Урон від штормового дощу тепер рахується як загроза та автоматично вмикає музику небезпеки.',
+        'Прискорено завершення циклу в мультиплеєрі та одиночній грі, коли всі живі гравці сплять або всі загинули.',
+        'Оновлено дизайн значків карми (1–5 рівні) у HUD та додано новий кінематографічний екран завершення циклу з підсумком карми, їжі, збережених перлин і списком виживших/загиблих.',
+      ],
+      en: [
+        'Fixed the sleep-spectating teleport bug: spectating another player now switches only the spectator camera while your slugcat stays physically inside your shelter.',
+        'Locked all movement, actions, and manual room transitions while sleeping, and added a curled sleeping pose with tucked arms, soft glow, animated rising "z Z" FX, and a 💤 nametag indicator.',
+        'Fixed lobby matchmaking/room joining randomly spawning a separate room: increased signaling timeouts, added list retry & concurrency guards, and made full room cards clickable.',
+        'Added host-side cycle state persistence: disconnected or reloaded players leave their slugcat physically at their last spot in the world and automatically restore their room, position, health, and death state on rejoin (preventing death-relog exploits).',
+        'Lethal storm rain damage now counts as active danger and triggers danger/battle music.',
+        'Made cycles end quickly once all living players are asleep or all players are dead (both multiplayer and singleplayer).',
+        'Upgraded Karma 1–5 geometric symbols in the HUD and added a new Cycle End overlay showing karma progression, food tally, stored pearls, and survivors/fallen.',
+      ],
+    },
+  },
+  {
     version: '1.5.0',
     date: '2026-11-22',
     title: {

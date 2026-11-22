@@ -24,6 +24,7 @@ import {
 } from '../types';
 import { APP_VERSION, compareVersions } from '../version';
 import SettingsModal from './SettingsModal';
+import KarmaSymbol, { getKarmaLabel } from './KarmaSymbol';
 import { useGameSettings, formatKeyCode, KeyBindings, GameSettings } from '../settings';
 import { t } from '../i18n';
 
@@ -47,7 +48,7 @@ export const getRandomCycleSeconds = (): number => {
 const CANVAS_WIDTH = 1000;
 const CANVAS_HEIGHT = 580;
 
-export type SlugcatState = 'normal' | 'stunned' | 'dead';
+export type SlugcatState = 'normal' | 'stunned' | 'dead' | 'sleeping';
 export type { ItemType };
 
 interface Platform {
@@ -424,6 +425,7 @@ export default function OutskirtsLocation({
   const lizardCombatTimerRef = useRef<number>(0);
   const pvpCombatTimerRef = useRef<number>(0);
   const pvpTargetPeerIdRef = useRef<string | null>(null);
+  const rainDangerTimerRef = useRef<number>(0);
 
   // Piggyback carrying mechanic
   // "додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз..."
@@ -437,7 +439,6 @@ export default function OutskirtsLocation({
   const triggerPiggybackRef = useRef<(() => void) | null>(null);
 
   // Sleep indicator and multiplayer Spectator Mode
-  // "пофікси сон я зажимаю кнопку прижка а слизне кот не спить... а для мультиплеєра це буде як типа він спить то його ранить нельзя... наблюдатель"
   const [sleepProgress, setSleepProgress] = useState<number>(0);
   const [isHoldingSleepBtn, setIsHoldingSleepBtn] = useState<boolean>(false);
   const isHoldingSleepBtnRef = useRef<boolean>(false);
@@ -452,6 +453,53 @@ export default function OutskirtsLocation({
   useEffect(() => {
     spectatedPeerIdRef.current = spectatedPeerId;
   }, [spectatedPeerId]);
+
+  interface FrozenBodySnapshot {
+    roomId: string;
+    x: number;
+    y: number;
+    facingRight: boolean;
+    characterId: SlugcatCharacterId;
+    state: 'sleeping' | 'dead';
+    hp: number;
+    maxHp: number;
+    stunTimer: number;
+    heldItem: ItemType | null;
+    head: { x: number; y: number; vx: number; vy: number };
+    chest: { x: number; y: number; vx: number; vy: number };
+    hips: { x: number; y: number; vx: number; vy: number };
+    tail: Array<{ x: number; y: number }>;
+  }
+  const frozenBodyRef = useRef<FrozenBodySnapshot | null>(null);
+
+  interface PersistedPeerRecord extends RemotePlayer {
+    connected: boolean;
+    restoreGraceUntil: number;
+    foodCount?: number;
+  }
+  const persistedPeersRef = useRef<Map<string, PersistedPeerRecord>>(new Map());
+  const offlineBodiesRef = useRef<Map<string, RemotePlayer>>(new Map());
+
+  interface CycleEndOverlayState {
+    outcome: 'hibernation' | 'death';
+    oldKarma: number;
+    newKarma: number;
+    cycleNumber: number;
+    foodCount: number;
+    requiredFood: number;
+    maxFood: number;
+    shelterName: string;
+    pearls: ShelterPearlSave[];
+    survivorNames: string[];
+    fallenNames: string[];
+    reason?: string;
+  }
+  const [cycleEndOverlay, setCycleEndOverlay] = useState<CycleEndOverlayState | null>(null);
+  const cycleEndOverlayRef = useRef<CycleEndOverlayState | null>(null);
+  useEffect(() => {
+    cycleEndOverlayRef.current = cycleEndOverlay;
+  }, [cycleEndOverlay]);
+  const cycleEndTriggeredRef = useRef<boolean>(false);
 
   // GitHub Version Polling & Auto-Restart Screen State (no native browser dialogs)
   const [updateCountdown, setUpdateCountdown] = useState<number | null>(null);
@@ -638,6 +686,8 @@ export default function OutskirtsLocation({
   const triggerThrowRef = useRef<(() => void) | null>(null);
   const triggerEatRef = useRef<(() => void) | null>(null);
   const triggerHibernateRef = useRef<(() => void) | null>(null);
+  const enterSleepAnchorRef = useRef<(() => void) | null>(null);
+  const triggerCycleEndFlowRef = useRef<((outcome: 'hibernation' | 'death', nextCycleDuration?: number, survivorIds?: string[], deadIds?: string[], reason?: string) => void) | null>(null);
   const triggerChangeLocationRef = useRef<((loc: CustomLocationData) => void) | null>(null);
   const getShelterPearlsSnapshotRef = useRef<(() => ShelterPearlSave[]) | null>(null);
 
@@ -1065,28 +1115,97 @@ export default function OutskirtsLocation({
       transitionToLocation(loc, undefined, undefined, undefined, `Перехід до локації: ${loc.name}`);
     };
 
-    const restartCycleFromSavedShelter = () => {
-      const cfg = charConfigRef.current;
-      const save = playerSaveRef.current;
-      const savedLoc = getLocationById(save.lastLocationId) || SHELTER_OUTSKIRTS_LOCATION;
-      const newKarma = Math.max(1, save.karma - 1);
-      const resetFood = Math.min(cfg.maxFood, save.food ?? 0);
+    // Switch only the rendered/camera room for a sleeping or dead spectator without teleporting their physical body!
+    const switchSpectatorViewRoom = (targetLoc: CustomLocationData, focusX?: number, focusY?: number) => {
+      if (activeLoc.id === targetLoc.id) return;
+      syncRoomItemsCache(activeLoc.id, items);
+      activeLoc = targetLoc;
+      activeEnv = getRoomEnv(targetLoc);
+      currentLocationRef.current = targetLoc;
 
-      const updatedSave: PlayerSaveData = {
-        ...save,
-        karma: newKarma,
-        lastLocationId: savedLoc.id,
-        hibernated: false
-      };
-      playerSaveRef.current = updatedSave;
-      setPlayerSave(updatedSave);
-      foodCountRef.current = resetFood;
-      setFoodCount(resetFood);
-      try {
-        localStorage.setItem('rain_world_player_progress', JSON.stringify(updatedSave));
-      } catch (e) {
-        console.warn('Failed to save progress on cycle restart:', e);
+      items.length = 0;
+      if (isWorldAuthority()) {
+        const roomItems = getOrInitRoomItems(targetLoc);
+        for (const it of roomItems) {
+          items.push(it);
+        }
       }
+
+      const zw = CANVAS_WIDTH / zoomRef.current;
+      const zh = CANVAS_HEIGHT / zoomRef.current;
+      const fx = focusX ?? targetLoc.playerSpawn?.x ?? activeEnv.width / 2;
+      const fy = focusY ?? targetLoc.playerSpawn?.y ?? activeEnv.height / 2;
+      camera.x = Math.max(0, Math.min(Math.max(0, activeEnv.width - zw), fx - zw / 2));
+      camera.y = Math.max(0, Math.min(Math.max(0, activeEnv.height - zh), fy - zh / 2));
+
+      refreshActiveRoomLizard();
+      setCurrentLocation(targetLoc);
+      setInShelterChamber(!!targetLoc.isShelterRoom);
+      inShelterChamberRef.current = !!targetLoc.isShelterRoom;
+
+      if (!isWorldAuthority() && webRTCManager.connectionStatus === 'connected') {
+        webRTCManager.broadcastPacket({
+          type: 'REQUEST_WORLD_SYNC',
+          senderId: webRTCManager.localPlayerId,
+          room: targetLoc.id
+        });
+      }
+    };
+
+    const freezeLocalPlayerBody = (freezeState: 'sleeping' | 'dead') => {
+      if (isEating) {
+        isEating = false;
+        eatingTimer = 0;
+        setIsEating(false);
+        setEatingProgress(0);
+      }
+      resetControlsActionRef.current?.();
+      player.state = freezeState;
+      player.vx = 0;
+      player.vy = 0;
+      player.isClimbing = false;
+      player.crouching = freezeState === 'sleeping';
+      const existingAnchor = frozenBodyRef.current;
+      const anchorRoomId = existingAnchor?.roomId || activeLoc.id;
+      const anchorX = existingAnchor ? existingAnchor.x : player.x;
+      const anchorY = existingAnchor ? existingAnchor.y : player.y;
+      frozenBodyRef.current = {
+        roomId: anchorRoomId,
+        x: anchorX,
+        y: anchorY,
+        facingRight: existingAnchor ? existingAnchor.facingRight : player.facingRight,
+        characterId: charConfigRef.current.id,
+        state: freezeState,
+        hp: freezeState === 'dead' ? 0 : player.hp,
+        maxHp: player.maxHp,
+        stunTimer: 0,
+        heldItem: player.heldItem ? player.heldItem.type : null,
+        head: { ...player.head },
+        chest: { ...player.chest },
+        hips: { ...player.hips },
+        tail: player.tail.map(tp => ({ ...tp }))
+      };
+    };
+
+    enterSleepAnchorRef.current = () => {
+      freezeLocalPlayerBody('sleeping');
+    };
+
+    const resetWorldForNewCycle = (nextDurationSeconds: number, savedLoc: CustomLocationData, saveData: PlayerSaveData) => {
+      const cfg = charConfigRef.current;
+      frozenBodyRef.current = null;
+      persistedPeersRef.current.clear();
+      offlineBodiesRef.current.clear();
+      cycleEndTriggeredRef.current = false;
+      setCycleEndOverlay(null);
+      cycleEndOverlayRef.current = null;
+      setIsSpectating(false);
+      isSpectatingRef.current = false;
+      setSpectatedPeerId(null);
+      spectatedPeerIdRef.current = null;
+      setIsHoldingSleepBtn(false);
+      isHoldingSleepBtnRef.current = false;
+      setSleepProgress(0);
 
       player.state = 'normal';
       player.hp = cfg.maxHp;
@@ -1094,6 +1213,8 @@ export default function OutskirtsLocation({
       player.characterId = cfg.id;
       player.stunTimer = 0;
       player.ragdollAngle = 0;
+      player.crouching = false;
+      player.isClimbing = false;
       if (player.heldItem) {
         player.heldItem = null;
         setHeldItemType(null);
@@ -1106,24 +1227,149 @@ export default function OutskirtsLocation({
       lizardCombatTimerRef.current = 0;
       pvpCombatTimerRef.current = 0;
       pvpTargetPeerIdRef.current = null;
+      rainDangerTimerRef.current = 0;
 
-      const freshDuration = getRandomCycleSeconds();
-      setCycleTotalDuration(freshDuration);
-      setCycleSecondsLeft(freshDuration);
+      setCycleTotalDuration(nextDurationSeconds);
+      setCycleSecondsLeft(nextDurationSeconds);
       setStormActive(false);
       setStormSeconds(0);
       soundEngine.setStormVolume(0);
       soundEngine.resetConcussion();
       setIsDead(false);
+      setIsHibernating(false);
+      isHibernatingRef.current = false;
 
       transitionToLocation(
         savedLoc,
-        save.playerSpawnX,
-        save.playerSpawnY,
+        saveData.playerSpawnX,
+        saveData.playerSpawnY,
         undefined,
-        `🔄 Цикл закінчився! Новий цикл розпочато з останнього укриття: ${savedLoc.name} (Карма ${newKarma}/5).`
+        `🔄 Цикл ${saveData.cycle} розпочато • Укриття: ${savedLoc.name} (Карма ${saveData.karma}/5)`
       );
+
+      if (isWorldAuthority() && webRTCManager.remotePlayers.size > 0) {
+        sendAuthoritativeItemsSync();
+        sendAuthoritativeLizardsSync();
+        sendOfflinePeersSync();
+      }
     };
+
+    const runCycleEndFlow = (
+      globalOutcome: 'hibernation' | 'death',
+      providedNextDuration?: number,
+      survivorIds?: string[],
+      deadIds?: string[],
+      reason?: string
+    ) => {
+      if (cycleEndTriggeredRef.current) return;
+      cycleEndTriggeredRef.current = true;
+      resetControlsActionRef.current?.();
+
+      const cfg = charConfigRef.current;
+      const save = playerSaveRef.current;
+      const oldKarma = save.karma;
+      const localWasDead = player.state === 'dead';
+      const localSlept = !localWasDead && (globalOutcome === 'hibernation' || player.state === 'sleeping' || isSpectatingRef.current);
+
+      const personalOutcome: 'hibernation' | 'death' = localSlept ? 'hibernation' : 'death';
+      const newKarma = personalOutcome === 'hibernation'
+        ? Math.min(5, oldKarma + 1)
+        : Math.max(1, oldKarma - 1);
+      const nextCycle = personalOutcome === 'hibernation' ? save.cycle + 1 : save.cycle;
+
+      let nextFood = Math.min(cfg.maxFood, foodCountRef.current);
+      let nextLocId = save.lastLocationId;
+      let nextSpawnX = save.playerSpawnX;
+      let nextSpawnY = save.playerSpawnY;
+      let nextPearls = save.shelterPearls || [];
+
+      if (personalOutcome === 'hibernation') {
+        const physRoomId = frozenBodyRef.current?.roomId || activeLoc.id;
+        const physLoc = getLocationById(physRoomId);
+        if (physLoc?.isShelterRoom) {
+          nextLocId = physLoc.id;
+          nextSpawnX = Math.round(frozenBodyRef.current?.x ?? player.x);
+          nextSpawnY = Math.round(frozenBodyRef.current?.y ?? player.y);
+          const otherPearls = (save.shelterPearls || []).filter(p => p.roomId !== physLoc.id);
+          const roomItemsList = physLoc.id === activeLoc.id ? items : getOrInitRoomItems(physLoc);
+          const curShelterPearls = roomItemsList
+            .filter(it => it.type === 'pearl' && (!it.isHeld || it.heldBy === 'player'))
+            .map((it, idx) => ({
+              id: it.id,
+              pearlVariant: it.pearlVariant ?? (idx % 4),
+              roomId: physLoc.id,
+              x: Math.round(it.isHeld ? nextSpawnX + 12 : it.x),
+              y: Math.round(it.isHeld ? nextSpawnY + 24 : it.y),
+            }));
+          nextPearls = [...otherPearls, ...curShelterPearls];
+        }
+        if (!save.hibernated || isMultiplayerActiveRef.current) {
+          nextFood = Math.max(0, foodCountRef.current - cfg.requiredFood);
+        }
+      } else {
+        nextFood = Math.min(cfg.maxFood, save.food ?? 0);
+      }
+
+      const savedLoc = getLocationById(nextLocId) || SHELTER_OUTSKIRTS_LOCATION;
+      const updatedSave: PlayerSaveData = {
+        karma: newKarma,
+        maxKarma: 5,
+        cycle: nextCycle,
+        food: nextFood,
+        lastLocationId: savedLoc.id,
+        playerSpawnX: nextSpawnX,
+        playerSpawnY: nextSpawnY,
+        hibernated: personalOutcome === 'hibernation',
+        shelterPearls: nextPearls
+      };
+
+      playerSaveRef.current = updatedSave;
+      setPlayerSave(updatedSave);
+      foodCountRef.current = nextFood;
+      setFoodCount(nextFood);
+      try {
+        localStorage.setItem('rain_world_player_progress', JSON.stringify(updatedSave));
+      } catch (e) {
+        console.warn('Failed to save cycle progress:', e);
+      }
+
+      if (personalOutcome === 'hibernation') {
+        soundEngine.playKarmaAscend();
+      } else {
+        if (!isSoundMutedRef.current) soundEngine.playThunder();
+      }
+
+      const resolveNames = (ids?: string[]) => {
+        if (!ids || ids.length === 0) return [];
+        return ids.map((id) => {
+          if (id === webRTCManager.localPlayerId) return webRTCManager.localPlayerName;
+          return webRTCManager.remotePlayers.get(id)?.name || persistedPeersRef.current.get(id)?.name || id;
+        });
+      };
+
+      const overlayState: CycleEndOverlayState = {
+        outcome: personalOutcome,
+        oldKarma,
+        newKarma,
+        cycleNumber: nextCycle,
+        foodCount: foodCountRef.current,
+        requiredFood: cfg.requiredFood,
+        maxFood: cfg.maxFood,
+        shelterName: savedLoc.name,
+        pearls: nextPearls,
+        survivorNames: resolveNames(survivorIds),
+        fallenNames: resolveNames(deadIds),
+        reason,
+      };
+      setCycleEndOverlay(overlayState);
+      cycleEndOverlayRef.current = overlayState;
+
+      const freshDur = providedNextDuration ?? getRandomCycleSeconds();
+      window.setTimeout(() => {
+        resetWorldForNewCycle(freshDur, savedLoc, updatedSave);
+      }, 3400);
+    };
+    triggerCycleEndFlowRef.current = runCycleEndFlow;
 
     // Helper to spawn item
     const spawnItem = (type: ItemType, spawnX?: number, spawnY?: number) => {
@@ -1347,7 +1593,7 @@ export default function OutskirtsLocation({
     // Grab / Pick up item handler (including pulling stuck spears out of bodies/walls & catching batflies)
     let lastGrabTimestamp = 0;
     const handleGrab = () => {
-      if (player.state !== 'normal') return;
+      if (player.state !== 'normal' || isSpectatingRef.current || cycleEndOverlayRef.current) return;
 
       const now = performance.now();
       if (now - lastGrabTimestamp < 170) {
@@ -1496,7 +1742,7 @@ export default function OutskirtsLocation({
     // Throw held item handler
     let lastThrowTimestamp = 0;
     const handleThrow = () => {
-      if (player.state !== 'normal' || !player.heldItem) return;
+      if (player.state !== 'normal' || isSpectatingRef.current || cycleEndOverlayRef.current || !player.heldItem) return;
 
       const now = performance.now();
       if (now - lastThrowTimestamp < 170) return;
@@ -1616,7 +1862,7 @@ export default function OutskirtsLocation({
     let eatingSlowdownTimer = 0;
 
     const handleToggleEat = () => {
-      if (player.state !== 'normal') return;
+      if (player.state !== 'normal' || isSpectatingRef.current || cycleEndOverlayRef.current) return;
 
       if (!player.heldItem || !isEdibleItemType(player.heldItem.type)) {
         setLastAction("Щоб їсти, візьміть ягоду або муху-кажана в лапи!");
@@ -1672,6 +1918,7 @@ export default function OutskirtsLocation({
     // Piggyback carrying mechanic:
     // "додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз то його можна взять на спину..."
     const handleTogglePiggyback = () => {
+      if (player.state !== 'normal' || isSpectatingRef.current || cycleEndOverlayRef.current) return;
       if (carriedPlayerIdRef.current) {
         carriedPlayerIdRef.current = null;
         setCarriedPlayerId(null);
@@ -1881,17 +2128,53 @@ export default function OutskirtsLocation({
       }
     };
 
+    const sendOfflinePeersSync = (targetPeerId?: string) => {
+      if (!isWorldAuthority()) return;
+      const bodies: RemotePlayer[] = [];
+      for (const rec of persistedPeersRef.current.values()) {
+        if (!rec.connected && !webRTCManager.remotePlayers.has(rec.id)) {
+          bodies.push({
+            ...rec,
+            offline: true,
+          });
+        }
+      }
+      const pkt: NetworkPacket = {
+        type: 'OFFLINE_PEERS_SYNC',
+        senderId: webRTCManager.localPlayerId,
+        bodies,
+      };
+      if (targetPeerId) {
+        webRTCManager.sendPacketToPeer(targetPeerId, pkt);
+      } else {
+        webRTCManager.broadcastPacket(pkt);
+      }
+    };
+
     // ---------------- WebRTC Multiplayer & Simulation Listeners ----------------
     const unregisterPeerList = webRTCManager.onPeerListChange((peers) => {
       setConnectedPeersCount(peers.length);
       setNetworkPing(webRTCManager.getAveragePing());
+
       if (isWorldAuthority()) {
+        const connectedIds = new Set(peers.map(p => p.id));
+        let changedDisconnect = false;
+        for (const rec of persistedPeersRef.current.values()) {
+          if (rec.connected && !connectedIds.has(rec.id)) {
+            rec.connected = false;
+            changedDisconnect = true;
+          }
+        }
         sendAuthoritativeItemsSync();
         sendAuthoritativeLizardsSync();
+        if (changedDisconnect) {
+          sendOfflinePeersSync();
+        }
       } else if (webRTCManager.connectionStatus === 'connected') {
         webRTCManager.broadcastPacket({
           type: 'REQUEST_WORLD_SYNC',
           senderId: webRTCManager.localPlayerId,
+          senderName: webRTCManager.localPlayerName,
           room: activeLoc.id
         });
       }
@@ -1910,18 +2193,20 @@ export default function OutskirtsLocation({
           webRTCManager.broadcastPacket({
             type: 'REQUEST_WORLD_SYNC',
             senderId: webRTCManager.localPlayerId,
+            senderName: webRTCManager.localPlayerName,
             room: activeLoc.id
           });
         } else {
           sendAuthoritativeItemsSync();
           sendAuthoritativeLizardsSync();
+          sendOfflinePeersSync();
         }
       }
     });
 
     // Client-Side Hit Registration listener
     const unregisterHit = distributedSimulation.onHitReceived((hit) => {
-      if (player.state === 'dead') return;
+      if (player.state === 'dead' || player.state === 'sleeping') return;
       applyHit(player, hit.weaponType, hit.damage, hit.stunDuration, roundToOneDecimal(hit.stunDuration * 0.45));
       pvpCombatTimerRef.current = 60.0;
       pvpTargetPeerIdRef.current = hit.attackerId;
@@ -1932,7 +2217,48 @@ export default function OutskirtsLocation({
     const unregisterPackets = webRTCManager.onPacket((packet) => {
       if (packet.type === 'REQUEST_ITEMS_SYNC' || packet.type === 'REQUEST_WORLD_SYNC') {
         if (isWorldAuthority()) {
-          sendAuthoritativeItemsSync(packet.senderId, packet.room);
+          // Restore disconnected/dead peer state if this player already participated in the current cycle!
+          let savedRecord = persistedPeersRef.current.get(packet.senderId);
+          if (!savedRecord && packet.senderName) {
+            const norm = packet.senderName.trim().toLowerCase();
+            if (norm && norm !== 'slugcat' && norm !== 'слимакокіт') {
+              for (const rec of persistedPeersRef.current.values()) {
+                if (!rec.connected && rec.name.trim().toLowerCase() === norm) {
+                  savedRecord = rec;
+                  persistedPeersRef.current.delete(rec.id);
+                  savedRecord.id = packet.senderId;
+                  persistedPeersRef.current.set(packet.senderId, savedRecord);
+                  break;
+                }
+              }
+            }
+          }
+
+          if (savedRecord) {
+            savedRecord.connected = true;
+            savedRecord.restoreGraceUntil = Date.now() + 1800;
+            webRTCManager.sendPacketToPeer(packet.senderId, {
+              type: 'PEER_STATE_RESTORE',
+              senderId: webRTCManager.localPlayerId,
+              targetId: packet.senderId,
+              room: savedRecord.room,
+              x: savedRecord.x,
+              y: savedRecord.y,
+              facingRight: savedRecord.facingRight,
+              state: savedRecord.state,
+              hp: savedRecord.hp,
+              maxHp: savedRecord.maxHp,
+              stunTimer: savedRecord.stunTimer,
+              heldItem: savedRecord.heldItem,
+              foodCount: savedRecord.foodCount,
+            });
+            sendAuthoritativeItemsSync(packet.senderId, savedRecord.room);
+            sendOfflinePeersSync();
+          } else {
+            sendAuthoritativeItemsSync(packet.senderId, packet.room);
+            sendOfflinePeersSync(packet.senderId);
+          }
+
           sendAuthoritativeLizardsSync(packet.senderId);
           webRTCManager.sendPacketToPeer(packet.senderId, {
             type: 'CYCLE_SYNC',
@@ -1941,6 +2267,62 @@ export default function OutskirtsLocation({
             isRainFlooding: cycleSecondsLeftRef.current <= 0
           });
         }
+      } else if (packet.type === 'PEER_STATE_RESTORE') {
+        if (packet.targetId === webRTCManager.localPlayerId) {
+          frozenBodyRef.current = null;
+          const destLoc = getLocationById(packet.room) || activeLoc;
+          player.facingRight = packet.facingRight;
+          player.hp = packet.hp;
+          player.maxHp = packet.maxHp;
+          player.stunTimer = packet.stunTimer;
+          player.state = packet.state;
+          if (typeof packet.foodCount === 'number') {
+            foodCountRef.current = packet.foodCount;
+            setFoodCount(packet.foodCount);
+          }
+
+          if (packet.room !== activeLoc.id) {
+            transitionToLocation(destLoc, packet.x, packet.y);
+          } else {
+            player.x = packet.x;
+            player.y = packet.y;
+            player.vx = 0;
+            player.vy = 0;
+          }
+
+          if (packet.state === 'dead') {
+            freezeLocalPlayerBody('dead');
+            setIsDead(true);
+            setIsSpectating(false);
+            setLastAction('💀 Ви вже загинули в цьому циклі — очікуйте завершення циклу!');
+          } else if (packet.state === 'sleeping') {
+            freezeLocalPlayerBody('sleeping');
+            setIsDead(false);
+            setIsSpectating(true);
+            const living = Array.from(webRTCManager.remotePlayers.values()).filter(p => p.state !== 'dead' && p.state !== 'sleeping');
+            if (living.length > 0) setSpectatedPeerId(living[0].id);
+            setLastAction('😴 Ваш слимакокіт уже спить в укритті цього циклу!');
+          } else {
+            setIsDead(false);
+            setIsSpectating(false);
+            setLastAction('🔄 Відновлено ваше місце та стан у поточному циклі!');
+          }
+        }
+      } else if (packet.type === 'OFFLINE_PEERS_SYNC') {
+        offlineBodiesRef.current.clear();
+        for (const body of packet.bodies) {
+          if (body.id !== webRTCManager.localPlayerId) {
+            offlineBodiesRef.current.set(body.id, { ...body, offline: true });
+          }
+        }
+      } else if (packet.type === 'CYCLE_ENDED') {
+        triggerCycleEndFlowRef.current?.(
+          packet.outcome,
+          packet.nextCycleDuration,
+          packet.survivorIds,
+          packet.deadIds,
+          packet.reason
+        );
       } else if (packet.type === 'THROW_ITEM') {
         if (packet.room === activeLoc.id) {
           const isSpearNet = packet.itemType === 'spear' || packet.itemType === 'explosive_spear';
@@ -2237,7 +2619,7 @@ export default function OutskirtsLocation({
           }
         }
       } else if (packet.type === 'LIZARD_BITE_PEER') {
-        if (packet.targetId === webRTCManager.localPlayerId && player.state !== 'dead') {
+        if (packet.targetId === webRTCManager.localPlayerId && player.state !== 'dead' && player.state !== 'sleeping') {
           const cfg = charConfigRef.current;
           const actualDmg = Math.round(packet.damage * cfg.incomingDamageMult * 1000) / 1000;
           soundEngine.playCreatureHurt();
@@ -2354,6 +2736,11 @@ export default function OutskirtsLocation({
         return;
       }
 
+      // Lock all movement/gameplay inputs while sleeping, spectating, dead, or during Cycle End screen
+      if (player.state === 'sleeping' || player.state === 'dead' || isSpectatingRef.current || cycleEndOverlayRef.current) {
+        return;
+      }
+
       if (isEat && isEdibleItemType(player.heldItem?.type)) {
         e.preventDefault();
         if (!e.repeat) triggerEatRef.current?.();
@@ -2437,6 +2824,9 @@ export default function OutskirtsLocation({
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     let musicCheckTimer = 0;
+    let mpAllSleepTimer = 0;
+    let mpAllDeadTimer = 0;
+    let offlineSyncTickTimer = 0;
 
     // Main animation loop
     const tick = () => {
@@ -2493,18 +2883,132 @@ export default function OutskirtsLocation({
       if (player.hp <= 0 && player.state !== 'dead') {
         player.state = 'dead';
         player.isClimbing = false;
+        setIsDead(true);
         setLastAction('Слимакокіт загинув!');
+        if (isMultiplayerActiveRef.current) {
+          freezeLocalPlayerBody('dead');
+        }
       }
 
-      // Singleplayer death -> automatic cycle end & restart from last saved shelter
-      if (player.state === 'dead' && !isMultiplayerActiveRef.current) {
+      // Host tracks every peer's live state for disconnect/death persistence in current cycle
+      if (isWorldAuthority() && isMultiplayerActiveRef.current) {
+        const nowMs = Date.now();
+        for (const rp of webRTCManager.remotePlayers.values()) {
+          const existing = persistedPeersRef.current.get(rp.id);
+          if (existing && nowMs < existing.restoreGraceUntil) {
+            continue;
+          }
+          persistedPeersRef.current.set(rp.id, {
+            ...rp,
+            head: { ...rp.head },
+            chest: { ...rp.chest },
+            hips: { ...rp.hips },
+            tail: rp.tail.map(tp => ({ ...tp })),
+            connected: true,
+            restoreGraceUntil: existing?.restoreGraceUntil ?? 0,
+            foodCount: existing?.foodCount,
+          });
+        }
+        offlineSyncTickTimer += delta;
+        if (offlineSyncTickTimer >= 1.5) {
+          offlineSyncTickTimer = 0;
+          let hasOffline = false;
+          for (const r of persistedPeersRef.current.values()) {
+            if (!r.connected) {
+              hasOffline = true;
+              break;
+            }
+          }
+          if (hasOffline) {
+            sendOfflinePeersSync();
+          }
+        }
+      }
+
+      // Singleplayer death -> show Cycle End (Death) screen before returning to shelter
+      if (player.state === 'dead' && !isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current) {
         singleplayerDeathTimer += delta;
-        if (singleplayerDeathTimer >= 2.2) {
+        if (singleplayerDeathTimer >= 1.4) {
           singleplayerDeathTimer = 0;
-          restartCycleFromSavedShelter();
+          runCycleEndFlow('death', getRandomCycleSeconds(), [], [webRTCManager.localPlayerId], 'Слимакокіт загинув у цьому циклі.');
         }
       } else {
         singleplayerDeathTimer = 0;
+      }
+
+      // Multiplayer Fast Cycle End (when all alive connected players sleep OR all players are dead)
+      if (isWorldAuthority() && isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current) {
+        const localStatus: 'normal' | 'stunned' | 'dead' | 'sleeping' =
+          player.state === 'dead'
+            ? 'dead'
+            : (isSpectatingRef.current || player.state === 'sleeping')
+            ? 'sleeping'
+            : 'normal';
+
+        const peersList = Array.from(webRTCManager.remotePlayers.values());
+        const participants: Array<{ id: string; state: string }> = [
+          { id: webRTCManager.localPlayerId, state: localStatus },
+          ...peersList.map(p => ({ id: p.id, state: p.state || 'normal' })),
+        ];
+
+        const aliveOnes = participants.filter(p => p.state !== 'dead');
+        const sleepingOnes = aliveOnes.filter(p => p.state === 'sleeping');
+        const deadIds = participants.filter(p => p.state === 'dead').map(p => p.id);
+        const survivorIds = sleepingOnes.map(p => p.id);
+
+        if (aliveOnes.length === 0) {
+          mpAllSleepTimer = 0;
+          mpAllDeadTimer += delta;
+          if (mpAllDeadTimer >= 1.5) {
+            mpAllDeadTimer = 0;
+            const nextDur = getRandomCycleSeconds();
+            webRTCManager.broadcastPacket({
+              type: 'CYCLE_ENDED',
+              hostId: webRTCManager.localPlayerId,
+              outcome: 'death',
+              reason: 'Усі гравці загинули в цьому циклі.',
+              nextCycleDuration: nextDur,
+              survivorIds,
+              deadIds,
+            });
+            runCycleEndFlow('death', nextDur, survivorIds, deadIds, 'Усі гравці загинули в цьому циклі.');
+          }
+        } else if (sleepingOnes.length === aliveOnes.length) {
+          mpAllDeadTimer = 0;
+          mpAllSleepTimer += delta;
+          if (mpAllSleepTimer >= 0.7) {
+            mpAllSleepTimer = 0;
+            const nextDur = getRandomCycleSeconds();
+            webRTCManager.broadcastPacket({
+              type: 'CYCLE_ENDED',
+              hostId: webRTCManager.localPlayerId,
+              outcome: 'hibernation',
+              nextCycleDuration: nextDur,
+              survivorIds,
+              deadIds,
+            });
+            runCycleEndFlow('hibernation', nextDur, survivorIds, deadIds);
+          }
+        } else {
+          mpAllDeadTimer = 0;
+          mpAllSleepTimer = 0;
+        }
+      }
+
+      // Auto-select living peer when spectating if current target vanished
+      if (isSpectatingRef.current || (player.state === 'dead' && isMultiplayerActiveRef.current)) {
+        const remoteList = Array.from(webRTCManager.remotePlayers.values());
+        const currentSpec = spectatedPeerIdRef.current ? webRTCManager.remotePlayers.get(spectatedPeerIdRef.current) : null;
+        if (!currentSpec || currentSpec.state === 'dead') {
+          const nextLiving = remoteList.find(p => p.state !== 'dead' && p.state !== 'sleeping') || remoteList.find(p => p.state !== 'dead');
+          if (nextLiving && nextLiving.id !== spectatedPeerIdRef.current) {
+            spectatedPeerIdRef.current = nextLiving.id;
+            setSpectatedPeerId(nextLiving.id);
+          } else if (!nextLiving && spectatedPeerIdRef.current !== null) {
+            spectatedPeerIdRef.current = null;
+            setSpectatedPeerId(null);
+          }
+        }
       }
 
       // ---------------- Authoritative Pink Lizard Simulation vs Client Interpolation ----------------
@@ -2545,12 +3049,13 @@ export default function OutskirtsLocation({
           });
         }
 
-        const activeRooms = new Set<string>([activeLoc.id, ...roomPeers.keys()]);
+        const physicalHostRoomId = frozenBodyRef.current ? frozenBodyRef.current.roomId : activeLoc.id;
+        const activeRooms = new Set<string>([physicalHostRoomId, activeLoc.id, ...roomPeers.keys()]);
         const localCfg = charConfigRef.current;
         player.characterId = localCfg.id;
         player.biteGrabImmunity = localCfg.biteGrabImmunity;
         player.attackerStunOnGrabAttempt = localCfg.attackerStunOnGrabAttempt;
-        player.isPipeProtected = !!pipeTransit || roomTransitionGraceTimer > 0;
+        player.isPipeProtected = !!pipeTransit || roomTransitionGraceTimer > 0 || player.state === 'sleeping' || isSpectatingRef.current;
 
         cycleLizardsRef.current.forEach((entry: LizardStoreEntry) => {
           const liz = entry.lizard;
@@ -2558,12 +3063,13 @@ export default function OutskirtsLocation({
           const rEnv = getRoomEnv(roomLoc);
 
           if (activeRooms.has(entry.roomId)) {
-            const isLocalRoom = entry.roomId === activeLoc.id;
+            const physicalHostRoomId = frozenBodyRef.current ? frozenBodyRef.current.roomId : activeLoc.id;
+            const isLocalRoom = entry.roomId === physicalHostRoomId;
             const peersHere = roomPeers.get(entry.roomId) || [];
 
             liz.update(
               delta,
-              isLocalRoom ? player : null,
+              isLocalRoom ? (frozenBodyRef.current ? null : player) : null,
               peersHere,
               rEnv.platforms,
               rEnv.poles,
@@ -2885,17 +3391,29 @@ export default function OutskirtsLocation({
         pvpCombatTimerRef.current = Math.max(0, pvpCombatTimerRef.current - delta * drainRate);
       }
 
+      const physicalRoomLoc = frozenBodyRef.current
+        ? (getLocationById(frozenBodyRef.current.roomId) || activeLoc)
+        : activeLoc;
+      const isPhysicallySafeInShelter =
+        Boolean(physicalRoomLoc.isShelterRoom) || (!frozenBodyRef.current && inShelterChamberRef.current);
+      const isPhysicallyInDen = Boolean(physicalRoomLoc.isLizardDenRoom);
+
+      if (rainDangerTimerRef.current > 0) {
+        const rainDecayRate = isPhysicallySafeInShelter ? 3.0 : 1.0;
+        rainDangerTimerRef.current = Math.max(0, rainDangerTimerRef.current - delta * rainDecayRate);
+      }
+
       musicCheckTimer += delta;
       if (musicCheckTimer > 0.3 && !isExitingRef.current) {
         musicCheckTimer = 0;
-        const inCombat = (lizardCombatTimerRef.current > 0) || (pvpCombatTimerRef.current > 0);
+        const inCombat = (lizardCombatTimerRef.current > 0) || (pvpCombatTimerRef.current > 0) || (rainDangerTimerRef.current > 0);
         musicManager.playCategory(inCombat ? 'battle' : 'game');
       }
 
       // ---------------- Player Physics Updates ----------------
-      const canControl = player.state === 'normal';
+      const canControl = player.state === 'normal' && !isSpectatingRef.current && !cycleEndOverlayRef.current;
 
-      // Lethal Downpour upon cycle expiry:
+      // Lethal Downpour upon cycle expiry (checks player's actual physical room, never spectator view room!):
       if (cycleSecondsLeftRef.current <= 0) {
         localStormSeconds += delta;
         setStormActive(true);
@@ -2903,12 +3421,24 @@ export default function OutskirtsLocation({
         const stormIntensity = Math.min(1.0, localStormSeconds / 25.0);
         soundEngine.setStormVolume(stormIntensity * 0.85);
 
-        if (!inShelterChamberRef.current && !activeLoc.isShelterRoom && !activeLoc.isLizardDenRoom && player.state === 'normal') {
+        if (
+          !isPhysicallySafeInShelter &&
+          !isPhysicallyInDen &&
+          player.state !== 'dead' &&
+          player.state !== 'sleeping' &&
+          !frozenBodyRef.current
+        ) {
           const dps = 1.0 / 60.0;
           player.hp = Math.max(0, player.hp - dps * delta);
+          if (rainDangerTimerRef.current < 10) {
+            musicManager.playCategory('battle');
+          }
+          rainDangerTimerRef.current = 60.0;
           if (player.hp <= 0) {
             player.state = 'dead';
             player.vy = -2.5;
+            setIsDead(true);
+            if (isMultiplayerActiveRef.current) freezeLocalPlayerBody('dead');
             setLastAction('Нищівна злива змила слимакокота! Цикл закінчено трагічно.');
             if (!isSoundMutedRef.current) soundEngine.playThunder();
           }
@@ -3191,6 +3721,14 @@ export default function OutskirtsLocation({
           setNearbyPickupCandidate(pickupCand ? { id: pickupCand.id, name: pickupCand.name } : null);
 
           prevJumpPressed = ctrl.jump;
+        } else if (player.state === 'sleeping' || isSpectatingRef.current) {
+          // Curled fast asleep inside the shelter: locked completely in place
+          player.vx = 0;
+          player.vy = 0;
+          player.crouching = true;
+          player.isClimbing = false;
+          pounceChargeTimer = 0;
+          prevJumpPressed = false;
         } else {
           const friction = player.isGrounded ? 0.92 : 0.98;
           player.vx *= friction;
@@ -3199,15 +3737,17 @@ export default function OutskirtsLocation({
           prevJumpPressed = false;
         }
 
-        // Gravity
-        if (!player.isGrounded) {
-          player.vy += 0.38;
-          if (player.vy > 12) player.vy = 12;
-        }
+        if (player.state !== 'sleeping' && !isSpectatingRef.current) {
+          // Gravity
+          if (!player.isGrounded) {
+            player.vy += 0.38;
+            if (player.vy > 12) player.vy = 12;
+          }
 
-        // Apply movement
-        player.x += player.vx;
-        player.y += player.vy;
+          // Apply movement
+          player.x += player.vx;
+          player.y += player.vy;
+        }
 
         // Platform & Wall collisions
         player.isGrounded = false;
@@ -4127,42 +4667,79 @@ export default function OutskirtsLocation({
         }
       }
 
-      // ---------------- Procedural Skeleton Physics (Player) ----------------
-      updateSkeleton(player, t, delta);
+      // ---------------- Procedural Skeleton Physics (Player / Frozen Anchor) ----------------
+      if (frozenBodyRef.current) {
+        updateSkeleton(frozenBodyRef.current, t, delta);
+      } else {
+        updateSkeleton(player, t, delta);
+      }
 
-      // ---------------- Procedural Skeleton Physics (Remote Peers) ----------------
+      // ---------------- Procedural Skeleton Physics (Remote & Offline Peers) ----------------
       for (const rp of webRTCManager.remotePlayers.values()) {
         if (rp.room === activeLoc.id) {
           updateSkeleton(rp, t, delta);
         }
       }
+      for (const ob of offlineBodiesRef.current.values()) {
+        if (ob.room === activeLoc.id && !webRTCManager.remotePlayers.has(ob.id)) {
+          updateSkeleton(ob, t, delta);
+        }
+      }
 
       // Throttled WebRTC P2P Player State Broadcast (25 Hz)
+      // Always transmits the real physical anchor room & position so spectating NEVER teleports the sleeping/dead slugcat!
       if (webRTCManager.connectionStatus === 'connected' && t - lastBroadcastTime > 0.04) {
         lastBroadcastTime = t;
-        webRTCManager.broadcastPlayerState({
-          characterId: charConfigRef.current.id,
-          x: player.x,
-          y: player.y,
-          vx: player.vx,
-          vy: player.vy,
-          facingRight: player.facingRight,
-          crouching: player.crouching,
-          isGrounded: player.isGrounded,
-          isClimbing: player.isClimbing,
-          state: isSpectatingRef.current ? 'sleeping' : player.state,
-          hp: isSpectatingRef.current ? player.maxHp : player.hp,
-          maxHp: player.maxHp,
-          stunTimer: player.stunTimer,
-          heldItem: player.heldItem ? player.heldItem.type : null,
-          room: activeLoc.id,
-          carriedBy: null,
-          carryingPeerId: carriedPlayerIdRef.current,
-          head: player.head,
-          chest: player.chest,
-          hips: player.hips,
-          tail: player.tail
-        });
+        const anchor = frozenBodyRef.current;
+        if (anchor) {
+          webRTCManager.broadcastPlayerState({
+            characterId: anchor.characterId,
+            x: anchor.x,
+            y: anchor.y,
+            vx: 0,
+            vy: 0,
+            facingRight: anchor.facingRight,
+            crouching: anchor.state === 'sleeping',
+            isGrounded: true,
+            isClimbing: false,
+            state: anchor.state,
+            hp: anchor.hp,
+            maxHp: anchor.maxHp,
+            stunTimer: 0,
+            heldItem: anchor.heldItem,
+            room: anchor.roomId,
+            carriedBy: null,
+            carryingPeerId: null,
+            head: anchor.head,
+            chest: anchor.chest,
+            hips: anchor.hips,
+            tail: anchor.tail
+          });
+        } else {
+          webRTCManager.broadcastPlayerState({
+            characterId: charConfigRef.current.id,
+            x: player.x,
+            y: player.y,
+            vx: player.vx,
+            vy: player.vy,
+            facingRight: player.facingRight,
+            crouching: player.crouching,
+            isGrounded: player.isGrounded,
+            isClimbing: player.isClimbing,
+            state: player.state,
+            hp: player.hp,
+            maxHp: player.maxHp,
+            stunTimer: player.stunTimer,
+            heldItem: player.heldItem ? player.heldItem.type : null,
+            room: activeLoc.id,
+            carriedBy: null,
+            carryingPeerId: carriedPlayerIdRef.current,
+            head: player.head,
+            chest: player.chest,
+            hips: player.hips,
+            tail: player.tail
+          });
+        }
       }
 
       // Authoritative item synchronization from room host to peers (every 1.0s)
@@ -4242,11 +4819,11 @@ export default function OutskirtsLocation({
 
       let focusX = player.x + player.width / 2;
       let focusY = player.y + player.height / 2;
-      let leadX = (player.state === 'normal' && (ctrl.left || ctrl.right))
+      let leadX = (player.state === 'normal' && !isSpectatingRef.current && (ctrl.left || ctrl.right))
         ? (player.facingRight ? 40 : -40)
         : 0;
 
-      if (isSpectatingRef.current && spectatedPeerIdRef.current) {
+      if ((isSpectatingRef.current || (player.state === 'dead' && isMultiplayerActiveRef.current)) && spectatedPeerIdRef.current) {
         const specPeer = webRTCManager.remotePlayers.get(spectatedPeerIdRef.current);
         if (specPeer) {
           focusX = specPeer.x + 12;
@@ -4255,7 +4832,8 @@ export default function OutskirtsLocation({
           if (specPeer.room && specPeer.room !== activeLoc.id) {
             const loc = getLocationById(specPeer.room);
             if (loc) {
-              transitionToLocation(loc, specPeer.x, specPeer.y);
+              // Switches spectator viewport room ONLY — never teleports local slugcat!
+              switchSpectatorViewRoom(loc, specPeer.x, specPeer.y);
             }
           }
         }
@@ -4675,8 +5253,13 @@ export default function OutskirtsLocation({
         entry.lizard.render(ctx, t);
       }
 
-      // 7. Draw Player OR Traveling Slugcat Silhouette in Pipe
-      if (pipeTransit) {
+      // 7. Draw Player (or Frozen Sleeping/Dead Anchor) strictly in its physical room
+      const anchorBody = frozenBodyRef.current;
+      if (anchorBody) {
+        if (anchorBody.roomId === activeLoc.id) {
+          renderSlugcatCharacter(ctx, anchorBody, t, true, webRTCManager.localPlayerName);
+        }
+      } else if (pipeTransit) {
         const p = Math.min(1, pipeTransit.progress);
         const curX = pipeTransit.startX + (pipeTransit.endX - pipeTransit.startX) * p;
         const curY = pipeTransit.startY + (pipeTransit.endY - pipeTransit.startY) * p;
@@ -4697,7 +5280,7 @@ export default function OutskirtsLocation({
       }
 
       // 7.05 Draw Shelter Hibernation Sleep Meter and In-World Prompts
-      if ((activeLoc.isShelterRoom || inShelterChamberRef.current) && !pipeTransit && !isHibernatingRef.current) {
+      if ((activeLoc.isShelterRoom || inShelterChamberRef.current) && !pipeTransit && !isHibernatingRef.current && !isSpectatingRef.current && player.state === 'normal') {
         ctx.save();
         const px = player.x + player.width / 2;
         const py = player.y - 18;
@@ -4724,10 +5307,15 @@ export default function OutskirtsLocation({
         ctx.restore();
       }
 
-      // 7.1 Draw Remote P2P Players strictly in current location room
+      // 7.1 Draw Remote P2P Players & Offline/Disconnected Slugcat Bodies strictly in current location room
       for (const rp of webRTCManager.remotePlayers.values()) {
         if (rp.room === activeLoc.id) {
           renderSlugcatCharacter(ctx, rp, t, false, rp.name);
+        }
+      }
+      for (const ob of offlineBodiesRef.current.values()) {
+        if (ob.room === activeLoc.id && !webRTCManager.remotePlayers.has(ob.id)) {
+          renderSlugcatCharacter(ctx, ob, t, false, ob.name);
         }
       }
 
@@ -4907,6 +5495,28 @@ export default function OutskirtsLocation({
 
       entity.earSway = Math.sin(t * 2.5) * 4.0;
       entity.ragdollAngle = Math.sin(t * 2.0) * 0.15;
+
+    } else if (entity.state === 'sleeping') {
+      // Cozy curled-up sleeping posture on the shelter floor with gentle breathing
+      const breath = Math.sin(t * 0.7) * 0.75;
+      const dir = entity.facingRight ? 1 : -1;
+      const targetHeadX = ex + width / 2 + dir * 3;
+      const targetHeadY = ey + 21 + breath;
+      entity.head.x += (targetHeadX - entity.head.x) * 0.28;
+      entity.head.y += (targetHeadY - entity.head.y) * 0.28;
+
+      const targetChestX = ex + width / 2 - dir * 3;
+      const targetChestY = ey + 24 + breath * 0.7;
+      entity.chest.x += (targetChestX - entity.chest.x) * 0.28;
+      entity.chest.y += (targetChestY - entity.chest.y) * 0.28;
+
+      const targetHipsX = ex + width / 2 - dir * 9;
+      const targetHipsY = ey + 27;
+      entity.hips.x += (targetHipsX - entity.hips.x) * 0.28;
+      entity.hips.y += (targetHipsY - entity.hips.y) * 0.28;
+
+      entity.ragdollAngle = 0;
+      entity.earSway = Math.sin(t * 0.7) * 0.8;
 
     } else {
       // Normal alive and responsive posture
@@ -5434,6 +6044,22 @@ export default function OutskirtsLocation({
       ctx.lineTo(chestX + 11, chestY + 5 - dazeArm);
       ctx.stroke();
 
+    } else if (entity.state === 'sleeping') {
+      // Cozy tucked sleeping arms
+      ctx.strokeStyle = charColors.bodyColorTop;
+      ctx.lineWidth = 2.8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(chestX + (dirSign * 2), chestY + 1);
+      ctx.quadraticCurveTo(headX + (dirSign * 6), headY + 7, headX + (dirSign * 2), headY + 9);
+      ctx.stroke();
+
+      // Soft sleeping halo glow on shelter floor
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.14)';
+      ctx.beginPath();
+      ctx.ellipse(chestX, hipsY + 4, 20, 9, 0, 0, Math.PI * 2);
+      ctx.fill();
+
     } else if (entity.state === 'dead') {
       ctx.strokeStyle = '#94a3b8';
       ctx.lineWidth = 2.8;
@@ -5448,8 +6074,8 @@ export default function OutskirtsLocation({
 
     // 5. Organically Connected Soft Body Blobs (Hips, Chest, Head)
     const headRad = entity.state === 'dead' ? 9.0 : 10.0;
-    const chestRad = entity.state === 'dead' ? 10.5 : (entity.crouching ? 12.5 : 11.6);
-    const hipsRad = entity.state === 'dead' ? 11.5 : (entity.crouching ? 13.5 : 12.8);
+    const chestRad = entity.state === 'dead' ? 10.5 : (entity.crouching || entity.state === 'sleeping' ? 12.5 : 11.6);
+    const hipsRad = entity.state === 'dead' ? 11.5 : (entity.crouching || entity.state === 'sleeping' ? 13.5 : 12.8);
 
     ctx.fillStyle = slugGrad;
     ctx.beginPath();
@@ -5534,8 +6160,10 @@ export default function OutskirtsLocation({
     // Left Ear
     ctx.save();
     ctx.translate(earLeftX, earLeftY);
-    const earAngLeft = entity.state === 'dead' 
-      ? -0.8 
+    const earAngLeft = entity.state === 'dead'
+      ? -0.8
+      : entity.state === 'sleeping'
+      ? -0.58 + (earSway * 0.03)
       : (entity.state === 'stunned' ? -0.45 + (earSway * 0.08) : -0.15 + (earSway * 0.05));
     ctx.beginPath();
     ctx.ellipse(0, -9, 4.4, 11.5, earAngLeft, 0, Math.PI * 2);
@@ -5553,8 +6181,10 @@ export default function OutskirtsLocation({
     // Right Ear
     ctx.save();
     ctx.translate(earRightX, earRightY);
-    const earAngRight = entity.state === 'dead' 
-      ? 0.8 
+    const earAngRight = entity.state === 'dead'
+      ? 0.8
+      : entity.state === 'sleeping'
+      ? 0.58 + (earSway * 0.03)
       : (entity.state === 'stunned' ? 0.45 + (earSway * 0.08) : 0.15 + (earSway * 0.05));
     ctx.fillStyle = entity.state === 'dead' ? '#94a3b8' : charColors.earColor;
     ctx.beginPath();
@@ -5636,24 +6266,28 @@ export default function OutskirtsLocation({
       }
 
     } else if (entity.state === 'sleeping') {
-      // Peaceful sleeping curved eyes '‿ ‿' & floating zZz
+      // Peaceful sleeping curved eyes '‿ ‿' & clearly visible rising Zzz bubbles
       ctx.strokeStyle = '#0f0b12';
-      ctx.lineWidth = 2.0;
+      ctx.lineWidth = 2.1;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.arc(faceX - 3.5, faceY - 1, 2.8, 0.1 * Math.PI, 0.9 * Math.PI);
+      ctx.arc(faceX - 3.5, faceY - 0.5, 2.8, 0.1 * Math.PI, 0.9 * Math.PI);
       ctx.stroke();
       ctx.beginPath();
-      ctx.arc(faceX + 3.5, faceY - 1, 2.8, 0.1 * Math.PI, 0.9 * Math.PI);
+      ctx.arc(faceX + 3.5, faceY - 0.5, 2.8, 0.1 * Math.PI, 0.9 * Math.PI);
       ctx.stroke();
 
-      // Floating gentle zZz
-      const zOffset = (t * 1.8) % 3;
-      ctx.font = 'bold 7px monospace';
-      ctx.fillStyle = '#38bdf8';
-      ctx.fillText('z', headX + 8 + zOffset * 2, headY - 8 - zOffset * 4);
+      // Clearly animated floating z Z z bubbles
+      const zPhase = (t * 0.9) % 3;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(125, 211, 252, 0.95)';
       ctx.font = 'bold 9px monospace';
-      ctx.fillText('Z', headX + 12 + zOffset * 2, headY - 14 - zOffset * 4);
+      ctx.fillText('z', headX + 8 + Math.sin(t * 1.4) * 2, headY - 11 - zPhase * 3.5);
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.9)';
+      ctx.font = 'bold 11px monospace';
+      ctx.fillText('Z', headX + 14 + Math.cos(t * 1.2) * 2, headY - 19 - zPhase * 4.5);
+      ctx.restore();
 
     } else {
       // Normal beady vertical eyes with blinking
@@ -5734,23 +6368,37 @@ export default function OutskirtsLocation({
       ctx.stroke();
     }
 
-    // 10. Remote Player Name Tag & Identity Pill
+    // 10. Player Name Tag & Status Badge (Sleeping / Dead / Offline)
     if (displayName) {
       ctx.save();
       ctx.font = 'bold 9px monospace';
       ctx.textAlign = 'center';
-      const textWidth = ctx.measureText(displayName).width;
+      const statusBadge = entity.offline
+        ? (entity.state === 'dead' ? ' 💀 [OFF]' : ' [OFF]')
+        : entity.state === 'sleeping'
+        ? ` 💤`
+        : entity.state === 'dead'
+        ? ' 💀'
+        : '';
+      const fullLabel = `${displayName}${statusBadge}`;
+      const textWidth = ctx.measureText(fullLabel).width;
       const tagX = headX;
       const tagY = headY - (isPlayer ? 24 : 18);
 
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+      ctx.fillStyle = entity.offline ? 'rgba(15, 23, 42, 0.78)' : 'rgba(0, 0, 0, 0.75)';
       ctx.fillRect(tagX - textWidth / 2 - 4, tagY - 9, textWidth + 8, 12);
-      ctx.strokeStyle = isPlayer ? '#38bdf8' : '#34d399';
+      ctx.strokeStyle = entity.state === 'sleeping'
+        ? '#38bdf8'
+        : entity.state === 'dead'
+        ? '#ef4444'
+        : entity.offline
+        ? '#64748b'
+        : isPlayer ? '#38bdf8' : '#34d399';
       ctx.lineWidth = 1;
       ctx.strokeRect(tagX - textWidth / 2 - 4, tagY - 9, textWidth + 8, 12);
 
-      ctx.fillStyle = isPlayer ? '#e0f2fe' : '#ecfdf5';
-      ctx.fillText(displayName, tagX, tagY);
+      ctx.fillStyle = entity.state === 'sleeping' ? '#bae6fd' : (isPlayer ? '#e0f2fe' : '#ecfdf5');
+      ctx.fillText(fullLabel, tagX, tagY);
       ctx.restore();
     }
 
@@ -5858,117 +6506,64 @@ export default function OutskirtsLocation({
     const currentShelterPearls = getShelterPearlsSnapshotRef.current?.() || [];
     const mergedShelterPearls = [...existingOtherPearls, ...currentShelterPearls];
 
-    // In multiplayer: player falls asleep, becomes invulnerable, saves progress, and enters spectator mode
+    // In multiplayer: player falls asleep in-place inside shelter, becomes invulnerable & locked, and enters spectator mode
     if (isMultiplayerActiveRef.current) {
+      enterSleepAnchorRef.current?.();
       soundEngine.playKarmaAscend();
-      const newKarma = Math.min(5, liveSave.karma + 1);
-      const newCycle = liveSave.cycle + 1;
-      const newFood = Math.max(0, liveFood - reqFood);
 
-      const updatedSave: PlayerSaveData = {
-        karma: newKarma,
-        maxKarma: 5,
-        cycle: newCycle,
-        food: newFood,
+      const existingOtherPearls = (liveSave.shelterPearls || []).filter(p => p.roomId !== curRoomId);
+      const mergedPearls = [...existingOtherPearls, ...currentShelterPearls];
+      const provisionalSave: PlayerSaveData = {
+        ...liveSave,
         lastLocationId: curRoomId,
         playerSpawnX: saveX,
         playerSpawnY: saveY,
         hibernated: true,
-        shelterPearls: mergedShelterPearls
+        shelterPearls: mergedPearls
       };
-
-      playerSaveRef.current = updatedSave;
-      setPlayerSave(updatedSave);
-      foodCountRef.current = newFood;
-      setFoodCount(newFood);
+      playerSaveRef.current = provisionalSave;
+      setPlayerSave(provisionalSave);
       try {
-        localStorage.setItem('rain_world_player_progress', JSON.stringify(updatedSave));
+        localStorage.setItem('rain_world_player_progress', JSON.stringify(provisionalSave));
       } catch (e) {
         console.warn('Failed to save multiplayer sleep progress:', e);
       }
 
       setIsSpectating(true);
-      const living = Array.from(webRTCManager.remotePlayers.values()).filter(p => p.state !== 'dead');
+      isSpectatingRef.current = true;
+      const living = Array.from(webRTCManager.remotePlayers.values()).filter(p => p.state !== 'dead' && p.state !== 'sleeping');
       if (living.length > 0) {
         setSpectatedPeerId(living[0].id);
+        spectatedPeerIdRef.current = living[0].id;
+      } else {
+        setSpectatedPeerId(null);
+        spectatedPeerIdRef.current = null;
       }
       setLastAction(
         currentShelterPearls.length > 0
-          ? `😴 Ви заснули! Перлин збережено в укритті: ${currentShelterPearls.length}. Режим спостерігача.`
-          : "😴 Ви заснули в укритті! Прогрес збережено. Режим спостерігача активовано."
+          ? `😴 Ви заснули в укритті! Перлин збережено: ${currentShelterPearls.length}. Очікування інших гравців...`
+          : '😴 Ви заснули в укритті! Прогрес збережено. Очікування завершення циклу...'
       );
       return;
     }
 
-    // Single-player hibernation (requires all mandatory food pips filled)
-    setIsHibernating(true);
-    isHibernatingRef.current = true;
+    // Single-player hibernation (shows upgraded Cycle End overlay, then advances cycle)
     soundEngine.playShelterDoor();
-
-    setTimeout(() => {
-      soundEngine.playKarmaAscend();
-      const currentSave = playerSaveRef.current;
-      const curFood = foodCountRef.current;
-      const newKarma = Math.min(5, currentSave.karma + 1);
-      const newCycle = currentSave.cycle + 1;
-      const newFood = Math.max(0, curFood - reqFood);
-
-      const updatedSave: PlayerSaveData = {
-        karma: newKarma,
-        maxKarma: 5,
-        cycle: newCycle,
-        food: newFood,
-        lastLocationId: curRoomId,
-        playerSpawnX: Math.round(playerPosRef.current.x),
-        playerSpawnY: Math.round(playerPosRef.current.y),
-        hibernated: true,
-        shelterPearls: mergedShelterPearls
-      };
-
-      playerSaveRef.current = updatedSave;
-      setPlayerSave(updatedSave);
-      foodCountRef.current = newFood;
-      setFoodCount(newFood);
-      try {
-        localStorage.setItem('rain_world_player_progress', JSON.stringify(updatedSave));
-      } catch (e) {
-        console.warn('Failed to save hibernation progress:', e);
-      }
-
-      // Reset cycle timer to fresh randomized duration
-      const freshDuration = getRandomCycleSeconds();
-      setCycleTotalDuration(freshDuration);
-      setCycleSecondsLeft(freshDuration);
-      setStormActive(false);
-      setStormSeconds(0);
-      soundEngine.setStormVolume(0);
-
-      // Reset cycle items and creatures for the new fresh cycle!
-      cycleRoomItemsCache.current.clear();
-      cycleLizardsRef.current.clear();
-      needsCycleResetRef.current = true;
-      lizardCombatTimerRef.current = 0;
-      pvpCombatTimerRef.current = 0;
-      pvpTargetPeerIdRef.current = null;
-
-      setTimeout(() => {
-        setIsHibernating(false);
-        isHibernatingRef.current = false;
-        setInShelterChamber(false);
-        soundEngine.playShelterDoor();
-        setLastAction(
-          currentShelterPearls.length > 0
-            ? `Успішна гібернація! Карма ${newKarma}/5 • Цикл ${newCycle} • Перлин в укритті: ${currentShelterPearls.length}!`
-            : `Успішна гібернація! Карма підвищена до ${newKarma}/5. Цикл ${newCycle} розпочато!`
-        );
-      }, 1800);
-    }, 1200);
+    triggerCycleEndFlowRef.current?.(
+      'hibernation',
+      getRandomCycleSeconds(),
+      [webRTCManager.localPlayerId],
+      []
+    );
   };
 
   triggerHibernateRef.current = handleHibernate;
 
   const handleSelectLocation = (loc: CustomLocationData) => {
     setShowLocationModal(false);
+    if (isSpectatingRef.current || isDead || frozenBodyRef.current || cycleEndOverlay) {
+      return;
+    }
     if (transitionToLocationRef.current) {
       transitionToLocationRef.current(
         loc,
@@ -6186,38 +6781,35 @@ export default function OutskirtsLocation({
             </button>
           </div>
 
-          {/* BOTTOM-LEFT GAME SCREEN OVERLAY: AUTHENTIC RAIN WORLD KARMA (10 CYCLE DOTS) & 7 FOOD PIPS */}
+          {/* BOTTOM-LEFT GAME SCREEN OVERLAY: DISTINCT KARMA GLYPH + 10 CLOCKWISE CYCLE DOTS */}
           <div className="absolute bottom-3 left-3 sm:bottom-4 sm:left-4 z-30 flex items-center gap-3.5 pointer-events-none select-none">
-            {/* Rain World Karma Wheel with 10 Clockwise Depleting Cycle Dots */}
-            <div 
-              className="relative flex items-center justify-center filter drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)]"
-              title={`Рівень карми: ${playerSave.karma} / 5 • Залишок циклу: ${Math.floor(cycleSecondsLeft / 60)}хв ${cycleSecondsLeft % 60}с`}
+            <div
+              className="relative w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]"
+              title={`${getKarmaLabel(playerSave.karma, lang)} (${playerSave.karma}/5) • ${Math.floor(cycleSecondsLeft / 60)}m ${cycleSecondsLeft % 60}s`}
             >
-              <svg className="w-11 h-11 sm:w-12 sm:h-12 overflow-visible" viewBox="0 0 60 60" fill="none">
-                {/* Background dark circle */}
-                <circle cx="30" cy="30" r="26" fill="rgba(0,0,0,0.55)" />
+              <svg className="absolute inset-0 w-full h-full overflow-visible" viewBox="0 0 60 60" fill="none">
+                <circle cx="30" cy="30" r="28" fill="rgba(0,0,0,0.62)" />
 
                 {/* 10 Clockwise Cycle Dots around Karma */}
                 {Array.from({ length: 10 }).map((_, i) => {
                   const fraction = Math.max(0, cycleSecondsLeft / cycleTotalDuration);
                   const activePips = fraction * 10;
-                  
+
                   let dotRadius = 0;
                   let dotOpacity = 0;
                   if (activePips >= i + 1) {
-                    dotRadius = 2.4;
+                    dotRadius = 2.3;
                     dotOpacity = 0.95;
                   } else if (activePips > i && activePips < i + 1) {
                     const portion = activePips - i;
-                    dotRadius = 2.4 * portion;
+                    dotRadius = 2.3 * portion;
                     dotOpacity = portion;
                   }
 
                   if (dotRadius <= 0.2) return null;
 
-                  // Clockwise angles: index 0 is 12 o'clock (-PI/2), index 1 is 1:12, etc.
                   const angle = -Math.PI / 2 + (i / 10) * (2 * Math.PI);
-                  const R = 23;
+                  const R = 24.5;
                   const dotX = 30 + R * Math.cos(angle);
                   const dotY = 30 + R * Math.sin(angle);
 
@@ -6233,24 +6825,17 @@ export default function OutskirtsLocation({
                   );
                 })}
 
-                {/* Karma Ring & Symbols according to current Karma level */}
-                <circle cx="30" cy="30" r="16" stroke="#ffffff" strokeWidth="1.8" />
-                <circle cx="30" cy="30" r="10" stroke="#ffffff" strokeWidth="1.3" />
-                <line x1="30" y1="14" x2="30" y2="46" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
-                <line x1="14" y1="30" x2="46" y2="30" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
-                <circle cx="30" cy="30" r="3" fill="#ffffff" />
-                
-                {/* Karma level marks (1 to 5) */}
-                {playerSave.karma >= 2 && <circle cx="23" cy="23" r="1.4" fill="#ffffff" />}
-                {playerSave.karma >= 3 && <circle cx="37" cy="23" r="1.4" fill="#ffffff" />}
-                {playerSave.karma >= 4 && <circle cx="23" cy="37" r="1.4" fill="#ffffff" />}
-                {playerSave.karma >= 5 && <circle cx="37" cy="37" r="1.4" fill="#ffffff" />}
-
-                {/* Warning glow if cycle expired and lethal storm has started */}
                 {cycleSecondsLeft <= 0 && (
-                  <circle cx="30" cy="30" r="26" stroke="#ef4444" strokeWidth="1.8" className="animate-pulse" />
+                  <circle cx="30" cy="30" r="28" stroke="#ef4444" strokeWidth="1.8" className="animate-pulse" />
                 )}
               </svg>
+
+              <KarmaSymbol
+                karma={playerSave.karma}
+                size={34}
+                isDanger={cycleSecondsLeft <= 0}
+                className="relative z-10"
+              />
             </div>
 
             {/* Rain World Food Pips: Required + Divider + Extra */}
@@ -6626,9 +7211,9 @@ export default function OutskirtsLocation({
             )}
           </AnimatePresence>
 
-          {/* SPECTATOR MODE HUD - For sleeping/hibernated multiplayer observer */}
+          {/* SPECTATOR MODE HUD - For sleeping/hibernated or fallen multiplayer observer */}
           <AnimatePresence>
-            {isSpectating && (
+            {(isSpectating || (isDead && isMultiplayerActive)) && !cycleEndOverlay && (
               <motion.div
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -6636,15 +7221,15 @@ export default function OutskirtsLocation({
                 className="absolute top-3 inset-x-3 sm:max-w-xl sm:mx-auto z-40 bg-black/95 border border-sky-800 text-zinc-200 px-4 py-2.5 rounded-2xl shadow-2xl flex items-center justify-between gap-3 font-mono text-xs backdrop-blur-md"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="w-2.5 h-2.5 rounded-full bg-sky-400 animate-ping shrink-0" />
+                  <div className={`w-2.5 h-2.5 rounded-full animate-ping shrink-0 ${isDead ? 'bg-red-400' : 'bg-sky-400'}`} />
                   <div className="truncate text-left">
-                    <span className="text-[10px] text-sky-400 uppercase tracking-widest block font-bold">
+                    <span className={`text-[10px] uppercase tracking-widest block font-bold ${isDead ? 'text-red-400' : 'text-sky-400'}`}>
                       {t(lang, 'spectatorTitle')}
                     </span>
                     <span className="text-[11px] text-zinc-300 font-semibold truncate block">
                       {spectatedPeerId && webRTCManager.remotePlayers.get(spectatedPeerId)
                         ? `${webRTCManager.remotePlayers.get(spectatedPeerId)?.name} (${webRTCManager.remotePlayers.get(spectatedPeerId)?.room})`
-                        : '...'}
+                        : t(lang, 'spectatorSleepingAll')}
                     </span>
                   </div>
                 </div>
@@ -6973,57 +7558,190 @@ export default function OutskirtsLocation({
         })()}
       </AnimatePresence>
 
-      {/* ---------------- AUTHENTIC RAIN WORLD HIBERNATION CINEMATIC ---------------- */}
+      {/* ---------------- UPGRADED CYCLE END CINEMATIC OVERLAY (HIBERNATION OR DEATH) ---------------- */}
       <AnimatePresence>
-        {isHibernating && (
+        {cycleEndOverlay && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.8 }}
-            className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center p-6 text-center select-none"
+            transition={{ duration: 0.65 }}
+            className="fixed inset-0 z-50 bg-[#050408]/95 backdrop-blur-md flex flex-col items-center justify-center p-5 text-center select-none overflow-hidden"
           >
-            {/* Ambient Dark Chamber Vignette */}
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(40,40,45,0.4)_0%,black_80%)] pointer-events-none" />
+            {/* Atmospheric radial chamber glow */}
+            <div
+              className={`absolute inset-0 pointer-events-none ${
+                cycleEndOverlay.outcome === 'hibernation'
+                  ? 'bg-[radial-gradient(circle_at_center,rgba(245,158,11,0.16)_0%,rgba(14,165,233,0.08)_40%,black_80%)]'
+                  : 'bg-[radial-gradient(circle_at_center,rgba(220,38,38,0.18)_0%,rgba(24,24,27,0.25)_45%,black_85%)]'
+              }`}
+            />
 
-            {/* Rising Karma Wheel */}
             <motion.div
-              initial={{ scale: 0.7, opacity: 0, y: 30 }}
-              animate={{ scale: [0.7, 1.15, 1], opacity: 1, y: 0 }}
-              transition={{ duration: 1.4, ease: "easeOut" }}
-              className="relative z-10 flex flex-col items-center"
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              transition={{ duration: 0.55, ease: 'easeOut' }}
+              className={`relative z-10 max-w-md w-full rounded-3xl border p-6 sm:p-8 shadow-2xl flex flex-col items-center gap-5 ${
+                cycleEndOverlay.outcome === 'hibernation'
+                  ? 'border-amber-500/45 bg-zinc-950/90 shadow-[0_0_60px_rgba(245,158,11,0.18)]'
+                  : 'border-red-700/50 bg-zinc-950/90 shadow-[0_0_60px_rgba(220,38,38,0.2)]'
+              }`}
             >
-              <div className="relative w-36 h-36 sm:w-44 sm:h-44 rounded-full border-2 border-white/90 bg-black/80 flex items-center justify-center shadow-[0_0_50px_rgba(255,255,255,0.35)]">
-                <svg className="w-24 h-24 sm:w-32 sm:h-32" viewBox="0 0 36 36" fill="none">
-                  <circle cx="18" cy="18" r="14" stroke="#ffffff" strokeWidth="1.8" />
-                  <circle cx="18" cy="18" r="8.5" stroke="#ffffff" strokeWidth="1.4" />
-                  <line x1="18" y1="4" x2="18" y2="32" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
-                  <line x1="4" y1="18" x2="32" y2="18" stroke="#ffffff" strokeWidth="1.6" strokeLinecap="round" />
-                  <circle cx="18" cy="18" r="3" fill="#ffffff" />
-                  {playerSave.karma >= 2 && <circle cx="11" cy="11" r="1.4" fill="#ffffff" />}
-                  {playerSave.karma >= 3 && <circle cx="25" cy="11" r="1.4" fill="#ffffff" />}
-                  {playerSave.karma >= 4 && <circle cx="11" cy="25" r="1.4" fill="#ffffff" />}
-                  {playerSave.karma >= 5 && <circle cx="25" cy="25" r="1.4" fill="#ffffff" />}
-                </svg>
+              {/* Header badge */}
+              <div className="space-y-1 font-mono">
+                <div
+                  className={`text-[10px] font-bold tracking-[0.28em] uppercase ${
+                    cycleEndOverlay.outcome === 'hibernation' ? 'text-amber-400' : 'text-red-400'
+                  }`}
+                >
+                  {cycleEndOverlay.outcome === 'hibernation'
+                    ? `${t(lang, 'cycleCompleteTitle')} • #${cycleEndOverlay.cycleNumber}`
+                    : `${t(lang, 'cycleFailedTitle')} • #${cycleEndOverlay.cycleNumber}`}
+                </div>
+                <h2 className="text-xl sm:text-2xl font-black tracking-wider text-white">
+                  {getKarmaLabel(cycleEndOverlay.newKarma, lang)}
+                </h2>
               </div>
 
-              {/* Progress Title */}
-              <motion.div
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.6, duration: 0.8 }}
-                className="mt-6 space-y-1.5 font-mono"
-              >
-                <div className="text-xl sm:text-2xl font-black tracking-widest text-white">
-                  {lang === 'en' ? `CYCLE ${playerSave.cycle} COMPLETE` : `ЦИКЛ ${playerSave.cycle} ПРОЙДЕНО`}
+              {/* Animated Karma Ladder + Central Emblem */}
+              <div className="flex flex-col items-center gap-3 w-full">
+                <motion.div
+                  initial={{ scale: 0.72, rotate: -18 }}
+                  animate={{ scale: [0.72, 1.1, 1], rotate: 0 }}
+                  transition={{ duration: 1.0, ease: 'easeOut' }}
+                  className={`relative w-32 h-32 sm:w-36 sm:h-36 rounded-full border-2 flex items-center justify-center ${
+                    cycleEndOverlay.outcome === 'hibernation'
+                      ? 'border-amber-300/90 bg-black/80 shadow-[0_0_45px_rgba(251,191,36,0.35)]'
+                      : 'border-red-400/80 bg-black/80 shadow-[0_0_40px_rgba(248,113,113,0.3)]'
+                  }`}
+                >
+                  <KarmaSymbol
+                    karma={cycleEndOverlay.newKarma}
+                    size={96}
+                    isDanger={cycleEndOverlay.outcome === 'death'}
+                    accentColor={cycleEndOverlay.outcome === 'hibernation' ? '#fde68a' : '#fca5a5'}
+                  />
+                </motion.div>
+
+                {/* Mini 1..5 Karma progression strip */}
+                <div className="flex items-center gap-2 pt-1">
+                  {[1, 2, 3, 4, 5].map((lvl) => {
+                    const isCurrent = lvl === cycleEndOverlay.newKarma;
+                    const isPrev = lvl === cycleEndOverlay.oldKarma && cycleEndOverlay.oldKarma !== cycleEndOverlay.newKarma;
+                    return (
+                      <div
+                        key={lvl}
+                        className={`p-1.5 rounded-xl border transition-all ${
+                          isCurrent
+                            ? cycleEndOverlay.outcome === 'hibernation'
+                              ? 'border-amber-400 bg-amber-950/60 scale-110 shadow-md shadow-amber-500/20'
+                              : 'border-red-400 bg-red-950/60 scale-110 shadow-md shadow-red-500/20'
+                            : isPrev
+                            ? 'border-zinc-600 bg-zinc-900/70 opacity-60'
+                            : 'border-zinc-800/70 bg-black/50 opacity-35'
+                        }`}
+                      >
+                        <KarmaSymbol
+                          karma={lvl}
+                          size={22}
+                          accentColor={
+                            isCurrent
+                              ? cycleEndOverlay.outcome === 'hibernation'
+                                ? '#fbbf24'
+                                : '#f87171'
+                              : '#a1a1aa'
+                          }
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="text-xs sm:text-sm font-bold text-amber-400 tracking-wider">
-                  {lang === 'en' ? `KARMA INCREASED TO ${playerSave.karma} / 5` : `КАРМА ПІДВИЩЕНА ДО ${playerSave.karma} / 5`}
+
+                {/* Karma delta pill */}
+                <div
+                  className={`text-xs font-mono font-bold tracking-wider px-3 py-1 rounded-full border ${
+                    cycleEndOverlay.outcome === 'hibernation'
+                      ? 'bg-amber-950/60 border-amber-500/50 text-amber-300'
+                      : 'bg-red-950/60 border-red-500/50 text-red-300'
+                  }`}
+                >
+                  {cycleEndOverlay.outcome === 'hibernation'
+                    ? cycleEndOverlay.newKarma > cycleEndOverlay.oldKarma
+                      ? `${t(lang, 'karmaUpgraded')} (${cycleEndOverlay.oldKarma} → ${cycleEndOverlay.newKarma})`
+                      : `${t(lang, 'karmaMaxed')} (5 / 5)`
+                    : cycleEndOverlay.newKarma < cycleEndOverlay.oldKarma
+                    ? `${t(lang, 'karmaReduced')} (${cycleEndOverlay.oldKarma} → ${cycleEndOverlay.newKarma})`
+                    : `${t(lang, 'karmaMinimal')} (1 / 5)`}
                 </div>
-                <div className="text-[11px] text-zinc-400 mt-2">
-                  {lang === 'en' ? 'Progress saved inside shelter • Storm subsiding...' : 'Прогрес надійно збережено в укритті • Злива закінчується...'}
+              </div>
+
+              {/* Cycle Details Grid */}
+              <div className="w-full rounded-2xl border border-zinc-800/90 bg-black/60 p-3.5 space-y-2.5 text-xs font-mono text-left">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-zinc-400">{t(lang, 'shelterSavedLabel')}</span>
+                  <span className="text-cyan-300 font-bold truncate">{cycleEndOverlay.shelterName}</span>
                 </div>
-              </motion.div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-zinc-400">{t(lang, 'foodSummaryLabel')}</span>
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: cycleEndOverlay.maxFood }).map((_, idx) => (
+                      <span
+                        key={idx}
+                        className={`w-2.5 h-2.5 rounded-full border ${
+                          idx < cycleEndOverlay.foodCount
+                            ? 'bg-white border-white shadow-[0_0_5px_rgba(255,255,255,0.8)]'
+                            : idx < cycleEndOverlay.requiredFood
+                            ? 'border-zinc-400 bg-transparent'
+                            : 'border-zinc-700 bg-transparent'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-zinc-400">{t(lang, 'pearlsStoredLabel')}</span>
+                  <span className="text-pink-300 font-bold flex items-center gap-1.5">
+                    {cycleEndOverlay.pearls.length > 0 ? (
+                      <>
+                        {cycleEndOverlay.pearls.slice(0, 6).map((p, idx) => {
+                          const colors = ['#f8fafc', '#f472b6', '#22d3ee', '#fbbf24'];
+                          return (
+                            <span
+                              key={p.id || idx}
+                              className="inline-block w-2.5 h-2.5 rounded-full border border-white/40"
+                              style={{ backgroundColor: colors[(p.pearlVariant ?? 0) % colors.length] }}
+                            />
+                          );
+                        })}
+                        <span>{cycleEndOverlay.pearls.length}</span>
+                      </>
+                    ) : (
+                      <span className="text-zinc-500">0</span>
+                    )}
+                  </span>
+                </div>
+
+                {cycleEndOverlay.survivorNames.length > 0 && (
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-zinc-800/80">
+                    <span className="text-emerald-400">{t(lang, 'survivorsLabel')}</span>
+                    <span className="text-zinc-200 truncate">{cycleEndOverlay.survivorNames.join(', ')}</span>
+                  </div>
+                )}
+                {cycleEndOverlay.fallenNames.length > 0 && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-red-400">{t(lang, 'fallenLabel')}</span>
+                    <span className="text-zinc-400 truncate">{cycleEndOverlay.fallenNames.join(', ')}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer pulse */}
+              <div className="flex items-center gap-2 text-[11px] font-mono text-zinc-400">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                <span>{t(lang, 'startingNewCycle')}</span>
+              </div>
             </motion.div>
           </motion.div>
         )}

@@ -78,6 +78,7 @@ export default function MultiplayerLobbyModal({
   const [isAutoJoining, setIsAutoJoining] = useState<boolean>(false);
 
   const handleAutoMatchmake = async () => {
+    if (isAutoJoining || joiningRoomId) return;
     handleSaveProfile();
     setIsAutoJoining(true);
     setErrorMessage(null);
@@ -100,6 +101,7 @@ export default function MultiplayerLobbyModal({
   };
 
   const handleJoinRoom = async (roomId: string, roomVersion?: string) => {
+    if (joiningRoomId || isAutoJoining) return;
     handleSaveProfile();
     setJoiningRoomId(roomId);
     setErrorMessage(null);
@@ -270,7 +272,7 @@ export default function MultiplayerLobbyModal({
 
                 <button
                   onClick={handleAutoMatchmake}
-                  disabled={isAutoJoining}
+                  disabled={isAutoJoining || Boolean(joiningRoomId)}
                   className="w-full sm:w-auto px-6 py-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-black font-mono font-bold text-sm flex items-center justify-center gap-2.5 cursor-pointer shadow-lg shadow-cyan-500/30 transition-all active:scale-95 disabled:opacity-50 shrink-0"
                 >
                   {isAutoJoining ? (
@@ -328,10 +330,17 @@ export default function MultiplayerLobbyModal({
                       return (
                         <div
                           key={room.id}
+                          onClick={() => {
+                            if (!isFull && !isOutdatedClient && !joiningRoomId && !isAutoJoining) {
+                              handleJoinRoom(room.id, roomVer);
+                            }
+                          }}
                           className={`p-3 rounded-xl border transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
                             isOutdatedClient
                               ? 'border-red-900/60 bg-red-950/20 opacity-85'
-                              : 'border-zinc-800/80 bg-zinc-900/50 hover:bg-zinc-900 hover:border-zinc-700'
+                              : isFull || isAutoJoining || Boolean(joiningRoomId)
+                              ? 'border-zinc-800/80 bg-zinc-900/50'
+                              : 'border-zinc-800/80 bg-zinc-900/50 hover:bg-zinc-900 hover:border-cyan-600/60 cursor-pointer'
                           }`}
                         >
                           <div className="space-y-1">
@@ -372,8 +381,11 @@ export default function MultiplayerLobbyModal({
                           </div>
 
                           <button
-                            onClick={() => handleJoinRoom(room.id, roomVer)}
-                            disabled={isFull || isJoining || isOutdatedClient}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleJoinRoom(room.id, roomVer);
+                            }}
+                            disabled={isFull || Boolean(joiningRoomId) || isAutoJoining || isOutdatedClient}
                             className={`w-full sm:w-auto px-4 py-2 rounded-lg font-mono font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md ${
                               isOutdatedClient
                                 ? 'bg-red-950/80 border border-red-700/70 text-red-300 cursor-not-allowed'

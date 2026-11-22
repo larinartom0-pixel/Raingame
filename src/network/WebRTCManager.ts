@@ -23,8 +23,55 @@ interface PeerConnectionWrapper {
   lastPingSentAt: number;
 }
 
+const PLAYER_ID_STORAGE_KEY = 'rain_game_player_id';
+const PLAYER_ID_ACTIVE_AT_KEY = 'rain_game_player_id_active_at';
+const TAB_PLAYER_ID_KEY = 'rain_game_tab_player_id';
+
+function getOrCreatePersistentPlayerId(): { id: string; isPrimary: boolean } {
+  const fallback = `sc-${Math.floor(Math.random() * 89999 + 10000)}`;
+  if (typeof window === 'undefined') return { id: fallback, isPrimary: true };
+
+  try {
+    const existingTabId = window.sessionStorage.getItem(TAB_PLAYER_ID_KEY);
+    const savedPrimaryId = window.localStorage.getItem(PLAYER_ID_STORAGE_KEY);
+
+    if (existingTabId) {
+      const isPrimary = !savedPrimaryId || savedPrimaryId === existingTabId;
+      if (isPrimary) {
+        window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, existingTabId);
+        window.localStorage.setItem(PLAYER_ID_ACTIVE_AT_KEY, String(Date.now()));
+      }
+      return { id: existingTabId, isPrimary };
+    }
+
+    const lastActiveAt = Number(window.localStorage.getItem(PLAYER_ID_ACTIVE_AT_KEY) || 0);
+    const anotherTabOwnsPrimary = !!savedPrimaryId && Date.now() - lastActiveAt < 4500;
+
+    if (!anotherTabOwnsPrimary && savedPrimaryId) {
+      window.sessionStorage.setItem(TAB_PLAYER_ID_KEY, savedPrimaryId);
+      window.localStorage.setItem(PLAYER_ID_ACTIVE_AT_KEY, String(Date.now()));
+      return { id: savedPrimaryId, isPrimary: true };
+    }
+
+    if (!savedPrimaryId) {
+      window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, fallback);
+      window.localStorage.setItem(PLAYER_ID_ACTIVE_AT_KEY, String(Date.now()));
+      window.sessionStorage.setItem(TAB_PLAYER_ID_KEY, fallback);
+      return { id: fallback, isPrimary: true };
+    }
+
+    // Secondary tab open simultaneously in same browser -> unique tab ID for local play
+    const altId = `sc-${Math.floor(Math.random() * 89999 + 10000)}`;
+    window.sessionStorage.setItem(TAB_PLAYER_ID_KEY, altId);
+    return { id: altId, isPrimary: false };
+  } catch {
+    return { id: fallback, isPrimary: true };
+  }
+}
+
 export class WebRTCManager {
-  public localPlayerId: string = `sc-${Math.floor(Math.random() * 89999 + 10000)}`;
+  public localPlayerId: string;
+  private ownsPrimaryPlayerId: boolean;
   public localPlayerName: string = getPersistentNickname();
   
   public currentRoomId: string | null = null;
@@ -45,8 +92,33 @@ export class WebRTCManager {
   private localBroadcastChannel: BroadcastChannel | null = null;
 
   constructor() {
+    const identity = getOrCreatePersistentPlayerId();
+    this.localPlayerId = identity.id;
+    this.ownsPrimaryPlayerId = identity.isPrimary;
     this.startPingMonitor();
     this.setupLocalBroadcastChannel();
+    if (typeof window !== 'undefined') {
+      if (this.ownsPrimaryPlayerId) {
+        setInterval(() => {
+          try {
+            window.localStorage.setItem(PLAYER_ID_ACTIVE_AT_KEY, String(Date.now()));
+          } catch {}
+        }, 2000);
+      }
+      window.addEventListener('pagehide', () => {
+        if (this.currentRoomId) {
+          const url = `${signalingClient.getServerUrl()}/api/rooms/${encodeURIComponent(this.currentRoomId)}/leave?gameId=${encodeURIComponent(signalingClient.getGameId())}`;
+          try {
+            fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ gameId: signalingClient.getGameId(), playerId: this.localPlayerId }),
+              keepalive: true
+            });
+          } catch {}
+        }
+      });
+    }
   }
 
   private setupLocalBroadcastChannel() {
@@ -187,32 +259,40 @@ export class WebRTCManager {
   }
 
   // Automatic room matchmaking & creation:
-  // "убери кнопку создания комнат гра сама создає комнату єслі їх нету або всі заповнені з рандомним таймером циклов та 12 слотами гравців"
+  // Only creates a new room if the server confirmed there are no compatible joinable rooms.
   public async autoMatchmakeAndJoin(): Promise<boolean> {
     this.disconnect();
     this.setStatus('signaling');
+    this.lastError = null;
 
-    try {
-      const rooms = await signalingClient.listRooms();
-      // Only auto-join rooms where local client version >= room version
-      const compatible = rooms.filter((r) =>
-        r.playerCount < (r.maxPlayers || 12) &&
-        (!r.version || compareVersions(APP_VERSION, r.version) >= 0)
-      );
-      // Prefer exact version match first
-      const joinable =
-        compatible.find((r) => r.version && compareVersions(APP_VERSION, r.version) === 0) ||
-        compatible[0];
-
-      if (joinable) {
-        const ok = await this.joinRoom(joinable.id, joinable.version);
-        if (ok) return true;
-      }
-    } catch (e) {
-      console.warn('Failed listing rooms during auto-matchmaking:', e);
+    let res = await signalingClient.listRoomsDetailed();
+    if (!res.ok) {
+      await new Promise((r) => setTimeout(r, 450));
+      res = await signalingClient.listRoomsDetailed();
     }
 
-    // If no compatible rooms exist or all are full (12/12), automatically create a room!
+    if (!res.ok) {
+      this.setStatus('error', 'Сервер кімнат тимчасово не відповідає. Спробуйте ще раз.');
+      return false;
+    }
+
+    const compatible = res.rooms
+      .filter((r) =>
+        r.playerCount < (r.maxPlayers || 12) &&
+        (!r.version || compareVersions(APP_VERSION, r.version) >= 0)
+      )
+      .sort((a, b) => {
+        const aExact = a.version && compareVersions(APP_VERSION, a.version) === 0 ? 0 : 1;
+        const bExact = b.version && compareVersions(APP_VERSION, b.version) === 0 ? 0 : 1;
+        return aExact - bExact;
+      });
+
+    for (const candidate of compatible) {
+      const ok = await this.joinRoom(candidate.id, candidate.version);
+      if (ok) return true;
+    }
+
+    // Only create a new room when no compatible rooms exist or all compatible rooms were full
     const randomCycle = Math.random() < 0.08 ? 12 * 60 : (180 + Math.floor(Math.random() * (420 - 180 + 1)));
     const roomName = `Світ Rain Game #${Math.floor(Math.random() * 899 + 100)}`;
     return await this.hostRoom(roomName, randomCycle, 12);
