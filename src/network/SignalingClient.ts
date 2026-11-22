@@ -9,16 +9,20 @@ export interface SignalMessage {
   timestamp: number;
 }
 
+export const RAIN_GAME_SIGNALING_ID = 'rain-game';
+
 export class SignalingClient {
   private baseUrl: string;
+  private gameId: string;
   private currentRoomId: string | null = null;
   private localPlayerId: string | null = null;
   private pollIntervalId: any = null;
   private heartbeatIntervalId: any = null;
   private onSignalCallback: ((signal: SignalMessage) => void) | null = null;
 
-  constructor(defaultUrl = 'https://larinarten.pythonanywhere.com') {
+  constructor(defaultUrl = 'https://larinarten.pythonanywhere.com', gameId = RAIN_GAME_SIGNALING_ID) {
     this.baseUrl = defaultUrl.replace(/\/+$/, '');
+    this.gameId = gameId;
   }
 
   public setServerUrl(url: string) {
@@ -29,13 +33,22 @@ export class SignalingClient {
     return this.baseUrl;
   }
 
+  public getGameId(): string {
+    return this.gameId;
+  }
+
   public getCurrentRoomId(): string | null {
     return this.currentRoomId;
   }
 
+  private withGameId(path: string): string {
+    const sep = path.includes('?') ? '&' : '?';
+    return `${this.baseUrl}${path}${sep}gameId=${encodeURIComponent(this.gameId)}`;
+  }
+
   public async checkHealth(): Promise<{ online: boolean; roomsCount: number }> {
     try {
-      const res = await fetch(`${this.baseUrl}/api/status`, {
+      const res = await fetch(this.withGameId('/api/status'), {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
         signal: AbortSignal.timeout(4000)
@@ -50,7 +63,7 @@ export class SignalingClient {
 
   public async listRooms(): Promise<RoomInfo[]> {
     try {
-      const res = await fetch(`${this.baseUrl}/api/rooms`, {
+      const res = await fetch(this.withGameId('/api/rooms'), {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
         signal: AbortSignal.timeout(5000)
@@ -86,10 +99,11 @@ export class SignalingClient {
       const cleanName = stripRoomVersionTag(params.name);
       const wirePayload = {
         ...params,
+        gameId: this.gameId,
         name: `${cleanName} [v${roomVersion}]`,
         version: roomVersion,
       };
-      const res = await fetch(`${this.baseUrl}/api/rooms`, {
+      const res = await fetch(this.withGameId('/api/rooms'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(wirePayload),
@@ -120,10 +134,11 @@ export class SignalingClient {
     player: { id: string; name: string; clientVersion?: string }
   ): Promise<{ success: boolean; hostId?: string; roomVersion?: string; peers?: Array<{ id: string; name: string }>; error?: string }> {
     try {
-      const res = await fetch(`${this.baseUrl}/api/rooms/${encodeURIComponent(roomId)}/join`, {
+      const res = await fetch(this.withGameId(`/api/rooms/${encodeURIComponent(roomId)}/join`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          gameId: this.gameId,
           playerId: player.id,
           playerName: player.name,
           clientVersion: player.clientVersion || APP_VERSION,
@@ -151,10 +166,13 @@ export class SignalingClient {
   public async leaveRoom(): Promise<void> {
     if (!this.currentRoomId || !this.localPlayerId) return;
     try {
-      await fetch(`${this.baseUrl}/api/rooms/${encodeURIComponent(this.currentRoomId)}/leave`, {
+      await fetch(this.withGameId(`/api/rooms/${encodeURIComponent(this.currentRoomId)}/leave`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playerId: this.localPlayerId }),
+        body: JSON.stringify({
+          gameId: this.gameId,
+          playerId: this.localPlayerId
+        }),
         signal: AbortSignal.timeout(2000)
       });
     } catch {
@@ -170,10 +188,11 @@ export class SignalingClient {
   public async sendSignal(targetId: string, type: 'offer' | 'answer' | 'ice', payload: any): Promise<boolean> {
     if (!this.currentRoomId || !this.localPlayerId) return false;
     try {
-      const res = await fetch(`${this.baseUrl}/api/rooms/${encodeURIComponent(this.currentRoomId)}/signal/send`, {
+      const res = await fetch(this.withGameId(`/api/rooms/${encodeURIComponent(this.currentRoomId)}/signal/send`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          gameId: this.gameId,
           senderId: this.localPlayerId,
           targetId,
           type,
@@ -195,7 +214,7 @@ export class SignalingClient {
       if (!this.currentRoomId || !this.localPlayerId) return;
       try {
         const res = await fetch(
-          `${this.baseUrl}/api/rooms/${encodeURIComponent(this.currentRoomId)}/signal/poll/${encodeURIComponent(this.localPlayerId)}`,
+          this.withGameId(`/api/rooms/${encodeURIComponent(this.currentRoomId)}/signal/poll/${encodeURIComponent(this.localPlayerId)}`),
           {
             method: 'GET',
             headers: { 'Accept': 'application/json' },
@@ -228,10 +247,13 @@ export class SignalingClient {
     this.heartbeatIntervalId = setInterval(async () => {
       if (!this.currentRoomId || !this.localPlayerId) return;
       try {
-        await fetch(`${this.baseUrl}/api/rooms/${encodeURIComponent(this.currentRoomId)}/heartbeat`, {
+        await fetch(this.withGameId(`/api/rooms/${encodeURIComponent(this.currentRoomId)}/heartbeat`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ playerId: this.localPlayerId }),
+          body: JSON.stringify({
+            gameId: this.gameId,
+            playerId: this.localPlayerId
+          }),
           signal: AbortSignal.timeout(3000)
         });
       } catch {
@@ -248,4 +270,4 @@ export class SignalingClient {
   }
 }
 
-export const signalingClient = new SignalingClient('https://larinarten.pythonanywhere.com');
+export const signalingClient = new SignalingClient('https://larinarten.pythonanywhere.com', RAIN_GAME_SIGNALING_ID);

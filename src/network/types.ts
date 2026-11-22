@@ -1,4 +1,4 @@
-// WebRTC Multiplayer Types and Protocols for Rain World P2P
+// WebRTC Multiplayer Types and Protocols for Rain Game P2P
 import type { ItemType, SlugcatCharacterId, WeaponItemType } from '../types';
 
 export interface RemotePlayer {
@@ -40,6 +40,7 @@ export interface RemotePlayer {
 
 export interface RoomInfo {
   id: string;
+  gameId?: string;
   name: string;
   hostId: string;
   hostName: string;
@@ -50,6 +51,7 @@ export interface RoomInfo {
   cycleRemainingSeconds: number;
   createdAt: number;
   friendlyFire: boolean;
+  meta?: Record<string, any>;
 }
 
 export type NetworkPacket = 
