@@ -500,6 +500,9 @@ export default function OutskirtsLocation({
     cycleEndOverlayRef.current = cycleEndOverlay;
   }, [cycleEndOverlay]);
   const cycleEndTriggeredRef = useRef<boolean>(false);
+  const cycleEndResetTimerRef = useRef<number | null>(null);
+  const newCycleGraceUntilRef = useRef<number>(0);
+  const remoteWatchedRoomsRef = useRef<Map<string, number>>(new Map());
 
   // GitHub Version Polling & Auto-Restart Screen State (no native browser dialogs)
   const [updateCountdown, setUpdateCountdown] = useState<number | null>(null);
@@ -1101,11 +1104,12 @@ export default function OutskirtsLocation({
         setLastAction(actionMsg);
       }
 
-      // 7. In multiplayer client mode, request authoritative state for this new room
+      // 7. In multiplayer client mode, request authoritative items & lizards for this new room (never state restore)
       if (!isWorldAuthority() && webRTCManager.connectionStatus === 'connected') {
         webRTCManager.broadcastPacket({
-          type: 'REQUEST_WORLD_SYNC',
+          type: 'REQUEST_ITEMS_SYNC',
           senderId: webRTCManager.localPlayerId,
+          senderName: webRTCManager.localPlayerName,
           room: targetLoc.id
         });
       }
@@ -1118,7 +1122,9 @@ export default function OutskirtsLocation({
     // Switch only the rendered/camera room for a sleeping or dead spectator without teleporting their physical body!
     const switchSpectatorViewRoom = (targetLoc: CustomLocationData, focusX?: number, focusY?: number) => {
       if (activeLoc.id === targetLoc.id) return;
-      syncRoomItemsCache(activeLoc.id, items);
+      if (isWorldAuthority()) {
+        syncRoomItemsCache(activeLoc.id, items);
+      }
       activeLoc = targetLoc;
       activeEnv = getRoomEnv(targetLoc);
       currentLocationRef.current = targetLoc;
@@ -1145,8 +1151,9 @@ export default function OutskirtsLocation({
 
       if (!isWorldAuthority() && webRTCManager.connectionStatus === 'connected') {
         webRTCManager.broadcastPacket({
-          type: 'REQUEST_WORLD_SYNC',
+          type: 'REQUEST_ITEMS_SYNC',
           senderId: webRTCManager.localPlayerId,
+          senderName: webRTCManager.localPlayerName,
           room: targetLoc.id
         });
       }
@@ -1196,7 +1203,10 @@ export default function OutskirtsLocation({
       frozenBodyRef.current = null;
       persistedPeersRef.current.clear();
       offlineBodiesRef.current.clear();
+      remoteWatchedRoomsRef.current.clear();
+      newCycleGraceUntilRef.current = Date.now() + 2600;
       cycleEndTriggeredRef.current = false;
+      cycleEndResetTimerRef.current = null;
       setCycleEndOverlay(null);
       cycleEndOverlayRef.current = null;
       setIsSpectating(false);
@@ -1207,6 +1217,24 @@ export default function OutskirtsLocation({
       isHoldingSleepBtnRef.current = false;
       setSleepProgress(0);
 
+      pipeTransit = null;
+      lastTransitTimestamp = 0;
+      localStormSeconds = 0;
+      pounceChargeTimer = 0;
+      prevJumpPressed = false;
+      denDamageTimer = 0;
+      shelterSleepTimer = 0;
+      singleplayerDeathTimer = 0;
+      mpAllDeadTimer = 0;
+      mpAllSleepTimer = 0;
+      isEating = false;
+      eatingTimer = 0;
+      setIsEating(false);
+      setEatingProgress(0);
+      carriedPlayerIdRef.current = null;
+      setCarriedPlayerId(null);
+      setNearbyPickupCandidate(null);
+
       player.state = 'normal';
       player.hp = cfg.maxHp;
       player.maxHp = cfg.maxHp;
@@ -1215,6 +1243,9 @@ export default function OutskirtsLocation({
       player.ragdollAngle = 0;
       player.crouching = false;
       player.isClimbing = false;
+      player.isPipeProtected = false;
+      player.vx = 0;
+      player.vy = 0;
       if (player.heldItem) {
         player.heldItem = null;
         setHeldItemType(null);
@@ -1229,6 +1260,7 @@ export default function OutskirtsLocation({
       pvpTargetPeerIdRef.current = null;
       rainDangerTimerRef.current = 0;
 
+      cycleSecondsLeftRef.current = nextDurationSeconds;
       setCycleTotalDuration(nextDurationSeconds);
       setCycleSecondsLeft(nextDurationSeconds);
       setStormActive(false);
@@ -1247,10 +1279,42 @@ export default function OutskirtsLocation({
         `🔄 Цикл ${saveData.cycle} розпочато • Укриття: ${savedLoc.name} (Карма ${saveData.karma}/5)`
       );
 
+      if (webRTCManager.connectionStatus === 'connected') {
+        webRTCManager.broadcastPlayerState({
+          characterId: charConfigRef.current.id,
+          x: player.x,
+          y: player.y,
+          vx: 0,
+          vy: 0,
+          facingRight: player.facingRight,
+          crouching: false,
+          isGrounded: false,
+          isClimbing: false,
+          state: 'normal',
+          hp: player.hp,
+          maxHp: player.maxHp,
+          stunTimer: 0,
+          heldItem: null,
+          room: savedLoc.id,
+          carriedBy: null,
+          carryingPeerId: null,
+          head: player.head,
+          chest: player.chest,
+          hips: player.hips,
+          tail: player.tail
+        });
+      }
+
       if (isWorldAuthority() && webRTCManager.remotePlayers.size > 0) {
         sendAuthoritativeItemsSync();
         sendAuthoritativeLizardsSync();
         sendOfflinePeersSync();
+        webRTCManager.broadcastPacket({
+          type: 'CYCLE_SYNC',
+          hostId: webRTCManager.localPlayerId,
+          cycleRemainingSeconds: nextDurationSeconds,
+          isRainFlooding: false
+        });
       }
     };
 
@@ -1263,6 +1327,8 @@ export default function OutskirtsLocation({
     ) => {
       if (cycleEndTriggeredRef.current) return;
       cycleEndTriggeredRef.current = true;
+      persistedPeersRef.current.clear();
+      offlineBodiesRef.current.clear();
       resetControlsActionRef.current?.();
 
       const cfg = charConfigRef.current;
@@ -1365,7 +1431,10 @@ export default function OutskirtsLocation({
       cycleEndOverlayRef.current = overlayState;
 
       const freshDur = providedNextDuration ?? getRandomCycleSeconds();
-      window.setTimeout(() => {
+      if (cycleEndResetTimerRef.current !== null) {
+        window.clearTimeout(cycleEndResetTimerRef.current);
+      }
+      cycleEndResetTimerRef.current = window.setTimeout(() => {
         resetWorldForNewCycle(freshDur, savedLoc, updatedSave);
       }, 3400);
     };
@@ -2101,6 +2170,8 @@ export default function OutskirtsLocation({
           heldBy: it.heldBy,
           isStuck: !!it.isStuck,
           stuckTarget: it.stuckTarget,
+          stuckWallNormal: it.stuckWallNormal,
+          stuckAngle: it.stuckAngle,
           isAirborne: !!it.isAirborne,
           pearlVariant: it.pearlVariant,
           flyAlive: it.flyAlive
@@ -2215,11 +2286,25 @@ export default function OutskirtsLocation({
 
     // P2P DataChannel packet dispatcher
     const unregisterPackets = webRTCManager.onPacket((packet) => {
-      if (packet.type === 'REQUEST_ITEMS_SYNC' || packet.type === 'REQUEST_WORLD_SYNC') {
+      if (packet.type === 'REQUEST_ITEMS_SYNC') {
         if (isWorldAuthority()) {
-          // Restore disconnected/dead peer state if this player already participated in the current cycle!
-          let savedRecord = persistedPeersRef.current.get(packet.senderId);
-          if (!savedRecord && packet.senderName) {
+          if (packet.room) {
+            remoteWatchedRoomsRef.current.set(packet.room, Date.now() + 8000);
+          }
+          sendAuthoritativeItemsSync(packet.senderId, packet.room);
+          sendAuthoritativeLizardsSync(packet.senderId);
+        }
+      } else if (packet.type === 'REQUEST_WORLD_SYNC') {
+        if (isWorldAuthority()) {
+          if (packet.room) {
+            remoteWatchedRoomsRef.current.set(packet.room, Date.now() + 8000);
+          }
+          // Restore disconnected/dead peer state ONLY during normal active cycle (never during cycle transition)
+          let savedRecord =
+            (!cycleEndTriggeredRef.current && Date.now() >= newCycleGraceUntilRef.current)
+              ? persistedPeersRef.current.get(packet.senderId)
+              : undefined;
+          if (!savedRecord && packet.senderName && !cycleEndTriggeredRef.current && Date.now() >= newCycleGraceUntilRef.current) {
             const norm = packet.senderName.trim().toLowerCase();
             if (norm && norm !== 'slugcat' && norm !== 'слимакокіт') {
               for (const rec of persistedPeersRef.current.values()) {
@@ -2268,7 +2353,7 @@ export default function OutskirtsLocation({
           });
         }
       } else if (packet.type === 'PEER_STATE_RESTORE') {
-        if (packet.targetId === webRTCManager.localPlayerId) {
+        if (packet.targetId === webRTCManager.localPlayerId && !cycleEndTriggeredRef.current && Date.now() >= newCycleGraceUntilRef.current) {
           frozenBodyRef.current = null;
           const destLoc = getLocationById(packet.room) || activeLoc;
           player.facingRight = packet.facingRight;
@@ -2401,11 +2486,31 @@ export default function OutskirtsLocation({
             if (target) {
               target.isHeld = false;
               target.heldBy = undefined;
+              target.isAirborne = false;
+              target.sleeping = true;
               target.x = packet.x;
               target.y = packet.y;
-              target.vx = 0;
-              target.vy = 0;
+              target.vx = packet.vx;
+              target.vy = packet.vy;
+              if (packet.rotation !== undefined) target.rotation = packet.rotation;
+            } else {
+              roomItems.push({
+                id: packet.itemId || `net-throw-${Date.now()}-${Math.random()}`,
+                type: packet.itemType,
+                x: packet.x,
+                y: packet.y,
+                vx: packet.vx,
+                vy: packet.vy,
+                rotation: packet.rotation ?? 0,
+                isHeld: false,
+                isStuck: false,
+                isAirborne: false,
+                sleeping: true,
+                flyAlive: packet.itemType === 'batfly' ? true : undefined,
+              });
             }
+            const rp = webRTCManager.remotePlayers.get(packet.senderId);
+            if (rp) rp.heldItem = null;
             syncRoomItemsCache(packet.room, roomItems);
           }
         }
@@ -2552,6 +2657,8 @@ export default function OutskirtsLocation({
               localItem.heldBy = sItem.heldBy;
               localItem.isStuck = sItem.isStuck;
               localItem.stuckTarget = sItem.stuckTarget;
+              localItem.stuckWallNormal = sItem.stuckWallNormal;
+              localItem.stuckAngle = sItem.stuckAngle;
               localItem.isAirborne = sItem.isAirborne;
               localItem.sleeping = !isFlyAlive && !sItem.isAirborne && !sItem.isHeld && Math.abs(sItem.vx) < 0.1 && Math.abs(sItem.vy) < 0.1;
             } else {
@@ -2567,6 +2674,8 @@ export default function OutskirtsLocation({
                 heldBy: sItem.heldBy,
                 isStuck: sItem.isStuck,
                 stuckTarget: sItem.stuckTarget,
+                stuckWallNormal: sItem.stuckWallNormal,
+                stuckAngle: sItem.stuckAngle,
                 isAirborne: sItem.isAirborne,
                 sleeping: !isFlyAlive && !sItem.isAirborne && !sItem.isHeld,
                 pearlVariant: sItem.pearlVariant,
@@ -2593,7 +2702,14 @@ export default function OutskirtsLocation({
             entry.lizard.applyNetworkSnapshot(snap as any, roomChanged);
 
             // If this lizard grabbed US and pulled us through a pipe into another room, follow automatically!
-            if (snap.grabbedTarget === 'peer' && snap.grabbedPeerId === webRTCManager.localPlayerId && snap.roomId !== activeLoc.id) {
+            if (
+              !cycleEndTriggeredRef.current &&
+              Date.now() >= newCycleGraceUntilRef.current &&
+              player.state !== 'dead' &&
+              snap.grabbedTarget === 'peer' &&
+              snap.grabbedPeerId === webRTCManager.localPlayerId &&
+              snap.roomId !== activeLoc.id
+            ) {
               const destLoc = getLocationById(snap.roomId);
               if (destLoc) {
                 transitionToLocation(destLoc, snap.x, snap.y, undefined, `Ящер затягнув вас у кімнату: ${destLoc.name}!`);
@@ -2891,7 +3007,7 @@ export default function OutskirtsLocation({
       }
 
       // Host tracks every peer's live state for disconnect/death persistence in current cycle
-      if (isWorldAuthority() && isMultiplayerActiveRef.current) {
+      if (isWorldAuthority() && isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current && Date.now() >= newCycleGraceUntilRef.current) {
         const nowMs = Date.now();
         for (const rp of webRTCManager.remotePlayers.values()) {
           const existing = persistedPeersRef.current.get(rp.id);
@@ -4742,10 +4858,60 @@ export default function OutskirtsLocation({
         }
       }
 
-      // Authoritative item synchronization from room host to peers (every 1.0s)
-      if (isWorldAuthority() && webRTCManager.remotePlayers.size > 0 && t - lastItemsSyncTime > 1.0) {
+      // Authoritative item synchronization from room host to peers (all occupied/spectated rooms every 0.45s)
+      if (isWorldAuthority() && webRTCManager.remotePlayers.size > 0 && t - lastItemsSyncTime > 0.45) {
         lastItemsSyncTime = t;
-        sendAuthoritativeItemsSync();
+        const roomsToSync = new Set<string>([activeLoc.id]);
+        for (const rp of webRTCManager.remotePlayers.values()) {
+          if (rp.room) roomsToSync.add(rp.room);
+        }
+        const nowMs = Date.now();
+        for (const [wRoom, exp] of remoteWatchedRoomsRef.current.entries()) {
+          if (nowMs < exp) {
+            roomsToSync.add(wRoom);
+          } else {
+            remoteWatchedRoomsRef.current.delete(wRoom);
+          }
+        }
+
+        // Keep batflies in other occupied/spectated rooms gently flying in cache too
+        for (const roomId of roomsToSync) {
+          if (roomId !== activeLoc.id) {
+            const loc = getLocationById(roomId);
+            if (loc) {
+              const rEnv = getRoomEnv(loc);
+              const cached = getOrInitRoomItems(loc);
+              let touched = false;
+              for (const it of cached) {
+                if (it.type === 'batfly' && !it.isHeld && it.flyAlive !== false) {
+                  it.wingPhase = (it.wingPhase ?? 0) + 0.35;
+                  it.flyDecisionTimer = (it.flyDecisionTimer ?? 0) - 0.45;
+                  if ((it.flyDecisionTimer ?? 0) <= 0) {
+                    it.flyDecisionTimer = 0.8 + Math.random();
+                    const ang = Math.random() * Math.PI * 2;
+                    it.vx = Math.cos(ang) * 2.1;
+                    it.vy = Math.sin(ang) * 1.4;
+                  }
+                  it.x = Math.max(24, Math.min(rEnv.width - 24, it.x + it.vx * 3.5));
+                  it.y = Math.max(36, Math.min(rEnv.floorY - 26, it.y + it.vy * 3.5));
+                  touched = true;
+                }
+              }
+              if (touched) {
+                syncRoomItemsCache(roomId, cached);
+              }
+            }
+          }
+          sendAuthoritativeItemsSync(undefined, roomId);
+        }
+      } else if (!isWorldAuthority() && (isSpectatingRef.current || player.state === 'dead') && webRTCManager.connectionStatus === 'connected' && t - lastItemsSyncTime > 1.0) {
+        lastItemsSyncTime = t;
+        webRTCManager.broadcastPacket({
+          type: 'REQUEST_ITEMS_SYNC',
+          senderId: webRTCManager.localPlayerId,
+          senderName: webRTCManager.localPlayerName,
+          room: activeLoc.id
+        });
       }
 
       // Sync state for React HUD telemetry periodically
@@ -5417,6 +5583,10 @@ export default function OutskirtsLocation({
       window.removeEventListener('keyup', handleKeyUp, { capture: true });
       window.removeEventListener('blur', resetAllControls);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (cycleEndResetTimerRef.current !== null) {
+        window.clearTimeout(cycleEndResetTimerRef.current);
+        cycleEndResetTimerRef.current = null;
+      }
       unregisterPeerList();
       unregisterStatus();
       unregisterHit();
@@ -6753,7 +6923,7 @@ export default function OutskirtsLocation({
       </div>
 
       {/* Main Viewport */}
-      <div className="relative flex-1 w-full max-w-5xl h-full flex items-center justify-center p-2 sm:p-4">
+      <div className="relative flex-1 min-h-0 w-full max-w-5xl flex items-center justify-center px-1.5 py-1 sm:p-4">
         
         {/* Soft vignette */}
         {settings.graphics.vignette && (
@@ -6761,12 +6931,12 @@ export default function OutskirtsLocation({
         )}
         
         {/* Canvas stage */}
-        <div className="relative w-full aspect-[1000/580] max-h-[75vh] bg-black rounded-lg sm:rounded-2xl overflow-hidden border border-zinc-800/30 shadow-2xl">
+        <div className="relative max-w-full max-h-full aspect-[1000/580] bg-black rounded-lg sm:rounded-2xl overflow-hidden border border-zinc-800/30 shadow-2xl flex items-center justify-center">
           <canvas
             ref={canvasRef}
             width={CANVAS_WIDTH}
             height={CANVAS_HEIGHT}
-            className="w-full h-full object-contain"
+            className="w-full h-full block object-contain"
           />
 
           {/* ON-CANVAS QUICK CONTROLS (FULLSCREEN) */}
@@ -7271,7 +7441,7 @@ export default function OutskirtsLocation({
         </div>
       </div>
 
-      {/* ERGONOMIC DUAL-PAD SCREEN CONTROLS SECTION */}
+      {/* ERGONOMIC DUAL-PAD SCREEN CONTROLS SECTION (RESPONSIVE, NEVER CLIPS OFF-SCREEN) */}
       <AnimatePresence>
         {showTouchControls && (
           <motion.div
@@ -7279,13 +7449,13 @@ export default function OutskirtsLocation({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 15 }}
             transition={{ duration: 0.15 }}
-            style={{ touchAction: 'none', paddingBottom: 'max(4.5rem, env(safe-area-inset-bottom, 4.5rem))' }}
-            className="w-full max-w-5xl flex items-end justify-between px-4 sm:px-8 pt-1 z-40 select-none pointer-events-none touch-none pb-16 sm:pb-20 mb-6 sm:mb-8"
+            style={{ touchAction: 'none', paddingBottom: 'max(0.6rem, env(safe-area-inset-bottom, 0.6rem))' }}
+            className="w-full max-w-5xl mx-auto shrink-0 flex items-end justify-between gap-1.5 sm:gap-4 px-2 sm:px-6 pt-1 z-40 select-none pointer-events-none touch-none"
           >
             {/* LEFT COMPARTMENT: HORIZONTAL NAVIGATION PAD */}
             <div 
               style={{ touchAction: 'none' }}
-              className="flex items-center gap-2 sm:gap-3 pointer-events-auto bg-black/75 backdrop-blur-md p-2 sm:p-3 rounded-3xl border border-zinc-700/80 shadow-2xl touch-none select-none mb-3 sm:mb-5 ml-2 sm:ml-4"
+              className="flex items-center gap-1.5 sm:gap-2.5 shrink-0 pointer-events-auto bg-black/75 backdrop-blur-md p-1.5 sm:p-2.5 rounded-2xl sm:rounded-3xl border border-zinc-700/80 shadow-2xl touch-none select-none"
             >
               {/* MOVE LEFT BUTTON */}
               <button
@@ -7295,17 +7465,17 @@ export default function OutskirtsLocation({
                 {...getContinuousTouchHandlers('left')}
                 className={`${
                   buttonScale === 'large' 
-                    ? 'w-16 h-16 sm:w-20 sm:h-20' 
-                    : 'w-14 h-14 sm:w-16 sm:h-16'
-                } rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
+                    ? 'w-13 h-13 sm:w-18 sm:h-18' 
+                    : 'w-11 h-11 sm:w-15 sm:h-15'
+                } rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
                   controls.left
                     ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
                     : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
                 } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                 title="Рух вліво (A / ←)"
               >
-                <span className="text-2xl sm:text-3xl font-black">←</span>
-                <span className="text-[8px] font-mono font-bold text-zinc-400 mt-[-2px]">ВЛІВО</span>
+                <span className="text-xl sm:text-3xl font-black leading-none">←</span>
+                <span className="text-[7px] sm:text-[8px] font-mono font-bold text-zinc-400 mt-0.5">ВЛІВО</span>
               </button>
 
               {/* MOVE RIGHT BUTTON */}
@@ -7316,165 +7486,180 @@ export default function OutskirtsLocation({
                 {...getContinuousTouchHandlers('right')}
                 className={`${
                   buttonScale === 'large' 
-                    ? 'w-16 h-16 sm:w-20 sm:h-20' 
-                    : 'w-14 h-14 sm:w-16 sm:h-16'
-                } rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
+                    ? 'w-13 h-13 sm:w-18 sm:h-18' 
+                    : 'w-11 h-11 sm:w-15 sm:h-15'
+                } rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
                   controls.right
                     ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
                     : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
                 } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                 title="Рух вправо (D / →)"
               >
-                <span className="text-2xl sm:text-3xl font-black">→</span>
-                <span className="text-[8px] font-mono font-bold text-zinc-400 mt-[-2px]">ВПРАВО</span>
+                <span className="text-xl sm:text-3xl font-black leading-none">→</span>
+                <span className="text-[7px] sm:text-[8px] font-mono font-bold text-zinc-400 mt-0.5">ВПРАВО</span>
               </button>
             </div>
 
-            {/* RIGHT COMPARTMENT: 2-TIER ERGONOMIC ACTION CLUSTER */}
-            <div 
-              style={{ touchAction: 'none' }}
-              className="flex flex-col items-end gap-1.5 sm:gap-2 pointer-events-auto bg-black/60 backdrop-blur-md p-1.5 sm:p-2.5 rounded-3xl border border-zinc-800/80 shadow-2xl touch-none select-none"
-            >
-              
-              {/* UPPER TIER: ITEM ACTIONS (GRAB, THROW) + CLIMB UP */}
-              <div className="flex items-center gap-2 sm:gap-2.5">
-                {/* EAT FOOD BUTTON (visible when holding berry or batfly - zero latency!) */}
-                {(heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly') && (
+            {/* RIGHT COMPARTMENT: CONTEXTUAL STRIP + FIXED-WIDTH 2-TIER ACTION PAD */}
+            <div className="flex flex-col items-end gap-1.5 min-w-0 shrink-0 pointer-events-none">
+              {/* CONTEXTUAL ROW (EAT / PIGGYBACK) — stays neatly stacked above without widening the pad */}
+              {(heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly' || carriedPlayerId || nearbyPickupCandidate) && (
+                <div
+                  style={{ touchAction: 'none' }}
+                  className="flex items-center justify-end gap-1.5 pointer-events-auto bg-black/75 backdrop-blur-md p-1 rounded-2xl border border-zinc-800/90 shadow-xl touch-none"
+                >
+                  {(heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly') && (
+                    <button
+                      id="touch-ctrl-eat"
+                      type="button"
+                      style={{ touchAction: 'none' }}
+                      {...getActionTouchHandlers(triggerEatRef)}
+                      className={`h-9 sm:h-11 px-2.5 sm:px-3 rounded-xl border-2 flex items-center gap-1.5 font-mono font-bold active:scale-90 select-none shadow-lg cursor-pointer transition-all touch-none ${
+                        isEating 
+                          ? 'bg-amber-400 text-black border-amber-300 animate-pulse shadow-[0_0_16px_rgba(245,158,11,0.8)]' 
+                          : 'bg-sky-950/95 hover:bg-sky-900 border-sky-400 text-sky-200 shadow-[0_0_12px_rgba(56,189,248,0.35)]'
+                      } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                      title="З'їсти ягоду або муху-кажана (заповнює 1 ячейку їжі)"
+                    >
+                      <div className="w-3 h-3 rounded-full border-2 border-current flex items-center justify-center shrink-0">
+                        <div className="w-1 h-1 rounded-full bg-current" />
+                      </div>
+                      <span className="text-[9px] sm:text-[10px] tracking-tight whitespace-nowrap">
+                        {isEating ? 'ЇСТЬ...' : 'ЇСТИ'}
+                      </span>
+                    </button>
+                  )}
+
+                  {(carriedPlayerId || nearbyPickupCandidate) && (
+                    <button
+                      id="touch-ctrl-piggyback"
+                      type="button"
+                      style={{ touchAction: 'none' }}
+                      {...getActionTouchHandlers(triggerPiggybackRef)}
+                      className={`h-9 sm:h-11 px-2.5 sm:px-3 rounded-xl border-2 flex items-center gap-1 font-mono font-bold active:scale-90 select-none shadow-lg cursor-pointer transition-all touch-none ${
+                        carriedPlayerId
+                          ? 'bg-purple-950/95 border-purple-400 text-purple-200 animate-pulse shadow-[0_0_14px_rgba(168,85,247,0.4)]'
+                          : 'bg-indigo-950/95 hover:bg-indigo-900 border-indigo-400 text-indigo-200 shadow-[0_0_12px_rgba(129,140,248,0.3)]'
+                      }`}
+                      title={carriedPlayerId ? 'Скинути гравця зі спини (G)' : 'Взяти гравця на спину (G)'}
+                    >
+                      <User className="w-3 h-3 shrink-0" />
+                      <span className="text-[9px] sm:text-[10px] tracking-tight whitespace-nowrap">
+                        {carriedPlayerId ? 'СКИНУТИ' : 'НА СПИНУ'}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* CORE 2-TIER ACTION CLUSTER (STRICT 3-COLUMN WIDTH) */}
+              <div 
+                style={{ touchAction: 'none' }}
+                className="flex flex-col items-end gap-1.5 sm:gap-2 pointer-events-auto bg-black/75 backdrop-blur-md p-1.5 sm:p-2.5 rounded-2xl sm:rounded-3xl border border-zinc-800/90 shadow-2xl touch-none select-none"
+              >
+                {/* UPPER TIER: GRAB, THROW, CLIMB UP */}
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  {/* ITEM GRAB / DROP BUTTON */}
                   <button
-                    id="touch-ctrl-eat"
+                    id="touch-ctrl-grab"
                     type="button"
                     style={{ touchAction: 'none' }}
-                    {...getActionTouchHandlers(triggerEatRef)}
-                    className={`h-13 sm:h-15 px-3 rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
-                      isEating 
-                        ? 'bg-amber-400 text-black border-amber-300 animate-pulse shadow-[0_0_20px_rgba(245,158,11,0.8)]' 
-                        : 'bg-sky-950/90 hover:bg-sky-900 border-sky-400 text-sky-200 shadow-[0_0_15px_rgba(56,189,248,0.4)]'
+                    {...getActionTouchHandlers(triggerGrabRef)}
+                    className={`${
+                      buttonScale === 'large' ? 'w-12 h-11 sm:w-15 sm:h-14' : 'w-10.5 h-10 sm:w-14 sm:h-13'
+                    } rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
+                      (heldItemType || telemetry.heldItem) 
+                        ? 'bg-amber-950/85 border-amber-500 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.3)]' 
+                        : 'bg-zinc-950/90 hover:bg-zinc-900 border-cyan-700/80 text-cyan-300'
                     } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
-                    title="З'їсти ягоду або муху-кажана (заповнює 1 ячейку їжі)"
+                    title="Підібрати / Покласти (Z або E)"
                   >
-                    <div className="w-3.5 h-3.5 rounded-full border-2 border-current mb-0.5 flex items-center justify-center">
-                      <div className="w-1.5 h-1.5 rounded-full bg-current" />
-                    </div>
-                    <span className="text-[8px] tracking-tight whitespace-nowrap">
-                      {isEating ? 'ЇСТЬ...' : 'ЇСТИ'}
-                    </span>
+                    <CircleDot className="w-3.5 h-3.5 sm:w-4 sm:h-4 mb-0.5" />
+                    <span className="text-[7px] sm:text-[8px] tracking-tight leading-none">{(heldItemType || telemetry.heldItem) ? 'ПОКЛАСТ' : 'ВЗЯТИ'}</span>
                   </button>
-                )}
 
-                {/* PIGGYBACK CARRY / DROP BUTTON ("додай кнопку підйома єслі підійти до ігрока який оглушон або який зажав кнопку вниз...") */}
-                {(carriedPlayerId || nearbyPickupCandidate) && (
+                  {/* ITEM THROW BUTTON */}
                   <button
-                    id="touch-ctrl-piggyback"
+                    id="touch-ctrl-throw"
                     type="button"
                     style={{ touchAction: 'none' }}
-                    {...getActionTouchHandlers(triggerPiggybackRef)}
-                    className={`h-13 sm:h-15 px-2.5 rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
-                      carriedPlayerId
-                        ? 'bg-purple-950/90 border-purple-400 text-purple-200 animate-pulse shadow-[0_0_15px_rgba(168,85,247,0.4)]'
-                        : 'bg-indigo-950/90 hover:bg-indigo-900 border-indigo-400 text-indigo-200 shadow-[0_0_12px_rgba(129,140,248,0.3)]'
+                    {...getActionTouchHandlers(triggerThrowRef)}
+                    className={`${
+                      buttonScale === 'large' ? 'w-12 h-11 sm:w-15 sm:h-14' : 'w-10.5 h-10 sm:w-14 sm:h-13'
+                    } rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
+                      (heldItemType || telemetry.heldItem) 
+                        ? 'bg-red-950/90 border-red-500 text-red-300 animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.5)]' 
+                        : 'bg-zinc-950/50 border-zinc-800 text-zinc-600 opacity-40'
                     }`}
-                    title={carriedPlayerId ? 'Скинути гравця зі спини (G)' : 'Взяти гравця на спину (G)'}
+                    title="Кинути предмет (X або Q)"
                   >
-                    <User className="w-3.5 h-3.5 mb-0.5" />
-                    <span className="text-[7.5px] tracking-tight whitespace-nowrap">
-                      {carriedPlayerId ? 'СКИНУТИ' : 'НА СПИНУ'}
-                    </span>
+                    <Crosshair className="w-3.5 h-3.5 sm:w-4 sm:h-4 mb-0.5 text-red-400" />
+                    <span className="text-[7px] sm:text-[8px] tracking-wider text-red-300 leading-none">КИД</span>
                   </button>
-                )}
 
-                {/* ITEM GRAB / DROP BUTTON */}
-                <button
-                  id="touch-ctrl-grab"
-                  type="button"
-                  style={{ touchAction: 'none' }}
-                  {...getActionTouchHandlers(triggerGrabRef)}
-                  className={`w-13 h-13 sm:w-15 sm:h-15 rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
-                    (heldItemType || telemetry.heldItem) 
-                      ? 'bg-amber-950/80 border-amber-500 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.3)]' 
-                      : 'bg-zinc-950/90 hover:bg-zinc-900 border-cyan-700/80 text-cyan-300'
-                  } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
-                  title="Підібрати / Покласти (Z або E)"
-                >
-                  <CircleDot className="w-4 h-4 mb-0.5" />
-                  <span className="text-[8px] tracking-tight">{(heldItemType || telemetry.heldItem) ? 'ПОКЛАСТИ' : 'ВЗЯТИ'}</span>
-                </button>
+                  {/* CLIMB UP BUTTON */}
+                  <button
+                    id="touch-ctrl-up"
+                    type="button"
+                    style={{ touchAction: 'none' }}
+                    {...getContinuousTouchHandlers('up')}
+                    className={`${
+                      buttonScale === 'large' ? 'w-12 h-11 sm:w-15 sm:h-14' : 'w-10.5 h-10 sm:w-14 sm:h-13'
+                    } rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
+                      controls.up
+                        ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
+                        : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
+                    } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                    title="Піднятися вгору / Схопитися за шест (W / ↑)"
+                  >
+                    <span className="text-lg sm:text-2xl font-black leading-none">↑</span>
+                    <span className="text-[7px] sm:text-[8px] font-mono font-bold text-zinc-400">ВГОРУ</span>
+                  </button>
+                </div>
 
-                {/* ITEM THROW BUTTON */}
-                <button
-                  id="touch-ctrl-throw"
-                  type="button"
-                  style={{ touchAction: 'none' }}
-                  {...getActionTouchHandlers(triggerThrowRef)}
-                  className={`w-13 h-13 sm:w-15 sm:h-15 rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
-                    (heldItemType || telemetry.heldItem) 
-                      ? 'bg-red-950/90 border-red-500 text-red-300 animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.5)]' 
-                      : 'bg-zinc-950/50 border-zinc-800 text-zinc-600 opacity-40'
-                  }`}
-                  title="Кинути предмет (X або Q)"
-                >
-                  <Crosshair className="w-4 h-4 mb-0.5 text-red-400" />
-                  <span className="text-[8px] tracking-wider text-red-300">КИД</span>
-                </button>
+                {/* LOWER TIER: CLIMB DOWN / CROUCH + JUMP PAD */}
+                <div className="flex items-center gap-1.5 sm:gap-2 w-full">
+                  {/* CLIMB DOWN / CROUCH BUTTON */}
+                  <button
+                    id="touch-ctrl-down"
+                    type="button"
+                    style={{ touchAction: 'none' }}
+                    {...getContinuousTouchHandlers('down')}
+                    className={`${
+                      buttonScale === 'large' ? 'w-12 h-11 sm:w-15 sm:h-14' : 'w-10.5 h-10 sm:w-14 sm:h-13'
+                    } shrink-0 rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
+                      controls.down
+                        ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
+                        : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
+                    } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                    title="Спуститися вниз / Присісти (S / ↓)"
+                  >
+                    <span className="text-lg sm:text-2xl font-black leading-none">↓</span>
+                    <span className="text-[7px] sm:text-[8px] font-mono font-bold text-zinc-400">ВНИЗ</span>
+                  </button>
 
-                {/* CLIMB UP BUTTON (ВГОРУ / ЛАЗІННЯ) */}
-                <button
-                  id="touch-ctrl-up"
-                  type="button"
-                  style={{ touchAction: 'none' }}
-                  {...getContinuousTouchHandlers('up')}
-                  className={`w-13 h-13 sm:w-15 sm:h-15 rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
-                    controls.up
-                      ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
-                      : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
-                  } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
-                  title="Піднятися вгору / Схопитися за шест (W / ↑)"
-                >
-                  <span className="text-xl sm:text-2xl font-black">↑</span>
-                  <span className="text-[8px] font-mono font-bold text-zinc-400 mt-[-2px]">ВГОРУ</span>
-                </button>
+                  {/* PRIMARY JUMP ACTION BUTTON (matches width of remaining 2 columns) */}
+                  <button
+                    id="touch-ctrl-jump"
+                    type="button"
+                    style={{ touchAction: 'none' }}
+                    {...getContinuousTouchHandlers('jump')}
+                    className={`flex-1 ${
+                      buttonScale === 'large'
+                        ? 'h-11 sm:h-14 min-w-[6.375rem] sm:min-w-[8rem]'
+                        : 'h-10 sm:h-13 min-w-[5.6rem] sm:min-w-[7.5rem]'
+                    } rounded-xl sm:rounded-2xl border-2 flex items-center justify-center gap-1.5 select-none cursor-pointer transition-all duration-75 font-mono tracking-wider text-[11px] sm:text-sm font-bold touch-none ${
+                      controls.jump
+                        ? 'bg-amber-400 text-black border-amber-300 scale-95 shadow-[0_0_25px_rgba(245,158,11,0.8)]'
+                        : 'bg-gradient-to-r from-amber-950/90 via-amber-900/80 to-amber-950/90 hover:from-amber-900 hover:to-amber-950 border-amber-500 text-amber-300 shadow-[0_0_20px_rgba(245,158,11,0.35)]'
+                    } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                    title="Стрибок (Пробіл або Z)"
+                  >
+                    <span className="text-sm sm:text-lg leading-none">▲</span>
+                    <span>ПРИЖОК</span>
+                  </button>
+                </div>
               </div>
-
-              {/* LOWER TIER: CLIMB DOWN / CROUCH + HUGE ERGONOMIC JUMP PAD */}
-              <div className="flex items-center gap-2 sm:gap-2.5">
-                {/* CLIMB DOWN / CROUCH BUTTON (ВНИЗ / ПРИСІСТИ) */}
-                <button
-                  id="touch-ctrl-down"
-                  type="button"
-                  style={{ touchAction: 'none' }}
-                  {...getContinuousTouchHandlers('down')}
-                  className={`w-13 h-13 sm:w-15 sm:h-15 rounded-2xl border-2 flex flex-col items-center justify-center text-white select-none shadow-xl cursor-pointer transition-all duration-75 touch-none ${
-                    controls.down
-                      ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
-                      : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
-                  } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
-                  title="Спуститися вниз / Присісти (S / ↓)"
-                >
-                  <span className="text-xl sm:text-2xl font-black">↓</span>
-                  <span className="text-[8px] font-mono font-bold text-zinc-400 mt-[-2px]">ВНИЗ</span>
-                </button>
-
-                {/* PRIMARY JUMP ACTION BUTTON (ПРИЖОК) */}
-                <button
-                  id="touch-ctrl-jump"
-                  type="button"
-                  style={{ touchAction: 'none' }}
-                  {...getContinuousTouchHandlers('jump')}
-                  className={`${
-                    buttonScale === 'large'
-                      ? 'w-28 sm:w-34 h-13 sm:h-15'
-                      : 'w-24 sm:w-28 h-13 sm:h-15'
-                  } rounded-2xl border-2 flex items-center justify-center gap-2 select-none cursor-pointer transition-all duration-75 font-mono tracking-widest text-xs sm:text-sm font-bold touch-none ${
-                    controls.jump
-                      ? 'bg-amber-400 text-black border-amber-300 scale-95 shadow-[0_0_25px_rgba(245,158,11,0.8)]'
-                      : 'bg-gradient-to-r from-amber-950/90 via-amber-900/80 to-amber-950/90 hover:from-amber-900 hover:to-amber-950 border-amber-500 text-amber-300 shadow-[0_0_20px_rgba(245,158,11,0.35)]'
-                  } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
-                  title="Стрибок (Пробіл або Z)"
-                >
-                  <span className="text-base sm:text-lg">▲</span>
-                  <span>ПРИЖОК</span>
-                </button>
-              </div>
-
             </div>
 
           </motion.div>

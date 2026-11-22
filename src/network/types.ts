@@ -146,6 +146,8 @@ export type NetworkPacket =
         heldBy?: string;
         isStuck: boolean;
         stuckTarget?: 'player' | 'npc' | string;
+        stuckWallNormal?: number;
+        stuckAngle?: number;
         isAirborne: boolean;
         pearlVariant?: number;
         flyAlive?: boolean;
