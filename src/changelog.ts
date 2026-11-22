@@ -13,6 +13,26 @@ export interface ChangelogEntry {
 
 export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
   {
+    version: '1.6.1',
+    date: '2026-11-22',
+    title: {
+      uk: 'Спавн після смерті в новому циклі, видимість у спостереженні й адаптивні мобільні кнопки',
+      en: 'Post-Death Cycle Respawn, Spectator Entity Sync & Responsive Mobile Controls',
+    },
+    changes: {
+      uk: [
+        'Виправлено спавн у новому циклі після смерті: очищено старі стани смерті/сну перед переходом, усунено гонку відновлення між хостом і клієнтом, а також скинуто транзит по трубах і таймер шторму при старті нового циклу.',
+        'Виправлено видимість істот і предметів у режимі спостерігача: розділено запит предметів кімнати та відновлення позиції гравця, тож при спостереженні за іншим гравцем синхронізуються живі предмети, мухи-кажани, застряглі списи та ящери саме тієї локації.',
+        'Перероблено сенсорні кнопки керування на телефонах: зменшено зайві нижні відступи, ігрова сцена коректно масштабується під висоту екрана, а права панель переведена у компактну 3-колонкову сітку з окремим верхнім рядом для дій («ЇСТИ», «НА СПИНУ»), щоб кнопки ніколи не виходили за межі екрана.',
+      ],
+      en: [
+        'Fixed respawning into a new cycle after death by clearing old cycle peer states early, blocking stale restore/lizard-grab packets across cycle transitions, and resetting pipe transit and storm timers synchronously.',
+        'Fixed invisible creatures, batflies, and items in spectator mode: separated room item requests from reconnect state-restoration and added continuous multi-room authoritative item & batfly syncing for occupied and spectated rooms.',
+        'Redesigned mobile touch controls into a compact 3-column grid with a stacked contextual strip ("EAT", "PIGGYBACK") and proper viewport scaling so buttons stay comfortably inside both portrait and landscape phone screens.',
+      ],
+    },
+  },
+  {
     version: '1.6.0',
     date: '2026-11-22',
     title: {
@@ -23,8 +43,6 @@ export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
       uk: [
         'Виправлено баг телепортації під час спостереження: коли гравець спить в укритті та стежить за іншим гравцем, перемикається лише камера — його слимакокіт фізично залишається у своєму укритті.',
         'Повністю заблоковано рух, дії та переходи між локаціями під час сну, а сам слимакокіт тепер виразно скручується клубочком, підгинає лапки, заплющує очі й показує анімацію «z Z» і значок 💤 біля ніку.',
-        'Виправлено видимість предметів, мух-кажанів та ящерів у режимі спостерігача: при перегляді іншої кімнати синхронізується її живий стан без зриву камери.',
-        'Виправлено спавн у новому циклі після смерті та перероблено сенсорні кнопки керування на телефонах, щоб жодна кнопка не виходила за межі екрана.',
         'Покращено підключення в мультиплеєрному лобі: виправлено помилкове створення окремої кімнати при вході, збільшено таймаути сигналінгу, додано повторну перевірку списку кімнат та вхід по кліку на всю картку кімнати.',
         'Додано збереження стану гравців у хоста на весь цикл: якщо гравець вийшов або перезавантажив сторінку, його слимакокіт залишається фізично на своєму місці (видимий іншим), а при поверненні відновлюється позиція, кімната, здоровʼя та смерть (не можна ожити перезаходом).',
         'Урон від штормового дощу тепер рахується як загроза та автоматично вмикає музику небезпеки.',
@@ -34,8 +52,6 @@ export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
       en: [
         'Fixed the sleep-spectating teleport bug: spectating another player now switches only the spectator camera while your slugcat stays physically inside your shelter.',
         'Locked all movement, actions, and manual room transitions while sleeping, and added a curled sleeping pose with tucked arms, soft glow, animated rising "z Z" FX, and a 💤 nametag indicator.',
-        'Fixed invisible creatures, batflies, and items while spectating players in other rooms by syncing live room items without snapping the spectator back.',
-        'Fixed respawning cleanly into a new cycle after death and redesigned mobile touch controls so buttons stay compact and never clip off-screen.',
         'Fixed lobby matchmaking/room joining randomly spawning a separate room: increased signaling timeouts, added list retry & concurrency guards, and made full room cards clickable.',
         'Added host-side cycle state persistence: disconnected or reloaded players leave their slugcat physically at their last spot in the world and automatically restore their room, position, health, and death state on rejoin (preventing death-relog exploits).',
         'Lethal storm rain damage now counts as active danger and triggers danger/battle music.',
