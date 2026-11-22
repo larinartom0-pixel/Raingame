@@ -94,8 +94,8 @@ export class WebRTCManager {
     this.statusHandlers.forEach(h => h(s));
   }
 
-  public static GLOBAL_ROOM_ID = 'rain-world-global-main';
-  public static GLOBAL_ROOM_NAME = 'Спільний світ Rain World (1 кімната для всіх)';
+  public static GLOBAL_ROOM_ID = 'rain-game-global-main';
+  public static GLOBAL_ROOM_NAME = 'Спільний світ Rain Game (1 кімната для всіх)';
 
   public async joinGlobalWorld(): Promise<boolean> {
     this.disconnect();
@@ -214,7 +214,7 @@ export class WebRTCManager {
 
     // If no compatible rooms exist or all are full (12/12), automatically create a room!
     const randomCycle = Math.random() < 0.08 ? 12 * 60 : (180 + Math.floor(Math.random() * (420 - 180 + 1)));
-    const roomName = `Світ Rain World #${Math.floor(Math.random() * 899 + 100)}`;
+    const roomName = `Світ Rain Game #${Math.floor(Math.random() * 899 + 100)}`;
     return await this.hostRoom(roomName, randomCycle, 12);
   }
 

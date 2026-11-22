@@ -61,7 +61,7 @@ export class SignalingClient {
         const version = extractRoomVersion(room.name, room.version);
         return {
           ...room,
-          name: stripRoomVersionTag(room.name || 'Кімната Rain World'),
+          name: stripRoomVersionTag(room.name || 'Кімната Rain Game'),
           version,
         };
       });

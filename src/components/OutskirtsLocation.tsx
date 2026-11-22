@@ -6363,7 +6363,7 @@ export default function OutskirtsLocation({
                         ГОЛОГРАФІЧНА КАРТА: {currentLocation.name.toUpperCase()} // {currentLocation.region}
                       </h3>
                       <p className="text-[9px] text-zinc-400">
-                        Rain World Room Radar • Позиція слимакокота, платформи, шести та труби
+                        Rain Game Room Radar • Позиція слимакокота, платформи, шести та труби
                       </p>
                     </div>
                   </div>

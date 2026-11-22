@@ -1,6 +1,6 @@
 {
   "name": "Rain Game",
-  "description": "An atmospheric Rain World-style intro featuring interactive rain canvas, a reactive Slugcat, and procedural ambient synthesizer.",
+  "description": "rain game — an atmospheric 2D survival platformer featuring interactive rain canvas, procedural creatures, physics combat, and WebRTC multiplayer.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

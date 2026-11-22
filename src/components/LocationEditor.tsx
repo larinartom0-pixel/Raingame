@@ -65,7 +65,7 @@ export default function LocationEditor({
   const [showResizeModal, setShowResizeModal] = useState(false);
   const [showJsonModal, setShowJsonModal] = useState(false);
   const [jsonInputText, setJsonInputText] = useState('');
-  const [editorToast, setEditorToast] = useState<string | null>('Редактор локацій Rain World активний');
+  const [editorToast, setEditorToast] = useState<string | null>('Редактор локацій Rain Game активний');
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
 
   // Dimension edit state
@@ -328,7 +328,7 @@ export default function LocationEditor({
         };
         setLocation(prev => ({ ...prev, transitPipes: [...prev.transitPipes, newPipe] }));
         setTransitStartPoint(null);
-        showToast('Трубу-перехід Rain World створено!');
+        showToast('Трубу-перехід створено!');
         if (!isSoundMuted) soundEngine.playPickup();
       }
       return;
@@ -490,7 +490,7 @@ export default function LocationEditor({
           };
           setLocation(prev => ({ ...prev, transitPipes: [...prev.transitPipes, newPipe] }));
           setTransitStartPoint(null);
-          showToast('Трубу-перехід Rain World створено!');
+          showToast('Трубу-перехід створено!');
           if (!isSoundMuted) soundEngine.playPickup();
         }
         return;
@@ -1213,7 +1213,7 @@ export default function LocationEditor({
           </div>
 
           <div className="text-[9px] font-mono uppercase tracking-wider text-zinc-500 font-bold px-1 pt-1 border-t border-zinc-800">
-            Труби Rain World
+            Труби та переходи
           </div>
 
           <div className="grid grid-cols-2 gap-1.5">
@@ -1583,7 +1583,7 @@ export default function LocationEditor({
               </div>
 
               <p className="text-xs text-zinc-400 leading-relaxed">
-                За замовчуванням карта Rain World 1000×580 px. Ви можете зробити її в рази більшою: динамічна камера автоматично плавно стежитиме за слимакокотом по всій території!
+                За замовчуванням карта має розмір 1000×580 px. Ви можете зробити її в рази більшою: динамічна камера автоматично плавно стежитиме за персонажем по всій території!
               </p>
 
               {/* Ready Size Presets */}

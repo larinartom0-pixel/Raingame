@@ -1,7 +1,7 @@
 export const PYTHONANYWHERE_FLASK_CODE = `"""
-Rain World WebRTC Signaling Server for PythonAnywhere (Free Tier WSGI)
+Rain Game WebRTC Signaling Server for PythonAnywhere (Free Tier WSGI)
 Domain: https://larinarten.pythonanywhere.com
-Author: Rain World P2P Engine
+Author: Rain Game P2P Engine
 
 ІНСТРУКЦІЯ ДЛЯ ВСТАНОВЛЕННЯ НА PYTHONANYWHERE:
 1. Зайдіть у свій акаунт: https://www.pythonanywhere.com
@@ -77,7 +77,7 @@ def cleanup_stale_data():
 def home():
     return jsonify({
         "status": "online",
-        "service": "Rain World WebRTC Signaling Server",
+        "service": "Rain Game WebRTC Signaling Server",
         "version": "1.1.0",
         "active_rooms": len(rooms),
         "endpoint": "/api/rooms"
@@ -111,7 +111,7 @@ def handle_rooms():
 
             room_list.append({
                 "id": r_id,
-                "name": r.get('name', 'Rain World Room'),
+                "name": r.get('name', 'Rain Game Room'),
                 "hostId": r.get('hostId', ''),
                 "hostName": r.get('hostName', 'Slugcat Host'),
                 "version": r.get('version', '1.0.0'),
