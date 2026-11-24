@@ -13,6 +13,28 @@ export interface ChangelogEntry {
 
 export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
   {
+    version: '1.7.0',
+    date: '2026-11-24',
+    title: {
+      uk: 'Автопошук музики, вінілова пластинка, 10 рівнів карми та стартове передзавантаження',
+      en: 'Auto Music Discovery, Spinning Vinyl Toast, 10 Karma Levels & Startup Preloader',
+    },
+    changes: {
+      uk: [
+        'Перероблено систему музики під автоматичне сканування папок (Main_menu, In_game, In_battle): нові треки підхоплюються автоматично без редагування коду, разом з ID3-назвою, автором та обкладинкою (або сусіднім зображенням). У Налаштуваннях додано кнопку оновлення списку та мініатюри обкладинок.',
+        'Додано анімовану вінілову пластинку зліва зверху: при старті кожного треку вона виїжджає, крутиться кілька секунд з обкладинкою, категорією, назвою та автором, і плавно заїжджає назад.',
+        'Розширено систему карми з 5 до 10 рівнів (I–X): додано нові символи VI «Зречення», VII «Пробудження», VIII «Гармонія», IX «Поріг» та X «Вознесіння» із золотистим сяйвом, оновлено підказки HUD та сітку 1–10 на екрані завершення циклу.',
+        'Додано стартовий екран завантаження при відкритті сторінки з миттєвим передзавантаженням музики, реальним прогресом у відсотках і мегабайтах (МБ) та кнопкою «Пропустити», яка зʼявляється через 6 секунд і одразу відкриває меню вибору мови.',
+      ],
+      en: [
+        'Refactored music loading into automatic folder discovery (Main_menu, In_game, In_battle): new audio files are detected automatically without code edits, complete with ID3 title, artist, and embedded/sidecar cover art plus a Settings rescan button.',
+        'Added a top-left spinning vinyl record notification toast that slides in whenever a track starts playing, displaying its cover artwork, category badge, title, and artist before smoothly retracting.',
+        'Expanded the Karma system from 5 to 10 levels (I–X) with sacred glyphs for VI Detachment, VII Awakening, VIII Harmony, IX Threshold, and X Ascension, updated HUD tooltips, and upgraded the Cycle End screen to a 10-slot progression grid.',
+        'Added an immediate startup loading screen that preloads game music on page load with real-time byte/MB percentage tracking and a bottom "Skip" button after 6 seconds that jumps straight to the language selection menu.',
+      ],
+    },
+  },
+  {
     version: '1.6.1',
     date: '2026-11-22',
     title: {

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, SkipForward } from 'lucide-react';
 import { useGameSettings } from '../settings';
 import { LOADING_TIPS_I18N, t } from '../i18n';
 
@@ -8,9 +8,21 @@ interface LoadingScreenProps {
   isLoading: boolean;
   onFinished?: () => void;
   title?: string;
+  externalProgress?: number;
+  statusText?: string;
+  showSkipButton?: boolean;
+  onSkip?: () => void;
 }
 
-export default function LoadingScreen({ isLoading, onFinished, title }: LoadingScreenProps) {
+export default function LoadingScreen({
+  isLoading,
+  onFinished,
+  title,
+  externalProgress,
+  statusText,
+  showSkipButton = false,
+  onSkip,
+}: LoadingScreenProps) {
   const { language } = useGameSettings();
   const tips = LOADING_TIPS_I18N[language];
   const resolvedTitle = title || t(language, 'loadingDefault');
@@ -23,9 +35,19 @@ export default function LoadingScreen({ isLoading, onFinished, title }: LoadingS
       return;
     }
 
+    const tipInterval = setInterval(() => {
+      setTipIndex((prev) => (prev + 1) % tips.length);
+    }, 2800);
+
+    if (typeof externalProgress === 'number') {
+      return () => {
+        clearInterval(tipInterval);
+      };
+    }
+
     setProgress(15);
     const interval = setInterval(() => {
-      setProgress(prev => {
+      setProgress((prev) => {
         if (prev >= 95) {
           clearInterval(interval);
           return 95;
@@ -34,15 +56,18 @@ export default function LoadingScreen({ isLoading, onFinished, title }: LoadingS
       });
     }, 120);
 
-    const tipInterval = setInterval(() => {
-      setTipIndex(prev => (prev + 1) % tips.length);
-    }, 2800);
-
     return () => {
       clearInterval(interval);
       clearInterval(tipInterval);
     };
-  }, [isLoading, tips.length]);
+  }, [isLoading, tips.length, externalProgress]);
+
+  const effectiveProgress =
+    typeof externalProgress === 'number'
+      ? Math.max(0, Math.min(100, Math.round(externalProgress)))
+      : Math.min(100, progress);
+
+  const effectiveStatus = statusText || t(language, 'loadingProgressLabel');
 
   return (
     <AnimatePresence onExitComplete={onFinished}>
@@ -51,8 +76,8 @@ export default function LoadingScreen({ isLoading, onFinished, title }: LoadingS
           key="loading-screen"
           initial={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: 0.65, ease: 'easeInOut' }}
-          className="fixed inset-0 z-[100] bg-[#050408] flex flex-col items-center justify-between p-6 sm:p-10 select-none overflow-hidden"
+          transition={{ duration: 0.55, ease: 'easeInOut' }}
+          className="fixed inset-0 z-[140] bg-[#050408] flex flex-col items-center justify-between p-6 sm:p-10 select-none overflow-hidden"
         >
           {/* Ambient Rain Streaks Background */}
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(40,15,30,0.4)_0%,black_85%)] pointer-events-none" />
@@ -99,12 +124,12 @@ export default function LoadingScreen({ isLoading, onFinished, title }: LoadingS
             </div>
 
             {/* Title & Progress Label */}
-            <div className="mt-6 text-center space-y-1">
+            <div className="mt-6 text-center space-y-1 max-w-md px-2">
               <h2 className="text-sm sm:text-base font-bold font-mono tracking-[0.25em] text-white">
                 {resolvedTitle}
               </h2>
-              <p className="text-[11px] font-mono text-zinc-400">
-                {t(language, 'loadingProgressLabel')} {Math.min(100, progress)}%
+              <p className="text-[11px] font-mono text-zinc-400 truncate">
+                {effectiveStatus} {effectiveProgress}%
               </p>
             </div>
 
@@ -112,14 +137,14 @@ export default function LoadingScreen({ isLoading, onFinished, title }: LoadingS
             <div className="w-56 sm:w-72 h-1.5 bg-zinc-900 rounded-full mt-4 overflow-hidden border border-zinc-800">
               <motion.div
                 className="h-full bg-gradient-to-r from-pink-500 via-amber-400 to-pink-500 rounded-full"
-                animate={{ width: `${Math.min(100, progress)}%` }}
+                animate={{ width: `${effectiveProgress}%` }}
                 transition={{ ease: 'easeOut', duration: 0.2 }}
               />
             </div>
           </div>
 
-          {/* Bottom Cycling Lore Tip */}
-          <div className="relative z-10 max-w-md text-center">
+          {/* Bottom Lore Tip + Delayed Skip Button (> 6s) */}
+          <div className="relative z-10 w-full max-w-md flex flex-col items-center gap-3 text-center">
             <AnimatePresence mode="wait">
               <motion.p
                 key={tipIndex}
@@ -127,10 +152,34 @@ export default function LoadingScreen({ isLoading, onFinished, title }: LoadingS
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.35 }}
-                className="text-[11px] sm:text-xs font-mono text-zinc-400 bg-black/60 border border-zinc-800/80 px-4 py-2.5 rounded-xl shadow-lg leading-relaxed"
+                className="text-[11px] sm:text-xs font-mono text-zinc-400 bg-black/60 border border-zinc-800/80 px-4 py-2.5 rounded-xl shadow-lg leading-relaxed w-full"
               >
                 {tips[tipIndex % tips.length]}
               </motion.p>
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {showSkipButton && onSkip && (
+                <motion.div
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  transition={{ duration: 0.35 }}
+                  className="flex flex-col items-center gap-1.5 pt-1"
+                >
+                  <span className="text-[10px] font-mono text-zinc-500">
+                    {t(language, 'bootSkipHint')}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={onSkip}
+                    className="px-5 py-2.5 rounded-full border border-amber-500/60 bg-amber-950/50 hover:bg-amber-500 hover:text-black text-amber-200 font-mono text-xs font-bold uppercase tracking-[0.16em] shadow-[0_0_24px_rgba(245,158,11,0.22)] transition-all duration-200 flex items-center gap-2 cursor-pointer active:scale-95"
+                  >
+                    <span>{t(language, 'bootSkipBtn')}</span>
+                    <SkipForward className="w-3.5 h-3.5" />
+                  </button>
+                </motion.div>
+              )}
             </AnimatePresence>
           </div>
         </motion.div>

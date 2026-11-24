@@ -20,7 +20,7 @@ import {
   DEFAULT_OUTSKIRTS_LOCATION, SHELTER_OUTSKIRTS_LOCATION,
   getLocationById, getLocationFloorY, resolveSafeSpawn, resolveSafeLizardSpawn,
   SlugcatCharacterId, SLUGCAT_CHARACTERS, roundToOneDecimal,
-  ItemType, WeaponItemType, ShelterPearlSave
+  ItemType, WeaponItemType, ShelterPearlSave, MAX_KARMA
 } from '../types';
 import { APP_VERSION, compareVersions } from '../version';
 import SettingsModal from './SettingsModal';
@@ -331,8 +331,8 @@ export default function OutskirtsLocation({
       if (saved) {
         const p = JSON.parse(saved);
         return {
-          karma: typeof p.karma === 'number' ? Math.min(5, Math.max(1, p.karma)) : 1,
-          maxKarma: 5,
+          karma: typeof p.karma === 'number' ? Math.min(MAX_KARMA, Math.max(1, p.karma)) : 1,
+          maxKarma: MAX_KARMA,
           cycle: typeof p.cycle === 'number' ? Math.max(1, p.cycle) : 1,
           food: typeof p.food === 'number' ? Math.min(7, Math.max(0, p.food)) : 0,
           lastLocationId: p.lastLocationId || 'shelter-outskirts',
@@ -576,7 +576,7 @@ export default function OutskirtsLocation({
       if (currentLocation.isShelterRoom || inShelterChamber) {
         const emergencySave: PlayerSaveData = {
           karma: playerSave.karma,
-          maxKarma: 5,
+          maxKarma: MAX_KARMA,
           cycle: playerSave.cycle + 1,
           food: Math.max(charConfig.requiredFood, foodCount),
           lastLocationId: currentLocation.id,
@@ -1276,7 +1276,7 @@ export default function OutskirtsLocation({
         saveData.playerSpawnX,
         saveData.playerSpawnY,
         undefined,
-        `🔄 Цикл ${saveData.cycle} розпочато • Укриття: ${savedLoc.name} (Карма ${saveData.karma}/5)`
+        `🔄 Цикл ${saveData.cycle} розпочато • Укриття: ${savedLoc.name} (Карма ${saveData.karma}/${MAX_KARMA})`
       );
 
       if (webRTCManager.connectionStatus === 'connected') {
@@ -1339,7 +1339,7 @@ export default function OutskirtsLocation({
 
       const personalOutcome: 'hibernation' | 'death' = localSlept ? 'hibernation' : 'death';
       const newKarma = personalOutcome === 'hibernation'
-        ? Math.min(5, oldKarma + 1)
+        ? Math.min(MAX_KARMA, oldKarma + 1)
         : Math.max(1, oldKarma - 1);
       const nextCycle = personalOutcome === 'hibernation' ? save.cycle + 1 : save.cycle;
 
@@ -1379,7 +1379,7 @@ export default function OutskirtsLocation({
       const savedLoc = getLocationById(nextLocId) || SHELTER_OUTSKIRTS_LOCATION;
       const updatedSave: PlayerSaveData = {
         karma: newKarma,
-        maxKarma: 5,
+        maxKarma: MAX_KARMA,
         cycle: nextCycle,
         food: nextFood,
         lastLocationId: savedLoc.id,
@@ -6955,7 +6955,7 @@ export default function OutskirtsLocation({
           <div className="absolute bottom-3 left-3 sm:bottom-4 sm:left-4 z-30 flex items-center gap-3.5 pointer-events-none select-none">
             <div
               className="relative w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]"
-              title={`${getKarmaLabel(playerSave.karma, lang)} (${playerSave.karma}/5) • ${Math.floor(cycleSecondsLeft / 60)}m ${cycleSecondsLeft % 60}s`}
+              title={`${getKarmaLabel(playerSave.karma, lang)} (${playerSave.karma}/${MAX_KARMA}) • ${Math.floor(cycleSecondsLeft / 60)}m ${cycleSecondsLeft % 60}s`}
             >
               <svg className="absolute inset-0 w-full h-full overflow-visible" viewBox="0 0 60 60" fill="none">
                 <circle cx="30" cy="30" r="28" fill="rgba(0,0,0,0.62)" />
@@ -7808,21 +7808,24 @@ export default function OutskirtsLocation({
                   />
                 </motion.div>
 
-                {/* Mini 1..5 Karma progression strip */}
-                <div className="flex items-center gap-2 pt-1">
-                  {[1, 2, 3, 4, 5].map((lvl) => {
+                {/* 1..10 Karma progression grid (2 rows of 5) */}
+                <div className="grid grid-cols-5 gap-1.5 sm:gap-2 pt-1">
+                  {Array.from({ length: MAX_KARMA }, (_, i) => i + 1).map((lvl) => {
                     const isCurrent = lvl === cycleEndOverlay.newKarma;
                     const isPrev = lvl === cycleEndOverlay.oldKarma && cycleEndOverlay.oldKarma !== cycleEndOverlay.newKarma;
+                    const isHigherTier = lvl >= 6;
                     return (
                       <div
                         key={lvl}
-                        className={`p-1.5 rounded-xl border transition-all ${
+                        className={`p-1.5 rounded-xl border flex items-center justify-center transition-all ${
                           isCurrent
                             ? cycleEndOverlay.outcome === 'hibernation'
                               ? 'border-amber-400 bg-amber-950/60 scale-110 shadow-md shadow-amber-500/20'
                               : 'border-red-400 bg-red-950/60 scale-110 shadow-md shadow-red-500/20'
                             : isPrev
-                            ? 'border-zinc-600 bg-zinc-900/70 opacity-60'
+                            ? 'border-zinc-600 bg-zinc-900/70 opacity-65'
+                            : isHigherTier
+                            ? 'border-amber-900/50 bg-black/50 opacity-45'
                             : 'border-zinc-800/70 bg-black/50 opacity-35'
                         }`}
                       >
@@ -7834,6 +7837,8 @@ export default function OutskirtsLocation({
                               ? cycleEndOverlay.outcome === 'hibernation'
                                 ? '#fbbf24'
                                 : '#f87171'
+                              : isHigherTier
+                              ? '#fcd34d'
                               : '#a1a1aa'
                           }
                         />
@@ -7853,10 +7858,10 @@ export default function OutskirtsLocation({
                   {cycleEndOverlay.outcome === 'hibernation'
                     ? cycleEndOverlay.newKarma > cycleEndOverlay.oldKarma
                       ? `${t(lang, 'karmaUpgraded')} (${cycleEndOverlay.oldKarma} → ${cycleEndOverlay.newKarma})`
-                      : `${t(lang, 'karmaMaxed')} (5 / 5)`
+                      : `${t(lang, 'karmaMaxed')} (${MAX_KARMA} / ${MAX_KARMA})`
                     : cycleEndOverlay.newKarma < cycleEndOverlay.oldKarma
                     ? `${t(lang, 'karmaReduced')} (${cycleEndOverlay.oldKarma} → ${cycleEndOverlay.newKarma})`
-                    : `${t(lang, 'karmaMinimal')} (1 / 5)`}
+                    : `${t(lang, 'karmaMinimal')} (1 / ${MAX_KARMA})`}
                 </div>
               </div>
 

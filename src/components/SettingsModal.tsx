@@ -15,6 +15,8 @@ import {
   Sparkles,
   AlertCircle,
   Globe,
+  RefreshCw,
+  Disc3,
 } from 'lucide-react';
 import {
   useGameSettings,
@@ -30,10 +32,10 @@ import {
   GraphicsPreset,
   AppLanguage,
 } from '../settings';
-import { musicManager, MUSIC_TRACK_CATALOG, MusicManagerState } from '../audio/MusicManager';
+import { musicManager, type MusicManagerState, type MusicTrackInfo } from '../audio/MusicManager';
 import { soundEngine } from './RainWorldSynth';
 import { webRTCManager } from '../network/WebRTCManager';
-import { KEYBIND_LABELS_I18N, MUSIC_TRACK_TITLES_I18N, t } from '../i18n';
+import { KEYBIND_LABELS_I18N, t } from '../i18n';
 
 type SettingsTab = 'profile' | 'graphics' | 'controls' | 'music';
 
@@ -59,6 +61,8 @@ export default function SettingsModal({
   const [nicknameSavedToast, setNicknameSavedToast] = useState(false);
   const [listeningAction, setListeningAction] = useState<keyof KeyBindings | null>(null);
   const [musicState, setMusicState] = useState<MusicManagerState>(() => musicManager.getState());
+  const [catalogTracks, setCatalogTracks] = useState<MusicTrackInfo[]>(() => musicManager.getCatalog());
+  const [isRefreshingTracks, setIsRefreshingTracks] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -67,12 +71,31 @@ export default function SettingsModal({
     }
     setNicknameInput(settings.nickname);
     setMusicState(musicManager.getState());
+    setCatalogTracks([...musicManager.getCatalog()]);
   }, [isOpen, settings.nickname]);
 
   useEffect(() => {
-    const unsub = musicManager.subscribe(setMusicState);
+    const unsub = musicManager.subscribe((next) => {
+      setMusicState(next);
+      setCatalogTracks([...musicManager.getCatalog()]);
+    });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'music') return;
+    let cancelled = false;
+    setIsRefreshingTracks(true);
+    musicManager.refreshCatalog().finally(() => {
+      if (!cancelled) {
+        setCatalogTracks([...musicManager.getCatalog()]);
+        setIsRefreshingTracks(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, activeTab]);
 
   // Capture keybind remapping cleanly
   useEffect(() => {
@@ -127,7 +150,6 @@ export default function SettingsModal({
   ];
 
   const keybindLabels = KEYBIND_LABELS_I18N[lang];
-  const trackTitles = MUSIC_TRACK_TITLES_I18N[lang];
 
   return (
     <AnimatePresence>
@@ -511,16 +533,33 @@ export default function SettingsModal({
                         {t(lang, 'musicTesterDesc')}
                       </p>
                     </div>
-                    {musicState.isPreviewing && (
+                    <div className="flex items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => musicManager.stopPreview(resumeMusicCategory)}
+                        onClick={() => {
+                          if (isRefreshingTracks) return;
+                          setIsRefreshingTracks(true);
+                          musicManager.refreshCatalog().finally(() => {
+                            setCatalogTracks([...musicManager.getCatalog()]);
+                            setIsRefreshingTracks(false);
+                          });
+                        }}
                         className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-zinc-200 font-mono text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                       >
-                        <Square className="w-3 h-3 fill-current" />
-                        <span>{t(lang, 'stopTest')}</span>
+                        <RefreshCw className={`w-3 h-3 ${isRefreshingTracks ? 'animate-spin' : ''}`} />
+                        <span>{t(lang, 'refreshTracksBtn')}</span>
                       </button>
-                    )}
+                      {musicState.isPreviewing && (
+                        <button
+                          type="button"
+                          onClick={() => musicManager.stopPreview(resumeMusicCategory)}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-zinc-200 font-mono text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                        >
+                          <Square className="w-3 h-3 fill-current" />
+                          <span>{t(lang, 'stopTest')}</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {musicState.lastError && (
@@ -532,73 +571,95 @@ export default function SettingsModal({
 
                   <div className="space-y-3">
                     {categories.map((cat) => {
-                      const tracks = MUSIC_TRACK_CATALOG.filter((tr) => tr.category === cat.id);
+                      const tracks = catalogTracks.filter((tr) => tr.category === cat.id);
                       return (
                         <div key={cat.id} className="space-y-1.5">
                           <div className={`inline-block px-2 py-0.5 rounded border text-[10px] font-mono font-bold ${cat.badgeClass}`}>
-                            {cat.title}
+                            {cat.title} ({tracks.length})
                           </div>
-                          <div className="space-y-1">
-                            {tracks.map((track) => {
-                              const isCurrent = musicState.currentTrackUrl === track.url;
-                              const isActivelyPlaying = isCurrent && (musicState.isPlaying || musicState.isLoading);
-                              return (
-                                <div
-                                  key={track.id}
-                                  className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border transition-all ${
-                                    isCurrent && musicState.isPreviewing
-                                      ? 'bg-amber-950/40 border-amber-500/70'
-                                      : 'bg-black/60 border-zinc-800/80'
-                                  }`}
-                                >
-                                  <div className="min-w-0">
-                                    <div className="text-xs font-mono text-zinc-200 truncate">
-                                      {trackTitles[track.id] || track.title}
-                                    </div>
-                                    {isCurrent && (
-                                      <div className="text-[10px] font-mono text-amber-400">
-                                        {musicState.isLoading
-                                          ? t(lang, 'trackLoading')
-                                          : musicState.isPreviewing
-                                          ? t(lang, 'trackPreviewing')
-                                          : t(lang, 'trackPlayingBg')}
-                                      </div>
-                                    )}
-                                  </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (isSoundMuted) {
-                                        toggleSound();
-                                      }
-                                      if (isCurrent && musicState.isPreviewing && isActivelyPlaying) {
-                                        musicManager.stopPreview(resumeMusicCategory);
-                                      } else {
-                                        musicManager.playPreviewTrack(track.url);
-                                      }
-                                    }}
-                                    className={`px-3 py-1.5 rounded-lg border font-mono text-[10px] font-bold flex items-center gap-1.5 cursor-pointer shrink-0 transition-all ${
-                                      isCurrent && musicState.isPreviewing && isActivelyPlaying
-                                        ? 'bg-red-950/70 border-red-500/70 text-red-200 hover:bg-red-900/70'
-                                        : 'bg-zinc-900 border-zinc-700 text-amber-300 hover:bg-amber-500 hover:text-black hover:border-amber-400'
+                          {tracks.length === 0 ? (
+                            <div className="px-3 py-2 rounded-xl border border-dashed border-zinc-800 text-[11px] font-mono text-zinc-500">
+                              {t(lang, 'noTracksInCategory')}
+                            </div>
+                          ) : (
+                            <div className="space-y-1">
+                              {tracks.map((track) => {
+                                const isCurrent = musicState.currentTrackUrl === track.url;
+                                const isActivelyPlaying = isCurrent && (musicState.isPlaying || musicState.isLoading);
+                                return (
+                                  <div
+                                    key={track.id}
+                                    className={`flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl border transition-all ${
+                                      isCurrent && musicState.isPreviewing
+                                        ? 'bg-amber-950/40 border-amber-500/70'
+                                        : 'bg-black/60 border-zinc-800/80'
                                     }`}
                                   >
-                                    {isCurrent && musicState.isPreviewing && isActivelyPlaying ? (
-                                      <>
-                                        <Square className="w-3 h-3 fill-current" />
-                                        <span>{t(lang, 'stopTrack')}</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Play className="w-3 h-3 fill-current" />
-                                        <span>{t(lang, 'playTrack')}</span>
-                                      </>
-                                    )}
-                                  </button>
-                                </div>
-                              );
-                            })}
-                          </div>
+                                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                      {track.coverUrl ? (
+                                        <img
+                                          src={track.coverUrl}
+                                          alt={track.title}
+                                          className="w-9 h-9 rounded-lg object-cover border border-zinc-700/80 shrink-0"
+                                        />
+                                      ) : (
+                                        <div className="w-9 h-9 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500 shrink-0">
+                                          <Disc3 className={`w-4 h-4 ${isActivelyPlaying ? 'animate-spin text-amber-400' : ''}`} />
+                                        </div>
+                                      )}
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-mono text-zinc-100 font-bold truncate">
+                                          {track.title}
+                                        </div>
+                                        <div className="text-[10px] font-mono text-zinc-400 truncate">
+                                          {track.artist || t(lang, 'unknownArtist')} • {track.filename}
+                                        </div>
+                                        {isCurrent && (
+                                          <div className="text-[10px] font-mono text-amber-400">
+                                            {musicState.isLoading
+                                              ? t(lang, 'trackLoading')
+                                              : musicState.isPreviewing
+                                              ? t(lang, 'trackPreviewing')
+                                              : t(lang, 'trackPlayingBg')}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (isSoundMuted) {
+                                          toggleSound();
+                                        }
+                                        if (isCurrent && musicState.isPreviewing && isActivelyPlaying) {
+                                          musicManager.stopPreview(resumeMusicCategory);
+                                        } else {
+                                          musicManager.playPreviewTrack(track.url);
+                                        }
+                                      }}
+                                      className={`px-3 py-1.5 rounded-lg border font-mono text-[10px] font-bold flex items-center gap-1.5 cursor-pointer shrink-0 transition-all ${
+                                        isCurrent && musicState.isPreviewing && isActivelyPlaying
+                                          ? 'bg-red-950/70 border-red-500/70 text-red-200 hover:bg-red-900/70'
+                                          : 'bg-zinc-900 border-zinc-700 text-amber-300 hover:bg-amber-500 hover:text-black hover:border-amber-400'
+                                      }`}
+                                    >
+                                      {isCurrent && musicState.isPreviewing && isActivelyPlaying ? (
+                                        <>
+                                          <Square className="w-3 h-3 fill-current" />
+                                          <span>{t(lang, 'stopTrack')}</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Play className="w-3 h-3 fill-current" />
+                                          <span>{t(lang, 'playTrack')}</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
                         </div>
                       );
                     })}

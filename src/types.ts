@@ -154,9 +154,11 @@ export interface ShelterPearlSave {
   y: number;
 }
 
+export const MAX_KARMA = 10;
+
 export interface PlayerSaveData {
-  karma: number; // 1 to 5
-  maxKarma: number; // 5
+  karma: number; // 1 to 10
+  maxKarma: number; // 10
   cycle: number; // 1, 2, 3...
   food: number; // 0 to maxFood
   lastLocationId: string;
@@ -168,7 +170,7 @@ export interface PlayerSaveData {
 
 export const DEFAULT_PLAYER_SAVE: PlayerSaveData = {
   karma: 1,
-  maxKarma: 5,
+  maxKarma: MAX_KARMA,
   cycle: 1,
   food: 0,
   lastLocationId: 'shelter-outskirts',

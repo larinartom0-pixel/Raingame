@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Sparkles, Play, Volume2, VolumeX, Settings, Globe, Layers, Maximize2, Minimize2, ScrollText } from 'lucide-react';
 
@@ -11,6 +11,7 @@ import MultiplayerLobbyModal from './components/MultiplayerLobbyModal';
 import SettingsModal from './components/SettingsModal';
 import ChangelogModal from './components/ChangelogModal';
 import LoadingScreen from './components/LoadingScreen';
+import NowPlayingVinylToast from './components/NowPlayingVinylToast';
 import { musicManager } from './audio/MusicManager';
 import { webRTCManager } from './network/WebRTCManager';
 import { APP_VERSION, compareVersions } from './version';
@@ -46,7 +47,25 @@ export default function App() {
     }
   };
 
-  // Loading Screen state
+  // Initial Startup Music Preload Screen state (shown immediately on page entry)
+  const [isBootLoading, setIsBootLoading] = useState<boolean>(true);
+  const [bootProgress, setBootProgress] = useState<number>(0);
+  const [bootProgressMeta, setBootProgressMeta] = useState<{
+    loaded: number;
+    total: number;
+    loadedBytes: number;
+    totalBytes: number;
+  }>({
+    loaded: 0,
+    total: 0,
+    loadedBytes: 0,
+    totalBytes: 0,
+  });
+  const [canSkipBoot, setCanSkipBoot] = useState<boolean>(false);
+  const [forceLanguageMenu, setForceLanguageMenu] = useState<boolean>(false);
+  const bootSkippedRef = useRef<boolean>(false);
+
+  // Loading Screen state (for world transitions)
   const [isLoadingWorld, setIsLoadingWorld] = useState<boolean>(false);
   const [loadingTitle, setLoadingTitle] = useState<string>('ЗАВАНТАЖЕННЯ СВІТУ');
   
@@ -57,6 +76,51 @@ export default function App() {
     lightningFlash: false,
     fogDensity: 0.35
   });
+
+  // Preload all music tracks immediately when opening the website; show Skip after 6 seconds if still loading
+  useEffect(() => {
+    const startMs = Date.now();
+    let cancelled = false;
+
+    const skipTimer = window.setTimeout(() => {
+      if (!cancelled && !bootSkippedRef.current) {
+        setCanSkipBoot(true);
+      }
+    }, 6000);
+
+    const unsubProgress = musicManager.subscribePreloadProgress(
+      ({ loaded, total, loadedBytes, totalBytes, percent }) => {
+        if (cancelled || bootSkippedRef.current) return;
+        setBootProgress(percent);
+        setBootProgressMeta({ loaded, total, loadedBytes, totalBytes });
+      }
+    );
+
+    musicManager.preloadAllTracks().finally(() => {
+      if (cancelled || bootSkippedRef.current) return;
+      setBootProgress(100);
+      const elapsed = Date.now() - startMs;
+      const minHold = Math.max(0, 500 - elapsed);
+      window.setTimeout(() => {
+        if (!cancelled && !bootSkippedRef.current) {
+          setIsBootLoading(false);
+        }
+      }, minHold);
+    });
+
+    return () => {
+      cancelled = true;
+      unsubProgress();
+      window.clearTimeout(skipTimer);
+    };
+  }, []);
+
+  const handleSkipBootLoading = () => {
+    bootSkippedRef.current = true;
+    setIsBootLoading(false);
+    setHasEntered(false);
+    setForceLanguageMenu(true);
+  };
 
   // Menu update check & silent on-screen reload state
   const [menuUpdateAvailable, setMenuUpdateAvailable] = useState<string | null>(null);
@@ -247,8 +311,8 @@ export default function App() {
                 RAIN GAME
               </h1>
 
-              {/* First-visit Language Picker or Localized Intro Content */}
-              {!settings.hasChosenLanguage ? (
+              {/* First-visit Language Picker (or forced via Skip button) vs Localized Intro Content */}
+              {!settings.hasChosenLanguage || forceLanguageMenu ? (
                 <div className="mt-6 space-y-4">
                   <div className="text-xs font-mono uppercase tracking-[0.2em] text-amber-300">
                     {t(lang, 'introChooseLang')}
@@ -258,7 +322,10 @@ export default function App() {
                       type="button"
                       whileHover={{ scale: 1.03 }}
                       whileTap={{ scale: 0.97 }}
-                      onClick={() => setLanguageSetting('uk')}
+                      onClick={() => {
+                        setLanguageSetting('uk');
+                        setForceLanguageMenu(false);
+                      }}
                       className="px-5 py-4 rounded-2xl border border-amber-500/50 bg-amber-950/30 hover:bg-amber-900/40 hover:border-amber-400 text-white font-mono transition-all cursor-pointer flex items-center justify-between shadow-[0_0_20px_rgba(245,158,11,0.12)]"
                     >
                       <div className="text-left">
@@ -274,7 +341,10 @@ export default function App() {
                       type="button"
                       whileHover={{ scale: 1.03 }}
                       whileTap={{ scale: 0.97 }}
-                      onClick={() => setLanguageSetting('en')}
+                      onClick={() => {
+                        setLanguageSetting('en');
+                        setForceLanguageMenu(false);
+                      }}
                       className="px-5 py-4 rounded-2xl border border-cyan-500/50 bg-cyan-950/30 hover:bg-cyan-900/40 hover:border-cyan-400 text-white font-mono transition-all cursor-pointer flex items-center justify-between shadow-[0_0_20px_rgba(6,182,212,0.12)]"
                     >
                       <div className="text-left">
@@ -684,8 +754,31 @@ export default function App() {
         onClose={() => setShowChangelogModal(false)}
       />
 
-      {/* 8. ATMOSPHERIC KARMA LOADING SCREEN */}
-      <LoadingScreen isLoading={isLoadingWorld} title={loadingTitle} />
+      {/* 8. ATMOSPHERIC KARMA LOADING SCREEN (STARTUP MUSIC PRELOAD & WORLD TRANSITIONS) */}
+      <LoadingScreen
+        isLoading={isBootLoading || isLoadingWorld}
+        title={isBootLoading ? t(lang, 'bootLoadingTitle') : loadingTitle}
+        externalProgress={isBootLoading ? bootProgress : undefined}
+        statusText={
+          isBootLoading
+            ? bootProgress >= 100
+              ? t(lang, 'bootLoadingAudioReady')
+              : `${t(lang, 'bootLoadingAudioPrefix')} (${bootProgressMeta.loaded}/${bootProgressMeta.total || '...'}${
+                  bootProgressMeta.totalBytes > 0
+                    ? ` • ${(bootProgressMeta.loadedBytes / (1024 * 1024)).toFixed(1)}/${(
+                        bootProgressMeta.totalBytes /
+                        (1024 * 1024)
+                      ).toFixed(1)} MB`
+                    : ''
+                }) •`
+            : undefined
+        }
+        showSkipButton={isBootLoading && canSkipBoot}
+        onSkip={isBootLoading ? handleSkipBootLoading : undefined}
+      />
+
+      {/* 8.1 TOP-LEFT SPINNING VINYL NOW-PLAYING TOAST */}
+      <NowPlayingVinylToast />
 
       {/* 9. BOTTOM-LEFT CURRENT VERSION INDICATOR */}
       <div className="fixed bottom-1.5 left-3 z-[60] pointer-events-none select-none font-mono text-[10px] tracking-wider text-zinc-400/80 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]">
