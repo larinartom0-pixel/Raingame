@@ -13,6 +13,34 @@ export interface ChangelogEntry {
 
 export const CHANGELOG_ENTRIES: ChangelogEntry[] = [
   {
+    version: '1.8.0',
+    date: '2026-11-24',
+    title: {
+      uk: 'Режим Сафарі, ШІ Слимакокоти, Міні-карта світу та повна переробка бойової системи ящерів',
+      en: 'Safari Mode, AI Slugcats, World Mini-Map & Full Lizard Combat/Hitbox Overhaul',
+    },
+    changes: {
+      uk: [
+        'Прибрано смужки здоровʼя та стану над ящерами — тепер їхній стан видно природно за пораненнями й поведінкою.',
+        'Додано універсальну систему поранень для всіх теперішніх і майбутніх видів ящерів: чим менше HP, тим сильніше падає швидкість руху (аж до 30% уповільнення), а при ≤ 30% HP щосекунди з шансом 60% ящер може спіткнутися та отримати стан на 0.5 с.',
+        'Реалізовано зональні хітбокси по всьому тілу ящерів: снаряди й вибухи тепер влучають у голову, тулуб і хвіст — найбільші урон і оглушення в голову (1.25× / 1.35×) та тулуб (1.0×), найменші у хвіст (0.45× / 0.40×).',
+        'Виправлено укус ящера та 20-секундне захоплення: ящер більше не вбиває Вижившого миттєво замість хвату (укус 0.25–0.50 урону з чесним захопленням у пащу), а порятунок за 20-секундним таймером або влучання зброї тепер коректно оглушують ящера на 5 с і повністю знімають стан зі звільненого слимакокота. Також виправлено відсутній 5-секундний стан ящера при захопленні Монаха.',
+        'Додано режим «Сафарі» у головному меню: гравець стає спостерігачем із вільною камерою або стеженням, може вибрати будь-якого ящера чи слимакокота прямо на екрані й узяти його під пряме керування (або відпустити назад у будь-який момент).',
+        'Додано ШІ Слимакокотів (Виживший та Монах), які самостійно досліджують кімнати, лазять по шестах і трубах, шукають їжу та кидають зброю; вони зʼявляються виключно в режимі Сафарі.',
+        'Прибрано стару кнопку телепортації по кімнатах; натомість у режимі Сафарі додано кнопку мінімалістичної Міні-карти світу, де в реальному часі видно всі 13 кімнат, зʼєднання та активність істот із швидким переходом камери.',
+      ],
+      en: [
+        'Removed overhead lizard HP and stun bars for a cleaner, diegetic combat feel.',
+        'Added universal injury debuffs shared across all current and future lizard types: missing HP slows movement proportionally up to a 30% speed penalty, and below 30% HP a 1.0s stumble timer triggers a 0.5s stun with a 60% chance each tick.',
+        'Implemented full-body sectional lizard hitboxes (Head, Body, Tail) for projectiles and blasts: Head deals maximum damage & stun (1.25× / 1.35×), Body deals standard impact (1.0×), and Tail takes reduced damage & stun (0.45× / 0.40×).',
+        'Fixed lizard bite damage & the 20s grab/rescue bug: Survivor is no longer insta-killed on bite (bite damage tuned to 0.25–0.50 so grabs occur properly), Monk grab resistance now reliably stuns the lizard for 5s, and 20s struggle or weapon rescues cleanly stun the lizard and clear the freed slugcat stun.',
+        'Added Safari Mode to the main menu: play as a world observer with free camera or creature follow, click any creature to inspect it, and take direct control (or release control anytime via button or ESC).',
+        'Added autonomous AI Slugcats (Survivor & Monk) with pole climbing, pipe travel, foraging, and weapon combat that spawn exclusively in Safari Mode.',
+        'Removed the room-teleport button/modal and added a minimalist Safari World Mini-Map showing all 13 rooms, pipe links, and live creature activity with instant observer camera switching.',
+      ],
+    },
+  },
+  {
     version: '1.7.0',
     date: '2026-11-24',
     title: {

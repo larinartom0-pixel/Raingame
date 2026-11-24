@@ -67,6 +67,71 @@ export interface LizardNetworkSnapshot {
   } | null;
 }
 
+export type LizardHitZone = 'head' | 'body' | 'tail';
+
+export interface LizardHitTestResult {
+  hit: boolean;
+  zone: LizardHitZone;
+  damageMult: number;
+  stunMult: number;
+  hitX: number;
+  hitY: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+export interface LizardBlastTestResult {
+  hit: boolean;
+  dist: number;
+  zone: LizardHitZone;
+  damageMult: number;
+  stunMult: number;
+  closestX: number;
+  closestY: number;
+}
+
+export const LIZARD_HIT_ZONE_MULTIPLIERS: Record<LizardHitZone, { damageMult: number; stunMult: number }> = {
+  head: { damageMult: 1.25, stunMult: 1.35 },
+  body: { damageMult: 1.0, stunMult: 1.0 },
+  tail: { damageMult: 0.45, stunMult: 0.4 },
+};
+
+// Universal lizard injury speed multiplier (up to max 30% slowdown at 0 HP)
+export function getLizardHealthSpeedMultiplier(hp: number, maxHp: number): number {
+  if (maxHp <= 0) return 0.7;
+  const ratio = Math.max(0, Math.min(1, hp / maxHp));
+  return 1 - 0.30 * (1 - ratio);
+}
+
+// Universal critical-injury stumble check (<= 30% HP: every 1.0s, 60% chance for 0.5s stun)
+export function advanceLizardCriticalStumble(
+  hp: number,
+  maxHp: number,
+  timer: number,
+  delta: number
+): { nextTimer: number; triggeredStun: boolean } {
+  if (maxHp <= 0 || hp <= 0 || hp / maxHp > 0.30) {
+    return { nextTimer: 0, triggeredStun: false };
+  }
+  const updated = timer + delta;
+  if (updated >= 1.0) {
+    return {
+      nextTimer: updated - 1.0,
+      triggeredStun: Math.random() < 0.60,
+    };
+  }
+  return { nextTimer: updated, triggeredStun: false };
+}
+
+export interface LizardPossessedControls {
+  left: boolean;
+  right: boolean;
+  up: boolean;
+  down: boolean;
+  jump: boolean;
+  bite: boolean;
+}
+
 type PlatformInput = { x: number; y: number; w: number; h: number; type: string; id?: string; label?: string };
 type PoleInput = { x: number; yMin: number; yMax: number };
 type PipeInput = {
@@ -100,6 +165,10 @@ export class PinkLizard {
   public isClimbing: boolean = false;
   public isGrounded: boolean = false;
   public biteCooldown: number = 0;
+  public lowHpStunCheckTimer: number = 0;
+  public isPossessed: boolean = false;
+  private prevPossessedJump: boolean = false;
+  private prevPossessedBite: boolean = false;
 
   public pipeTransit: LizardPipeTransit | null = null;
   public pipeCooldown: number = 0;
@@ -178,12 +247,162 @@ export class PinkLizard {
     }
   }
 
+  public getHealthSpeedMultiplier(): number {
+    return getLizardHealthSpeedMultiplier(this.hp, this.maxHp);
+  }
+
+  public hitTestPoint(px: number, py: number, projectileRadius: number = 8): LizardHitTestResult {
+    const cx = this.x + this.width / 2;
+    const cy = this.y + this.height / 2;
+    const miss: LizardHitTestResult = {
+      hit: false,
+      zone: 'body',
+      damageMult: 1,
+      stunMult: 1,
+      hitX: px,
+      hitY: py,
+      offsetX: 0,
+      offsetY: 0,
+    };
+    if (this.state === 'dead' || this.pipeTransit) return miss;
+
+    const dir = this.facingRight ? 1 : -1;
+    let bestZone: LizardHitZone | null = null;
+    let bestDist = Infinity;
+    let bestX = cx;
+    let bestY = cy;
+
+    // 1. Armored Head hitbox (head spine[0] + snout tip)
+    const head = this.spine[0] ?? { x: this.facingRight ? this.x + this.width : this.x, y: this.y + 10 };
+    const headCircles = [
+      { x: head.x + dir * 4, y: head.y, r: 15 + projectileRadius },
+      { x: head.x + dir * 13, y: head.y, r: 10 + projectileRadius },
+    ];
+    for (const hc of headCircles) {
+      const d = Math.hypot(px - hc.x, py - hc.y);
+      if (d <= hc.r && d < bestDist) {
+        bestDist = d;
+        bestZone = 'head';
+        bestX = hc.x;
+        bestY = hc.y;
+      }
+    }
+
+    // 2. Torso / Spine body segments
+    for (let i = 1; i < this.spine.length; i++) {
+      const pt = this.spine[i];
+      const rad = Math.max(8, 13 - i * 1.4) + projectileRadius;
+      const d = Math.hypot(px - pt.x, py - pt.y);
+      if (d <= rad && (d < bestDist || bestZone === null)) {
+        if (!bestZone || bestZone !== 'head' || d < bestDist - 4) {
+          bestDist = d;
+          bestZone = 'body';
+          bestX = pt.x;
+          bestY = pt.y;
+        }
+      }
+    }
+    const bodyCenterDist = Math.hypot(px - cx, py - cy);
+    if (bodyCenterDist <= 18 + projectileRadius && bodyCenterDist < bestDist && bestZone !== 'head') {
+      bestDist = bodyCenterDist;
+      bestZone = 'body';
+      bestX = cx;
+      bestY = cy;
+    }
+
+    // 3. Tail segments (full tail has its own hitbox with reduced damage & stun)
+    for (let i = 1; i < this.tail.length; i++) {
+      const tp = this.tail[i];
+      const tailRad = Math.max(5.5, 9.5 - i * 0.55) + projectileRadius;
+      const d = Math.hypot(px - tp.x, py - tp.y);
+      if (d <= tailRad && (bestZone === null || (bestZone === 'tail' && d < bestDist))) {
+        bestDist = d;
+        bestZone = 'tail';
+        bestX = tp.x;
+        bestY = tp.y;
+      }
+    }
+
+    if (!bestZone) return miss;
+    const mult = LIZARD_HIT_ZONE_MULTIPLIERS[bestZone];
+    return {
+      hit: true,
+      zone: bestZone,
+      damageMult: mult.damageMult,
+      stunMult: mult.stunMult,
+      hitX: bestX,
+      hitY: bestY,
+      offsetX: bestX - cx,
+      offsetY: bestY - cy,
+    };
+  }
+
+  public hitTestBlast(cx: number, cy: number, radius: number): LizardBlastTestResult {
+    const lx = this.x + this.width / 2;
+    const ly = this.y + this.height / 2;
+    if (this.state === 'dead' || this.pipeTransit) {
+      return { hit: false, dist: Infinity, zone: 'body', damageMult: 1, stunMult: 1, closestX: lx, closestY: ly };
+    }
+
+    let bestDist = Infinity;
+    let bestZone: LizardHitZone = 'body';
+    let bestX = lx;
+    let bestY = ly;
+
+    const head = this.spine[0] ?? { x: lx, y: ly };
+    const hd = Math.max(0, Math.hypot(head.x - cx, head.y - cy) - 12);
+    if (hd < bestDist) {
+      bestDist = hd;
+      bestZone = 'head';
+      bestX = head.x;
+      bestY = head.y;
+    }
+
+    for (let i = 1; i < this.spine.length; i++) {
+      const pt = this.spine[i];
+      const bd = Math.max(0, Math.hypot(pt.x - cx, pt.y - cy) - 10);
+      if (bd < bestDist) {
+        bestDist = bd;
+        bestZone = 'body';
+        bestX = pt.x;
+        bestY = pt.y;
+      }
+    }
+
+    for (let i = 1; i < this.tail.length; i++) {
+      const tp = this.tail[i];
+      const td = Math.max(0, Math.hypot(tp.x - cx, tp.y - cy) - 6);
+      if (td < bestDist) {
+        bestDist = td;
+        bestZone = 'tail';
+        bestX = tp.x;
+        bestY = tp.y;
+      }
+    }
+
+    const mult = LIZARD_HIT_ZONE_MULTIPLIERS[bestZone];
+    return {
+      hit: bestDist <= radius,
+      dist: bestDist,
+      zone: bestZone,
+      damageMult: mult.damageMult,
+      stunMult: mult.stunMult,
+      closestX: bestX,
+      closestY: bestY,
+    };
+  }
+
   public takeDamage(amount: number, stunDuration: number) {
     if (this.state === 'dead') return;
 
     this.hp = Math.max(0, this.hp - amount);
     this.stunTimer = Math.max(this.stunTimer, stunDuration);
     this.state = this.hp <= 0 ? 'dead' : 'stunned';
+    this.isClimbing = false;
+    this.pipeTransit = null;
+    if (stunDuration > 0) {
+      this.biteCooldown = Math.max(this.biteCooldown, stunDuration + 0.4);
+    }
 
     if (this.grabbedTarget) {
       this.grabbedTarget = null;
@@ -299,6 +518,9 @@ export class PinkLizard {
 
   // Smooth client-side tick between LIZARDS_SYNC packets
   public interpolateClient(delta: number) {
+    if (this.state === 'stunned' && this.stunTimer > 0) {
+      this.stunTimer = Math.max(0, this.stunTimer - delta);
+    }
     if (this.pipeTransit) {
       this.pipeTransit.progress = Math.min(1, this.pipeTransit.progress + delta / this.pipeTransit.duration);
       const p = this.pipeTransit.progress;
@@ -360,8 +582,10 @@ export class PinkLizard {
       hp: number;
       state: string;
       room: string;
+      stunTimer?: number;
       biteGrabImmunity?: boolean;
       attackerStunOnGrabAttempt?: number;
+      setPosition?: (x: number, y: number, vx: number, vy: number) => void;
     }>,
     platforms: PlatformInput[],
     poles: PoleInput[],
@@ -372,11 +596,13 @@ export class PinkLizard {
     pipes?: PipeInput[],
     onLizardChangedRoom?: (targetRoomId: string, spawnX?: number, spawnY?: number) => void,
     onPreyDepositedInDen?: () => void,
-    worldBounds?: { width: number; height: number; roomId?: string }
+    worldBounds?: { width: number; height: number; roomId?: string },
+    possessedControls?: LizardPossessedControls | null
   ) {
     const worldW = worldBounds?.width ?? 1200;
     const worldH = worldBounds?.height ?? 640;
     const roomKey = worldBounds?.roomId ?? 'room-default';
+    this.isPossessed = !!possessedControls;
 
     if (this.state === 'dead') {
       this.vy += 0.42;
@@ -413,6 +639,9 @@ export class PinkLizard {
       if (this.grabbedTarget === 'player' && player) {
         player.x = curX - player.width / 2;
         player.y = curY - player.height / 2;
+      } else if (this.grabbedTarget === 'peer' && this.grabbedPeerId) {
+        const gp = remotePeers.find(pr => pr.id === this.grabbedPeerId);
+        gp?.setPosition?.(curX - 12, curY - 19, 0, 0);
       }
 
       if (p >= 1) {
@@ -465,8 +694,13 @@ export class PinkLizard {
       this.allowShortcutForRoute = this.state === 'hunt' ? Math.random() < 0.85 : Math.random() < 0.35;
     }
 
+    if (this.biteCooldown > 0) {
+      this.biteCooldown = Math.max(0, this.biteCooldown - delta);
+    }
+
     // Stun Recovery
     if (this.state === 'stunned') {
+      this.isClimbing = false;
       this.stunTimer -= delta;
       if (this.stunTimer <= 0) {
         this.stunTimer = 0;
@@ -478,6 +712,18 @@ export class PinkLizard {
         this.updateProceduralBody();
         return;
       }
+    }
+
+    // Critical-Injury Stumble Check (<= 30% HP: 1.0s interval, 60% chance for 0.5s stun)
+    const stumble = advanceLizardCriticalStumble(this.hp, this.maxHp, this.lowHpStunCheckTimer, delta);
+    this.lowHpStunCheckTimer = stumble.nextTimer;
+    if (stumble.triggeredStun) {
+      this.vx *= 0.45;
+      this.takeDamage(0, 0.5);
+      this.applyGravityAndCollisions(platforms);
+      this.clampToWorld(worldW, worldH);
+      this.updateProceduralBody();
+      return;
     }
 
     // Drop target if no longer valid
@@ -494,7 +740,7 @@ export class PinkLizard {
 
     const isInsideDenRoom = platforms.some(p => p.id === 'den-floor' || p.label === 'ДНО ЛІГВА');
 
-    // Drag prey pinned to lizard's jaws
+    // Drag prey pinned to lizard's jaws (local player, corpse, or peer/AI slugcat)
     if (this.grabbedTarget === 'player' || this.grabbedTarget === 'corpse') {
       if (player) {
         const mouthOffsetX = this.facingRight ? this.width - 2 : -10;
@@ -504,8 +750,17 @@ export class PinkLizard {
         player.vy = this.vy;
 
         if (this.grabbedTarget === 'player' && player.stunTimer <= 0) {
+          // 20-second struggle timer expired: free prey and stun lizard for 5 seconds!
           this.grabbedTarget = null;
-          this.state = 'patrol';
+          this.grabbedPeerId = null;
+          player.vy = -3.6;
+          player.vx = (this.facingRight ? 1 : -1) * 4.0;
+          this.vx = (this.facingRight ? -1 : 1) * 3.5;
+          this.vy = -2.2;
+          this.takeDamage(0, 5.0);
+          this.clampToWorld(worldW, worldH);
+          this.updateProceduralBody();
+          return;
         }
       } else {
         this.grabbedTarget = null;
@@ -536,7 +791,6 @@ export class PinkLizard {
           onPreyDepositedInDen?.();
         }
       } else if (!isInsideDenRoom && den && this.grabbedTarget) {
-        // Non-Outskirts regions that use a direct den cavern on platform
         const denPipe = pipes?.find(p => p.targetLocationId === 'lizard-den-outskirts');
         if (!denPipe) {
           const denCx = den.x + den.w / 2;
@@ -558,11 +812,222 @@ export class PinkLizard {
           }
         }
       }
+    } else if (this.grabbedTarget === 'peer' && this.grabbedPeerId) {
+      const grabbedPeer = remotePeers.find(p => p.id === this.grabbedPeerId);
+      if (grabbedPeer) {
+        const mouthOffsetX = this.facingRight ? this.width - 2 : -10;
+        grabbedPeer.setPosition?.(this.x + mouthOffsetX, this.y + 4, this.vx, this.vy);
+
+        if (grabbedPeer.state !== 'dead' && grabbedPeer.stunTimer !== undefined && grabbedPeer.stunTimer <= 0) {
+          // Prey struggled free after 20s -> stun lizard 5s and drop
+          this.grabbedTarget = null;
+          this.grabbedPeerId = null;
+          grabbedPeer.setPosition?.(this.x + mouthOffsetX, this.y - 4, (this.facingRight ? 1 : -1) * 4.0, -3.6);
+          this.vx = (this.facingRight ? -1 : 1) * 3.5;
+          this.vy = -2.2;
+          this.takeDamage(0, 5.0);
+          this.clampToWorld(worldW, worldH);
+          this.updateProceduralBody();
+          return;
+        }
+
+        if (isInsideDenRoom && this.grabbedTarget) {
+          const nestX = 430;
+          const nestY = 380;
+          const distToNest = Math.hypot(this.x + this.width / 2 - nestX, this.y + this.height / 2 - nestY);
+          if (distToNest < 48 || (this.x > 360 && this.isGrounded && this.y > 320)) {
+            this.grabbedTarget = null;
+            this.grabbedPeerId = null;
+            grabbedPeer.setPosition?.(nestX - 12, nestY - 19, 0, 0);
+            this.jawOpen = 0.45;
+            this.state = 'leaving_den';
+            this.biteCooldown = 6.0;
+            this.pipeCooldown = 0;
+            this.patrolTimer = 6.0;
+            const exitPipe = pipes?.find(p => p.id === 'den-exit-pipe' || (p.targetLocationId && p.targetLocationId !== 'lizard-den-outskirts'));
+            this.patrolTargetX = exitPipe ? exitPipe.startX : 115;
+            this.patrolTargetY = exitPipe ? exitPipe.startY : 336;
+            this.activeWaypoint = null;
+            onPreyDepositedInDen?.();
+          }
+        } else if (!isInsideDenRoom && den && this.grabbedTarget) {
+          const denPipe = pipes?.find(p => p.targetLocationId === 'lizard-den-outskirts');
+          if (!denPipe) {
+            const denCx = den.x + den.w / 2;
+            const denCy = den.y + den.h / 2;
+            const distToDen = Math.hypot(this.x + this.width / 2 - denCx, this.y + this.height / 2 - denCy);
+            if (distToDen < 45) {
+              grabbedPeer.setPosition?.(denCx - 12, den.y + den.h - 38, 0, 0);
+              this.grabbedTarget = null;
+              this.grabbedPeerId = null;
+              this.state = 'leaving_den';
+              this.biteCooldown = 6.0;
+              this.patrolTimer = 4.0;
+              this.patrolTargetX = den.spawnX ?? Math.max(80, den.x - 160);
+              this.patrolTargetY = den.spawnY ?? denCy;
+              onPreyDepositedInDen?.();
+            }
+          }
+        }
+      }
     }
 
-    if (this.biteCooldown > 0) {
-      this.biteCooldown -= delta;
+    const speedMult = this.getHealthSpeedMultiplier();
+
+    // ---------------- SAFARI POSSESSED DIRECT CONTROL ----------------
+    if (possessedControls) {
+      const lxPoss = this.x + this.width / 2;
+      const lyPoss = this.y + this.height / 2;
+      const moveSpeed = 5.4 * speedMult;
+      const moveAccel = 0.55 * speedMult;
+
+      if (possessedControls.left) {
+        this.facingRight = false;
+      } else if (possessedControls.right) {
+        this.facingRight = true;
+      }
+
+      // Check pole / wall climbing under direct player control
+      let climbingNow = false;
+      let descendPastY: number | null = null;
+      if (possessedControls.up || possessedControls.down) {
+        for (const p of poles) {
+          if (Math.abs(lxPoss - p.x) < 34 && this.y + this.height >= p.yMin - 18 && this.y <= p.yMax + 18) {
+            climbingNow = true;
+            this.isClimbing = true;
+            this.isGrounded = false;
+            this.x += (p.x - lxPoss) * 0.35;
+            this.vx *= 0.4;
+            this.vy = possessedControls.up ? -4.9 * speedMult : 4.9 * speedMult;
+            if (possessedControls.down) descendPastY = this.y + this.height + 24;
+            break;
+          }
+        }
+        if (!climbingNow) {
+          for (const plat of platforms) {
+            if (plat.type === 'wall' || plat.h >= 60) {
+              const xDist = Math.abs(lxPoss - (plat.x + plat.w / 2));
+              const yOverlap = this.y + this.height > plat.y + 4 && this.y < plat.y + plat.h;
+              if (xDist < plat.w / 2 + 18 && yOverlap) {
+                climbingNow = true;
+                this.isClimbing = true;
+                this.vy = possessedControls.up ? -4.6 * speedMult : 4.4 * speedMult;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (!climbingNow) {
+        this.isClimbing = false;
+        if (possessedControls.left) {
+          this.vx -= moveAccel;
+          if (this.vx < -moveSpeed) this.vx = -moveSpeed;
+        } else if (possessedControls.right) {
+          this.vx += moveAccel;
+          if (this.vx > moveSpeed) this.vx = moveSpeed;
+        } else {
+          this.vx *= 0.8;
+        }
+      }
+
+      const jumpPressed = possessedControls.jump && !this.prevPossessedJump;
+      this.prevPossessedJump = possessedControls.jump;
+      if (jumpPressed && (this.isGrounded || this.isClimbing)) {
+        this.isClimbing = false;
+        this.isGrounded = false;
+        this.vy = -8.0;
+        if (possessedControls.left) this.vx = -4.8 * speedMult;
+        else if (possessedControls.right) this.vx = 4.8 * speedMult;
+      }
+
+      // Enter nearby pipe when pressing up/down near a pipe portal
+      if (pipes && pipes.length > 0 && this.pipeCooldown <= 0 && (possessedControls.up || possessedControls.down)) {
+        for (const pipe of pipes) {
+          if (pipe.isShelterPipe) continue;
+          const dStart = Math.hypot(lxPoss - pipe.startX, lyPoss - pipe.startY);
+          const dEnd = Math.hypot(lxPoss - pipe.endX, lyPoss - pipe.endY);
+          if (dStart < 34) {
+            this.pipeTransit = {
+              fromX: pipe.startX,
+              fromY: pipe.startY,
+              toX: pipe.endX,
+              toY: pipe.endY,
+              progress: 0,
+              duration: 1.15,
+              targetLocationId: pipe.targetLocationId,
+              targetSpawnX: pipe.targetSpawnX,
+              targetSpawnY: pipe.targetSpawnY
+            };
+            this.vx = 0;
+            this.vy = 0;
+            this.updateProceduralBody();
+            return;
+          } else if (dEnd < 34 && !pipe.targetLocationId) {
+            this.pipeTransit = {
+              fromX: pipe.endX,
+              fromY: pipe.endY,
+              toX: pipe.startX,
+              toY: pipe.startY,
+              progress: 0,
+              duration: 1.15
+            };
+            this.vx = 0;
+            this.vy = 0;
+            this.updateProceduralBody();
+            return;
+          }
+        }
+      }
+
+      this.applyGravityAndCollisions(platforms, descendPastY);
+      this.clampToWorld(worldW, worldH);
+
+      // Bite or release prey when pressing bite action
+      const bitePressed = possessedControls.bite && !this.prevPossessedBite;
+      this.prevPossessedBite = possessedControls.bite;
+      if (bitePressed) {
+        if (this.grabbedTarget) {
+          this.grabbedTarget = null;
+          this.grabbedPeerId = null;
+          this.biteCooldown = 0.6;
+        } else if (this.biteCooldown <= 0) {
+          this.jawOpen = 0.5;
+          const mouthX = this.facingRight ? this.x + this.width : this.x;
+          const mouthY = this.y + 12;
+          for (const peer of remotePeers) {
+            if (peer.state === 'sleeping') continue;
+            const dPeer = Math.hypot(mouthX - (peer.x + 12), mouthY - (peer.y + 19));
+            if (dPeer < 42) {
+              const dmg = Math.round((0.25 + Math.random() * 0.25) * 100) / 100;
+              if (peer.biteGrabImmunity && peer.state !== 'dead') {
+                const predatorStun = peer.attackerStunOnGrabAttempt ?? 5.0;
+                this.grabbedTarget = null;
+                this.grabbedPeerId = null;
+                this.isClimbing = false;
+                this.biteCooldown = predatorStun + 0.4;
+                this.vx = (this.x + this.width / 2 < peer.x + 12 ? -1 : 1) * 4.5;
+                this.vy = -3.0;
+                this.takeDamage(0, predatorStun);
+                onPeerBitten?.(peer.id, dmg, false);
+              } else {
+                this.biteCooldown = 1.6;
+                this.grabbedTarget = 'peer';
+                this.grabbedPeerId = peer.id;
+                onPeerBitten?.(peer.id, dmg, true);
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      this.updateProceduralBody();
+      return;
     }
+    this.prevPossessedJump = false;
+    this.prevPossessedBite = false;
 
     // ---------------- AI TARGET SELECTION & SENSES ----------------
     let targetX = this.patrolTargetX;
@@ -602,7 +1067,7 @@ export class PinkLizard {
         targetY = den.y + den.h / 2;
       }
     } else {
-      // Build unified prey candidates (local player + remote peers in this room)
+      // Build unified prey candidates (local player + remote peers / AI slugcats in this room)
       type CandidatePrey = {
         kind: 'player' | 'peer';
         id: string;
@@ -712,7 +1177,6 @@ export class PinkLizard {
             Math.hypot(lx - this.patrolTargetX, ly - this.patrolTargetY) < 40
           ) {
             this.patrolTargetPipeId = null;
-            // Pick an intentional walkable platform / pole / inter-room tunnel to explore
             const navPipes = (pipes || []).filter(p => !p.isShelterPipe && !(p.isDenPipe && !isInsideDenRoom));
             if (navPipes.length > 0 && this.pipeCooldown <= 0 && Math.random() < 0.22) {
               const chosenPipe = navPipes[Math.floor(Math.random() * navPipes.length)];
@@ -797,7 +1261,6 @@ export class PinkLizard {
     }
 
     // ---------------- INTENTIONAL PIPE ENTRY ONLY ----------------
-    // Never suck lizard into random pipes when simply walking past!
     if (pipes && pipes.length > 0 && this.pipeCooldown <= 0 && activePipeGoal) {
       const pipe = pipes.find(p => p.id === activePipeGoal);
       if (pipe && !pipe.isShelterPipe) {
@@ -842,8 +1305,8 @@ export class PinkLizard {
     }
 
     // ---------------- LOCOMOTION, POLE/WALL CLIMBING & STUCK RECOVERY ----------------
-    const runSpeed = this.state === 'hunt' ? 5.6 : 3.5;
-    const accel = this.state === 'hunt' ? 0.55 : 0.35;
+    const runSpeed = (this.state === 'hunt' ? 5.6 : 3.5) * speedMult;
+    const accel = (this.state === 'hunt' ? 0.55 : 0.35) * speedMult;
 
     if (Math.abs(this.x - this.lastX) < 0.7 && Math.abs(this.y - this.lastY) < 0.7 && Math.hypot(dx, dy) > 18) {
       this.stuckTimer += delta;
@@ -853,7 +1316,7 @@ export class PinkLizard {
     this.lastX = this.x;
     this.lastY = this.y;
 
-    // 1. Pole climbing (up AND down through thin platforms, guided cleanly by waypoint or elevation difference)
+    // 1. Pole climbing
     let nearPole = false;
     let activePoleClimbTargetY: number | null = null;
     const targetVerticalDiff = Math.abs(targetY - ly);
@@ -882,7 +1345,6 @@ export class PinkLizard {
           const climbDy = climbGoalY - ly;
 
           if (Math.abs(climbDy) > 16) {
-            // Stop climbing if already at the physical pole end in the climb direction
             if (climbDy > 0 && this.y + this.height >= p.yMax - 4) {
               continue;
             }
@@ -894,23 +1356,21 @@ export class PinkLizard {
             this.isGrounded = false;
             this.x += (p.x - lx) * 0.38;
             this.vx *= 0.4;
-            this.vy = climbDy < 0 ? -4.9 : 4.9;
+            this.vy = (climbDy < 0 ? -4.9 : 4.9) * speedMult;
             activePoleClimbTargetY = climbGoalY;
             if (matchesWaypointPole && Math.abs(steerY - ly) <= 18) {
               this.pathRecalcTimer = 0;
             }
           } else if (this.activeWaypoint?.kind === 'pole' && targetVerticalDiff > 24 && poleExtendsTowardTarget) {
-            // Reached intermediate pole waypoint — keep climbing along pole toward target instead of hopping off mid-air
             nearPole = true;
             this.isClimbing = true;
             this.isGrounded = false;
             this.x += (p.x - lx) * 0.38;
             this.vx *= 0.4;
-            this.vy = targetY < ly ? -4.9 : 4.9;
+            this.vy = (targetY < ly ? -4.9 : 4.9) * speedMult;
             activePoleClimbTargetY = targetY;
             this.pathRecalcTimer = 0;
           } else {
-            // Reached destination height on pole -> hop onto horizontal platform toward target
             nearPole = true;
             this.isClimbing = true;
             this.x += (p.x - lx) * 0.38;
@@ -918,7 +1378,7 @@ export class PinkLizard {
             this.vy = 0;
             if (Math.abs(targetX - lx) > 20) {
               this.isClimbing = false;
-              this.vx = targetX > lx ? 4.2 : -4.2;
+              this.vx = (targetX > lx ? 4.2 : -4.2) * speedMult;
               this.vy = -3.8;
             }
           }
@@ -927,7 +1387,7 @@ export class PinkLizard {
       }
     }
 
-    // 2. Wall climbing only when stuck or blocked by reachable vertical barrier while needing upward elevation
+    // 2. Wall climbing
     let nearWall = false;
     if (!nearPole) {
       for (const plat of platforms) {
@@ -938,7 +1398,7 @@ export class PinkLizard {
           if (xDist < plat.w / 2 + 18 && yOverlap && wallTopReachable && (dy < -25 || this.stuckTimer > 0.35)) {
             nearWall = true;
             this.isClimbing = true;
-            this.vy = dy < 0 || this.stuckTimer > 0.35 ? -4.8 : 4.4;
+            this.vy = (dy < 0 || this.stuckTimer > 0.35 ? -4.8 : 4.4) * speedMult;
             break;
           }
         }
@@ -963,7 +1423,6 @@ export class PinkLizard {
 
       if (this.isGrounded) {
         if (this.stuckTimer > 0.9) {
-          // Force recalculation & pick another route instead of oscillating infinitely
           this.activeWaypoint = null;
           this.pathRecalcTimer = 0;
           this.stuckTimer = 0;
@@ -972,15 +1431,14 @@ export class PinkLizard {
             this.patrolTargetX = Math.max(80, Math.min(worldW - 80, lx + (this.facingRight ? 360 : -360)));
             this.patrolTimer = 3.5;
           }
-          this.vx = (this.facingRight ? 1 : -1) * 4.0;
+          this.vx = (this.facingRight ? 1 : -1) * 4.0 * speedMult;
           this.vy = -7.2;
           this.isGrounded = false;
         } else if (this.stuckTimer > 0.28 || (this.activeWaypoint?.kind === 'jump' && dy < -18)) {
           this.vy = -8.0;
-          this.vx = (dx >= 0 ? 1 : -1) * 4.6;
+          this.vx = (dx >= 0 ? 1 : -1) * 4.6 * speedMult;
           this.isGrounded = false;
         } else {
-          // Proactive small ledge hop
           for (const plat of platforms) {
             if (plat.type === 'wall' || plat.type === 'shelter') continue;
             const aheadX = this.x + (this.facingRight ? this.width + 16 : -16);
@@ -1000,8 +1458,7 @@ export class PinkLizard {
     this.applyGravityAndCollisions(platforms, descendPastY);
     this.clampToWorld(worldW, worldH);
 
-    // ---------------- BITE & GRAB LOGIC (Player + Remote Peers) ----------------
-    // Skip biting briefly right after emerging from a pipe (pipeCooldown > 3.5)
+    // ---------------- BITE & GRAB LOGIC (Player + Remote Peers / AI Slugcats) ----------------
     if (!this.grabbedTarget && this.biteCooldown <= 0 && this.pipeCooldown <= 3.5) {
       const mouthX = this.facingRight ? this.x + this.width : this.x;
       const mouthY = this.y + 12;
@@ -1020,14 +1477,14 @@ export class PinkLizard {
         );
         if (distToPlayerMouth < 36) {
           this.jawOpen = 0.5;
-          const dmg = 0.5 + Math.random() * 1.0;
+          const dmg = Math.round((0.25 + Math.random() * 0.25) * 100) / 100;
 
           if (player.biteGrabImmunity && player.state !== 'dead') {
-            // Monk / grab-immune slugcat: deals damage without grabbing, stuns predator for 5 seconds!
             const predatorStun = player.attackerStunOnGrabAttempt ?? 5.0;
             this.grabbedTarget = null;
             this.grabbedPeerId = null;
-            this.biteCooldown = predatorStun;
+            this.isClimbing = false;
+            this.biteCooldown = predatorStun + 0.4;
             this.vx = (this.x + this.width / 2 < player.x + player.width / 2 ? -1 : 1) * 4.5;
             this.vy = -3.0;
             this.takeDamage(0, predatorStun);
@@ -1049,13 +1506,14 @@ export class PinkLizard {
           const distToPeerMouth = Math.hypot(mouthX - (peer.x + 12), mouthY - (peer.y + 19));
           if (distToPeerMouth < 36) {
             this.jawOpen = 0.5;
-            const dmg = 0.5 + Math.random() * 1.0;
+            const dmg = Math.round((0.25 + Math.random() * 0.25) * 100) / 100;
 
             if (peer.biteGrabImmunity && peer.state !== 'dead') {
               const predatorStun = peer.attackerStunOnGrabAttempt ?? 5.0;
               this.grabbedTarget = null;
               this.grabbedPeerId = null;
-              this.biteCooldown = predatorStun;
+              this.isClimbing = false;
+              this.biteCooldown = predatorStun + 0.4;
               this.vx = (this.x + this.width / 2 < peer.x + 12 ? -1 : 1) * 4.5;
               this.vy = -3.0;
               this.takeDamage(0, predatorStun);
@@ -1309,14 +1767,14 @@ export class PinkLizard {
 
     // 4. Armored Head & Jaws
     const head = this.spine[0];
-    const headAngle = head.angle || 0;
+    const headAngle = (head.angle || 0) + (this.state === 'stunned' ? Math.sin(t * 2.5) * 0.14 : 0);
     const dir = this.facingRight ? 1 : -1;
 
     ctx.save();
     ctx.translate(head.x, head.y);
     ctx.rotate(headAngle);
 
-    ctx.fillStyle = '#ec4899';
+    ctx.fillStyle = this.state === 'dead' ? '#831843' : '#ec4899';
     ctx.beginPath();
     ctx.moveTo(dir * 18, 0);
     ctx.lineTo(dir * 4, -13);
@@ -1326,7 +1784,7 @@ export class PinkLizard {
     ctx.closePath();
     ctx.fill();
 
-    ctx.fillStyle = '#be185d';
+    ctx.fillStyle = this.state === 'dead' ? '#500724' : '#be185d';
     ctx.beginPath();
     ctx.moveTo(dir * 18, 0);
     ctx.lineTo(dir * 5, -8);
@@ -1334,16 +1792,43 @@ export class PinkLizard {
     ctx.closePath();
     ctx.fill();
 
-    ctx.fillStyle = '#22d3ee';
-    ctx.beginPath();
-    ctx.arc(dir * 4, -5, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#083344';
-    ctx.beginPath();
-    ctx.arc(dir * 4, -5, 1.2, 0, Math.PI * 2);
-    ctx.fill();
+    if (this.state === 'dead') {
+      // Crossed X dead eye
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(dir * 4 - 2.5, -5 - 2.5);
+      ctx.lineTo(dir * 4 + 2.5, -5 + 2.5);
+      ctx.moveTo(dir * 4 + 2.5, -5 - 2.5);
+      ctx.lineTo(dir * 4 - 2.5, -5 + 2.5);
+      ctx.stroke();
+    } else if (this.state === 'stunned') {
+      // Dazed squinted >< eye
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 1.9;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(dir * 4 - 2.8, -5 - 2.2);
+      ctx.lineTo(dir * 4 + 0.5, -5);
+      ctx.lineTo(dir * 4 - 2.8, -5 + 2.2);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = '#22d3ee';
+      ctx.beginPath();
+      ctx.arc(dir * 4, -5, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#083344';
+      ctx.beginPath();
+      ctx.arc(dir * 4, -5, 1.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
-    const jawSpread = this.grabbedTarget ? 0.35 : Math.sin(t * 8) * 0.1;
+    const jawSpread =
+      this.state === 'stunned' || this.state === 'dead'
+        ? 0.04
+        : this.grabbedTarget
+        ? 0.35
+        : Math.sin(t * 8) * 0.1;
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -1353,20 +1838,19 @@ export class PinkLizard {
 
     ctx.restore();
 
-    // 5. HP Indicator Bar when damaged
-    if (this.hp < this.maxHp && this.state !== 'dead') {
-      const barW = 36;
-      const barH = 4;
-      const bx = this.x + (this.width - barW) / 2;
-      const by = this.y - 12;
+    // 4.5 Spinning Dizzy Stars over Head when Stunned
+    if (this.state === 'stunned') {
+      const starCount = 3;
+      for (let s = 0; s < starCount; s++) {
+        const starAngle = t * 4.2 + s * ((Math.PI * 2) / starCount);
+        const sx = head.x + Math.cos(starAngle) * 14;
+        const sy = head.y - 18 + Math.sin(starAngle) * 4.5;
 
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-      ctx.fillRect(bx, by, barW, barH);
-      ctx.fillStyle = '#ec4899';
-      ctx.fillRect(bx, by, (this.hp / this.maxHp) * barW, barH);
-      ctx.strokeStyle = '#be185d';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(bx, by, barW, barH);
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     ctx.restore();

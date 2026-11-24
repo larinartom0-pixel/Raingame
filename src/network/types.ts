@@ -127,6 +127,7 @@ export type NetworkPacket =
       type: 'REQUEST_ITEMS_SYNC';
       senderId: string;
       senderName?: string;
+      characterId?: SlugcatCharacterId;
       room: string;
       clientVersion?: string;
     }
@@ -263,6 +264,7 @@ export type NetworkPacket =
       type: 'REQUEST_WORLD_SYNC';
       senderId: string;
       senderName?: string;
+      characterId?: SlugcatCharacterId;
       room: string;
       clientVersion?: string;
     }

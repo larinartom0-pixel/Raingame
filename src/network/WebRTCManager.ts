@@ -1,4 +1,5 @@
 import { NetworkPacket, RemotePlayer } from './types';
+import { SlugcatCharacterId } from '../types';
 import { signalingClient, SignalMessage } from './SignalingClient';
 import { APP_VERSION, compareVersions } from '../version';
 import { getPersistentNickname, setPersistentNickname } from '../settings';
@@ -73,6 +74,7 @@ export class WebRTCManager {
   public localPlayerId: string;
   private ownsPrimaryPlayerId: boolean;
   public localPlayerName: string = getPersistentNickname();
+  public localCharacterId: SlugcatCharacterId = 'survivor';
   
   public currentRoomId: string | null = null;
   public currentRoomVersion: string = APP_VERSION;
@@ -143,6 +145,10 @@ export class WebRTCManager {
   public setLocalIdentity(name: string) {
     const saved = setPersistentNickname(name);
     this.localPlayerName = saved;
+  }
+
+  public setLocalCharacter(characterId: SlugcatCharacterId) {
+    this.localCharacterId = characterId === 'monk' ? 'monk' : 'survivor';
   }
 
   public onPacket(handler: (packet: NetworkPacket) => void): () => void {
@@ -563,6 +569,7 @@ export class WebRTCManager {
           type: 'REQUEST_ITEMS_SYNC',
           senderId: this.localPlayerId,
           senderName: this.localPlayerName,
+          characterId: this.localCharacterId,
           room: this.currentRoomId || 'outskirts-default',
           clientVersion: APP_VERSION,
         });
@@ -629,6 +636,17 @@ export class WebRTCManager {
         originalTimestamp: packet.timestamp
       });
       return;
+    }
+
+    if (
+      (packet.type === 'REQUEST_ITEMS_SYNC' || packet.type === 'REQUEST_WORLD_SYNC') &&
+      packet.characterId
+    ) {
+      const rp = this.remotePlayers.get(packet.senderId);
+      if (rp) {
+        rp.characterId = packet.characterId === 'monk' ? 'monk' : 'survivor';
+        rp.maxHp = rp.characterId === 'monk' ? 2 : 1;
+      }
     }
 
     if (packet.type === 'PONG') {

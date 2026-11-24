@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Sparkles, Play, Volume2, VolumeX, Settings, Globe, Layers, Maximize2, Minimize2, ScrollText } from 'lucide-react';
+import { Sparkles, Play, Volume2, VolumeX, Settings, Globe, Layers, Maximize2, Minimize2, ScrollText, Compass } from 'lucide-react';
 
 import { WeatherState, CustomLocationData, SlugcatCharacterId, SLUGCAT_CHARACTERS } from './types';
 import RainCanvas from './components/RainCanvas';
@@ -23,6 +23,7 @@ export default function App() {
   const lang = settings.language;
   const [hasEntered, setHasEntered] = useState(false);
   const [isGameplayActive, setIsGameplayActive] = useState(false);
+  const [isSafariMode, setIsSafariMode] = useState(false);
   const [isEditorActive, setIsEditorActive] = useState(false);
   const [activeCustomLocation, setActiveCustomLocation] = useState<CustomLocationData | null>(null);
   const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
@@ -168,12 +169,13 @@ export default function App() {
     }
   }, [hasEntered, isGameplayActive]);
 
-  // Keep audio volumes & local identity synced with settings
+  // Keep audio volumes, local identity & selected character synced with settings
   useEffect(() => {
     musicManager.setVolume(settings.audio.musicVolume);
     soundEngine.setVolume(settings.audio.sfxVolume);
     webRTCManager.setLocalIdentity(settings.nickname);
-  }, [settings.audio.musicVolume, settings.audio.sfxVolume, settings.nickname]);
+    webRTCManager.setLocalCharacter(selectedCharacter);
+  }, [settings.audio.musicVolume, settings.audio.sfxVolume, settings.nickname, selectedCharacter]);
 
   // Track Fullscreen state
   useEffect(() => {
@@ -244,12 +246,26 @@ export default function App() {
   const handleStartSingleplayer = () => {
     if (!isSoundMuted) soundEngine.playThunder();
     webRTCManager.disconnect();
+    setIsSafariMode(false);
     setLoadingTitle(t(lang, 'loadingSingleplayer'));
     setIsLoadingWorld(true);
     setTimeout(() => {
       setIsGameplayActive(true);
       setIsLoadingWorld(false);
     }, 1100);
+  };
+
+  const handleStartSafariMode = () => {
+    if (!isSoundMuted) soundEngine.playThunder();
+    webRTCManager.disconnect();
+    setActiveCustomLocation(null);
+    setIsSafariMode(true);
+    setLoadingTitle(t(lang, 'safariFull'));
+    setIsLoadingWorld(true);
+    setTimeout(() => {
+      setIsGameplayActive(true);
+      setIsLoadingWorld(false);
+    }, 950);
   };
 
   return (
@@ -480,14 +496,14 @@ export default function App() {
               <span>{t(lang, 'soloFull')}</span>
             </motion.button>
 
-            {/* Mobile Top Row: 2 Primary Launch Buttons (Solo & Multiplayer) */}
-            <div className="grid grid-cols-2 gap-2 w-full md:hidden">
+            {/* Mobile Top Row: 3 Primary Launch Buttons (Solo, Multiplayer, Safari) */}
+            <div className="grid grid-cols-3 gap-1.5 w-full md:hidden">
               <motion.button
                 onClick={handleStartSingleplayer}
-                className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-amber-950/90 to-amber-900/60 border border-amber-500/60 shadow-[0_0_12px_rgba(245,158,11,0.25)] flex items-center justify-center gap-1.5 text-amber-300 font-mono font-bold text-xs tracking-wider cursor-pointer active:scale-98"
+                className="py-2.5 px-2 rounded-xl bg-gradient-to-r from-amber-950/90 to-amber-900/60 border border-amber-500/60 shadow-[0_0_12px_rgba(245,158,11,0.25)] flex items-center justify-center gap-1 text-amber-300 font-mono font-bold text-[11px] tracking-wider cursor-pointer active:scale-98"
               >
-                <Play className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                <span>{t(lang, 'soloShort')}</span>
+                <Play className="w-3 h-3 fill-amber-400 text-amber-400 shrink-0" />
+                <span className="truncate">{t(lang, 'soloShort')}</span>
               </motion.button>
 
               <motion.button
@@ -495,10 +511,18 @@ export default function App() {
                   if (!isSoundMuted) soundEngine.playThunder();
                   setShowMultiplayerModal(true);
                 }}
-                className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-cyan-950/90 to-cyan-900/60 border border-cyan-500/60 shadow-[0_0_12px_rgba(6,182,212,0.25)] flex items-center justify-center gap-1.5 text-cyan-200 font-mono font-bold text-xs tracking-wider cursor-pointer active:scale-98"
+                className="py-2.5 px-2 rounded-xl bg-gradient-to-r from-cyan-950/90 to-cyan-900/60 border border-cyan-500/60 shadow-[0_0_12px_rgba(6,182,212,0.25)] flex items-center justify-center gap-1 text-cyan-200 font-mono font-bold text-[11px] tracking-wider cursor-pointer active:scale-98"
               >
-                <Globe className="w-3.5 h-3.5 text-cyan-400" />
-                <span>{t(lang, 'multiplayer')}</span>
+                <Globe className="w-3 h-3 text-cyan-400 shrink-0" />
+                <span className="truncate">{t(lang, 'multiplayer')}</span>
+              </motion.button>
+
+              <motion.button
+                onClick={handleStartSafariMode}
+                className="py-2.5 px-2 rounded-xl bg-gradient-to-r from-emerald-950/90 to-teal-900/60 border border-emerald-500/60 shadow-[0_0_12px_rgba(16,185,129,0.25)] flex items-center justify-center gap-1 text-emerald-200 font-mono font-bold text-[11px] tracking-wider cursor-pointer active:scale-98"
+              >
+                <Compass className="w-3 h-3 text-emerald-400 shrink-0" />
+                <span className="truncate">{t(lang, 'safariShort')}</span>
               </motion.button>
             </div>
 
@@ -515,6 +539,18 @@ export default function App() {
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
               <Globe className="w-4 h-4 text-cyan-400 mr-[-2px] group-hover:rotate-45 transition-transform" />
               <span>{t(lang, 'multiplayer')}</span>
+            </motion.button>
+
+            {/* 2.5 SAFARI MODE BUTTON (Desktop view) */}
+            <motion.button
+              id="menu-btn-safari"
+              onClick={handleStartSafariMode}
+              whileHover={{ x: 8 }}
+              className="group hidden md:flex items-center gap-3.5 text-left font-mono font-bold tracking-[0.2em] text-base sm:text-lg text-emerald-300 hover:text-emerald-200 transition-all duration-300 cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 opacity-0 group-hover:opacity-100 transition-all duration-300 transform scale-0 group-hover:scale-130" />
+              <Compass className="w-4 h-4 text-emerald-400 mr-[-2px] group-hover:rotate-45 transition-transform" />
+              <span>{t(lang, 'safariFull')}</span>
             </motion.button>
 
             {/* Mobile 2x2 sub-actions grid / Desktop standard vertical links */}
@@ -682,11 +718,13 @@ export default function App() {
             <OutskirtsLocation 
               onBack={() => {
                 setIsGameplayActive(false);
+                setIsSafariMode(false);
               }} 
               isSoundMuted={isSoundMuted}
               toggleSound={toggleSound}
               customLocation={activeCustomLocation ?? undefined}
               characterId={selectedCharacter}
+              safariMode={isSafariMode}
             />
           </motion.div>
         )}
@@ -708,6 +746,7 @@ export default function App() {
               onBack={() => setIsEditorActive(false)}
               isSoundMuted={isSoundMuted}
               onPlayLocation={(loc) => {
+                setIsSafariMode(false);
                 setActiveCustomLocation(loc);
                 setIsEditorActive(false);
                 setLoadingTitle(t(lang, 'loadingCustom'));
@@ -729,6 +768,7 @@ export default function App() {
         selectedCharacter={selectedCharacter}
         onSelectCharacter={handleSelectCharacter}
         onConnectedToRoom={() => {
+          setIsSafariMode(false);
           setLoadingTitle(t(lang, 'loadingMultiplayer'));
           setIsLoadingWorld(true);
           setShowMultiplayerModal(false);

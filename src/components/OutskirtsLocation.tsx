@@ -11,6 +11,7 @@ import {
 import { soundEngine } from './RainWorldSynth';
 import { musicManager } from '../audio/MusicManager';
 import { PinkLizard, LizardDen } from '../entities/PinkLizard';
+import { AiSlugcat } from '../entities/AiSlugcat';
 import { webRTCManager } from '../network/WebRTCManager';
 import { distributedSimulation } from '../network/DistributedSimulation';
 import { RemotePlayer, NetworkPacket } from '../network/types';
@@ -34,6 +35,7 @@ interface OutskirtsLocationProps {
   toggleSound: () => void;
   customLocation?: CustomLocationData;
   characterId?: SlugcatCharacterId;
+  safariMode?: boolean;
 }
 
 export const getRandomCycleSeconds = (): number => {
@@ -171,8 +173,11 @@ export default function OutskirtsLocation({
   isSoundMuted,
   toggleSound,
   customLocation,
-  characterId = 'survivor'
+  characterId = 'survivor',
+  safariMode = false
 }: OutskirtsLocationProps) {
+  const safariModeRef = useRef<boolean>(safariMode);
+  safariModeRef.current = safariMode;
   const settings = useGameSettings();
   const lang = settings.language;
   const settingsRef = useRef<GameSettings>(settings);
@@ -192,8 +197,10 @@ export default function OutskirtsLocation({
 
   const charConfig = SLUGCAT_CHARACTERS[characterId] || SLUGCAT_CHARACTERS.survivor;
   const charConfigRef = useRef(charConfig);
+  charConfigRef.current = charConfig;
   useEffect(() => {
     charConfigRef.current = charConfig;
+    webRTCManager.setLocalCharacter(charConfig.id);
   }, [charConfig]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   
@@ -215,8 +222,12 @@ export default function OutskirtsLocation({
   });
 
   // Notifications and actions
-  const [spawnNotification, setSpawnNotification] = useState(true);
-  const [lastAction, setLastAction] = useState<string>('Слимакокіт готовий! Спис і камінь на карті.');
+  const [spawnNotification, setSpawnNotification] = useState(!safariMode);
+  const [lastAction, setLastAction] = useState<string>(
+    safariMode
+      ? 'Режим Сафарі: спостерігайте за світом або візьміть під контроль істоту.'
+      : 'Слимакокіт готовий! Спис і камінь на карті.'
+  );
 
   // Sync music mute state with global sound toggle
   useEffect(() => {
@@ -360,6 +371,7 @@ export default function OutskirtsLocation({
   // Current active location (supports built-in locations and custom editor locations)
   const [currentLocation, setCurrentLocation] = useState<CustomLocationData>(() => {
     if (customLocation) return customLocation;
+    if (safariMode) return DEFAULT_OUTSKIRTS_LOCATION;
     const targetId = playerSave.lastLocationId || 'shelter-outskirts';
     return getLocationById(targetId) || DEFAULT_OUTSKIRTS_LOCATION;
   });
@@ -372,7 +384,46 @@ export default function OutskirtsLocation({
     actionMsg?: string
   ) => void) | null>(null);
   const needsCycleResetRef = useRef<boolean>(false);
-  const [showLocationModal, setShowLocationModal] = useState<boolean>(false);
+
+  // Safari Mode: AI Slugcats, Observer Target, Possession & World Mini-Map
+  type SafariTarget = { type: 'lizard' | 'slugcat'; id: string } | null;
+  interface SafariRoomSnapshot {
+    lizards: Array<{ id: string; hunting: boolean; grabbing: boolean; dead: boolean }>;
+    slugcats: Array<{ id: string; name: string; characterId: SlugcatCharacterId; dead: boolean; stunned: boolean }>;
+  }
+  const aiSlugcatsRef = useRef<Map<string, AiSlugcat>>(new Map());
+  const [safariSelected, setSafariSelected] = useState<SafariTarget>(null);
+  const safariSelectedRef = useRef<SafariTarget>(null);
+  useEffect(() => {
+    safariSelectedRef.current = safariSelected;
+  }, [safariSelected]);
+  const [safariPossessing, setSafariPossessing] = useState<boolean>(false);
+  const safariPossessingRef = useRef<boolean>(false);
+  useEffect(() => {
+    safariPossessingRef.current = safariPossessing;
+  }, [safariPossessing]);
+  const [showSafariWorldMap, setShowSafariWorldMap] = useState<boolean>(false);
+  const [safariTargetInfo, setSafariTargetInfo] = useState<{
+    name: string;
+    sublabel: string;
+    isDead: boolean;
+    heldItem: ItemType | null;
+  } | null>(null);
+  const [safariWorldSnapshot, setSafariWorldSnapshot] = useState<Record<string, SafariRoomSnapshot>>({});
+  const safariActionPulseRef = useRef<{ grab: boolean; throwItem: boolean; eat: boolean }>({
+    grab: false,
+    throwItem: false,
+    eat: false
+  });
+  const safariActionHoldRef = useRef<{ grab: boolean; throwItem: boolean; eat: boolean }>({
+    grab: false,
+    throwItem: false,
+    eat: false
+  });
+  const safariCycleTargetRef = useRef<((dir: 1 | -1) => void) | null>(null);
+  const safariSelectAtClientPointRef = useRef<((clientX: number, clientY: number) => void) | null>(null);
+  const safariSwitchRoomRef = useRef<((loc: CustomLocationData) => void) | null>(null);
+  const safariTogglePossessRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (customLocation) {
@@ -572,6 +623,7 @@ export default function OutskirtsLocation({
 
   // Shelter save & silent on-screen auto-reload when update is pending and player is inside shelter
   useEffect(() => {
+    if (safariMode) return;
     if (updateCountdown !== null && updateCountdown > 0 && !reloadTriggeredRef.current) {
       if (currentLocation.isShelterRoom || inShelterChamber) {
         const emergencySave: PlayerSaveData = {
@@ -597,7 +649,7 @@ export default function OutskirtsLocation({
         );
       }
     }
-  }, [updateCountdown, currentLocation.isShelterRoom, inShelterChamber, currentLocation.id, foodCount, playerSave, charConfig.requiredFood]);
+  }, [safariMode, updateCountdown, currentLocation.isShelterRoom, inShelterChamber, currentLocation.id, foodCount, playerSave, charConfig.requiredFood]);
 
   // Cycle Duration and Countdown: 10 dots around Karma symbol
   const [cycleTotalDuration, setCycleTotalDuration] = useState<number>(() => getRandomCycleSeconds());
@@ -867,6 +919,37 @@ export default function OutskirtsLocation({
     };
     ensureCycleLizardsInitialized();
 
+    const ensureCycleAiSlugcatsInitialized = (forceRespawn: boolean = false) => {
+      if (!safariModeRef.current) {
+        aiSlugcatsRef.current.clear();
+        return;
+      }
+      if (!forceRespawn && aiSlugcatsRef.current.size > 0) return;
+      aiSlugcatsRef.current.clear();
+
+      const specs: Array<{
+        id: string;
+        name: string;
+        roomId: string;
+        characterId: SlugcatCharacterId;
+        preferX: number;
+        preferY: number;
+      }> = [
+        { id: 'ai-slug-1', name: 'Блукач', roomId: 'outskirts-default', characterId: 'survivor', preferX: 210, preferY: 440 },
+        { id: 'ai-slug-2', name: 'Пілігрим', roomId: 'outskirts-default', characterId: 'monk', preferX: 740, preferY: 420 },
+        { id: 'ai-slug-3', name: 'Слідопит', roomId: 'drainage-system', characterId: 'survivor', preferX: 340, preferY: 410 },
+        { id: 'ai-slug-4', name: 'Мандрівник', roomId: 'industrial-complex', characterId: 'monk', preferX: 460, preferY: 400 },
+      ];
+
+      for (const spec of specs) {
+        const loc = getLocationById(spec.roomId) || DEFAULT_OUTSKIRTS_LOCATION;
+        const safe = resolveSafeSpawn(loc, spec.preferX, spec.preferY);
+        const bot = new AiSlugcat(spec.id, spec.name, loc.id, spec.characterId, safe.x, safe.y);
+        aiSlugcatsRef.current.set(spec.id, bot);
+      }
+    };
+    ensureCycleAiSlugcatsInitialized();
+
     let activeRoomLizards: LizardStoreEntry[] = [];
     let currentLizardEntry: LizardStoreEntry | null = null;
     let pinkLizard: PinkLizard | null = null;
@@ -977,7 +1060,9 @@ export default function OutskirtsLocation({
     const syncRoomItemsCache = (roomId: string = activeLoc.id, list: WorldItem[] = items) => {
       cycleRoomItemsCache.current.set(
         roomId,
-        list.filter(it => !it.isHeld || it.heldBy !== 'player').map(it => ({ ...it }))
+        list
+          .filter(it => !it.isHeld || (it.heldBy !== 'player' && !aiSlugcatsRef.current.has(it.heldBy || '')))
+          .map(it => ({ ...it }))
       );
     };
 
@@ -1099,7 +1184,6 @@ export default function OutskirtsLocation({
       setCurrentLocation(targetLoc);
       setInShelterChamber(!!targetLoc.isShelterRoom);
       inShelterChamberRef.current = !!targetLoc.isShelterRoom;
-      setShowLocationModal(false);
       if (actionMsg) {
         setLastAction(actionMsg);
       }
@@ -1110,6 +1194,7 @@ export default function OutskirtsLocation({
           type: 'REQUEST_ITEMS_SYNC',
           senderId: webRTCManager.localPlayerId,
           senderName: webRTCManager.localPlayerName,
+          characterId: charConfigRef.current.id,
           room: targetLoc.id
         });
       }
@@ -1255,6 +1340,11 @@ export default function OutskirtsLocation({
       cycleLizardsRef.current.clear();
       lizardsInitializedForCycle = false;
       ensureCycleLizardsInitialized();
+      ensureCycleAiSlugcatsInitialized(true);
+      safariSelectedRef.current = null;
+      setSafariSelected(null);
+      safariPossessingRef.current = false;
+      setSafariPossessing(false);
       lizardCombatTimerRef.current = 0;
       pvpCombatTimerRef.current = 0;
       pvpTargetPeerIdRef.current = null;
@@ -1325,6 +1415,7 @@ export default function OutskirtsLocation({
       deadIds?: string[],
       reason?: string
     ) => {
+      if (safariModeRef.current) return;
       if (cycleEndTriggeredRef.current) return;
       cycleEndTriggeredRef.current = true;
       persistedPeersRef.current.clear();
@@ -1558,30 +1649,45 @@ export default function OutskirtsLocation({
       }
 
       const cfg = charConfigRef.current;
-      const dmgMult = thrownBy === 'player' ? cfg.outgoingDamageMult : 1.0;
-      const stunMult = thrownBy === 'player' ? cfg.outgoingStunMult : 1.0;
+      const aiAttacker = thrownBy ? aiSlugcatsRef.current.get(thrownBy) : undefined;
+      const attackerCfg = aiAttacker ? SLUGCAT_CHARACTERS[aiAttacker.characterId] : cfg;
+      const useAttackerMult = thrownBy === 'player' || !!aiAttacker;
+      const dmgMult = useAttackerMult ? attackerCfg.outgoingDamageMult : 1.0;
+      const stunMult = useAttackerMult ? attackerCfg.outgoingStunMult : 1.0;
 
-      // Damage, stun & knockback lizards within blast radius
+      // Damage, stun & knockback lizards within blast radius using sectional hitboxes
       let hitLizCount = 0;
       for (const lizEntry of activeRoomLizards) {
         const liz = lizEntry.lizard;
         if (liz.state === 'dead' || liz.pipeTransit) continue;
-        const lx = liz.x + liz.width / 2;
-        const ly = liz.y + liz.height / 2;
-        const dist = Math.hypot(lx - cx, ly - cy);
-        if (dist <= radius) {
+        const blast = liz.hitTestBlast(cx, cy, radius);
+        if (blast.hit) {
           hitLizCount++;
-          const falloff = Math.max(0.45, 1 - (dist / radius) * 0.55);
-          const dmg = Math.round(maxDmg * falloff * dmgMult * 100) / 100;
-          const stun = roundToOneDecimal(maxStun * falloff * stunMult);
-          const pushDirX = dist > 1 ? (lx - cx) / dist : (liz.facingRight ? -1 : 1);
+          const falloff = Math.max(0.45, 1 - (blast.dist / radius) * 0.55);
+          const dmg = Math.round(maxDmg * falloff * dmgMult * blast.damageMult * 100) / 100;
+          const stun = roundToOneDecimal(maxStun * falloff * stunMult * blast.stunMult);
+          const pushDirX = blast.dist > 1 ? (blast.closestX - cx) / Math.max(1, Math.hypot(blast.closestX - cx, blast.closestY - cy)) : (liz.facingRight ? -1 : 1);
           const kbVx = pushDirX * (mode === 'explosive_spear' ? 11.5 : 8.5) * falloff;
           const kbVy = -(mode === 'explosive_spear' ? 6.2 : 4.8) * falloff;
 
           if (isWorldAuthority()) {
+            const freedTarget = liz.grabbedTarget;
+            const freedPeerId = liz.grabbedPeerId;
             liz.takeDamage(dmg, stun);
             liz.vx += kbVx;
             liz.vy += kbVy;
+            if (freedTarget === 'player' && player.hp > 0 && player.state !== 'dead') {
+              player.stunTimer = 0;
+              player.state = 'normal';
+              player.vy = -3.0;
+            } else if (freedTarget === 'peer' && freedPeerId) {
+              const freedAi = aiSlugcatsRef.current.get(freedPeerId);
+              if (freedAi && freedAi.hp > 0 && freedAi.state !== 'dead') {
+                freedAi.stunTimer = 0;
+                freedAi.state = 'normal';
+                freedAi.vy = -3.0;
+              }
+            }
             sendAuthoritativeLizardsSync();
           } else {
             webRTCManager.broadcastPacket({
@@ -1599,19 +1705,47 @@ export default function OutskirtsLocation({
         }
       }
 
-      // Blast knockback / self-damage if player stands right next to blast
-      const pCx = player.x + player.width / 2;
-      const pCy = player.y + player.height / 2;
-      const pDist = Math.hypot(pCx - cx, pCy - cy);
-      if (pDist <= radius * 0.72 && player.state !== 'dead') {
-        const falloff = Math.max(0.3, 1 - (pDist / (radius * 0.72)) * 0.7);
-        const pushDirX = pDist > 1 ? (pCx - cx) / pDist : 1;
-        player.vx += pushDirX * (mode === 'explosive_spear' ? 8.5 : 6.0) * falloff;
-        player.vy = -4.5 * falloff;
-        player.isGrounded = false;
-        player.isClimbing = false;
-        if (pDist < radius * 0.45) {
-          applyHit(player, mode, mode === 'explosive_spear' ? 0.55 : 0.08, mode === 'explosive_spear' ? 2.0 : 1.4, 0.8);
+      // Blast knockback / self-damage if player stands right next to blast (never kill a grabbed player during rescue!)
+      const isPlayerGrabbed = activeRoomLizards.some(e => e.lizard.grabbedTarget === 'player');
+      if (!safariModeRef.current && !isPlayerGrabbed) {
+        const pCx = player.x + player.width / 2;
+        const pCy = player.y + player.height / 2;
+        const pDist = Math.hypot(pCx - cx, pCy - cy);
+        if (pDist <= radius * 0.72 && player.state !== 'dead') {
+          const falloff = Math.max(0.3, 1 - (pDist / (radius * 0.72)) * 0.7);
+          const pushDirX = pDist > 1 ? (pCx - cx) / pDist : 1;
+          player.vx += pushDirX * (mode === 'explosive_spear' ? 8.5 : 6.0) * falloff;
+          player.vy = -4.5 * falloff;
+          player.isGrounded = false;
+          player.isClimbing = false;
+          if (pDist < radius * 0.45) {
+            applyHit(player, mode, mode === 'explosive_spear' ? 0.55 : 0.08, mode === 'explosive_spear' ? 2.0 : 1.4, 0.8);
+          }
+        }
+      }
+
+      // AI Slugcat blast damage / knockback in Safari Mode
+      if (safariModeRef.current) {
+        for (const ai of aiSlugcatsRef.current.values()) {
+          if (ai.roomId !== activeLoc.id || ai.state === 'dead' || ai.pipeTransit) continue;
+          const isAiGrabbed = activeRoomLizards.some(e => e.lizard.grabbedTarget === 'peer' && e.lizard.grabbedPeerId === ai.id);
+          if (isAiGrabbed) continue;
+          const aDist = Math.hypot((ai.x + ai.width / 2) - cx, (ai.y + ai.height / 2) - cy);
+          if (aDist <= radius * 0.72) {
+            const falloff = Math.max(0.3, 1 - (aDist / (radius * 0.72)) * 0.7);
+            const pushDirX = aDist > 1 ? ((ai.x + ai.width / 2) - cx) / aDist : 1;
+            ai.vx += pushDirX * (mode === 'explosive_spear' ? 8.5 : 6.0) * falloff;
+            ai.vy = -4.5 * falloff;
+            ai.isGrounded = false;
+            ai.isClimbing = false;
+            if (aDist < radius * 0.45) {
+              ai.applyProjectileHit(
+                mode,
+                mode === 'explosive_spear' ? 0.55 * dmgMult : 0.08 * dmgMult,
+                (mode === 'explosive_spear' ? 2.0 : 1.4) * stunMult
+              );
+            }
+          }
         }
       }
 
@@ -1662,6 +1796,12 @@ export default function OutskirtsLocation({
     // Grab / Pick up item handler (including pulling stuck spears out of bodies/walls & catching batflies)
     let lastGrabTimestamp = 0;
     const handleGrab = () => {
+      if (safariModeRef.current) {
+        if (safariPossessingRef.current && safariSelectedRef.current) {
+          safariActionPulseRef.current.grab = true;
+        }
+        return;
+      }
       if (player.state !== 'normal' || isSpectatingRef.current || cycleEndOverlayRef.current) return;
 
       const now = performance.now();
@@ -1811,6 +1951,16 @@ export default function OutskirtsLocation({
     // Throw held item handler
     let lastThrowTimestamp = 0;
     const handleThrow = () => {
+      if (safariModeRef.current) {
+        if (safariPossessingRef.current && safariSelectedRef.current) {
+          if (safariSelectedRef.current.type === 'slugcat') {
+            safariActionPulseRef.current.throwItem = true;
+          } else {
+            safariActionPulseRef.current.grab = true;
+          }
+        }
+        return;
+      }
       if (player.state !== 'normal' || isSpectatingRef.current || cycleEndOverlayRef.current || !player.heldItem) return;
 
       const now = performance.now();
@@ -1931,6 +2081,12 @@ export default function OutskirtsLocation({
     let eatingSlowdownTimer = 0;
 
     const handleToggleEat = () => {
+      if (safariModeRef.current) {
+        if (safariPossessingRef.current && safariSelectedRef.current?.type === 'slugcat') {
+          safariActionPulseRef.current.eat = true;
+        }
+        return;
+      }
       if (player.state !== 'normal' || isSpectatingRef.current || cycleEndOverlayRef.current) return;
 
       if (!player.heldItem || !isEdibleItemType(player.heldItem.type)) {
@@ -2246,6 +2402,7 @@ export default function OutskirtsLocation({
           type: 'REQUEST_WORLD_SYNC',
           senderId: webRTCManager.localPlayerId,
           senderName: webRTCManager.localPlayerName,
+          characterId: charConfigRef.current.id,
           room: activeLoc.id
         });
       }
@@ -2265,6 +2422,7 @@ export default function OutskirtsLocation({
             type: 'REQUEST_WORLD_SYNC',
             senderId: webRTCManager.localPlayerId,
             senderName: webRTCManager.localPlayerName,
+            characterId: charConfigRef.current.id,
             room: activeLoc.id
           });
         } else {
@@ -2727,9 +2885,23 @@ export default function OutskirtsLocation({
         if (isWorldAuthority()) {
           const entry = cycleLizardsRef.current.get(packet.lizardId);
           if (entry && entry.lizard.state !== 'dead') {
+            const freedTarget = entry.lizard.grabbedTarget;
+            const freedPeerId = entry.lizard.grabbedPeerId;
             entry.lizard.takeDamage(packet.damage, packet.stunDuration);
             entry.lizard.vx += packet.knockbackVx;
             entry.lizard.vy += packet.knockbackVy;
+            if (freedTarget === 'player' && player.hp > 0 && player.state !== 'dead') {
+              player.stunTimer = 0;
+              player.state = 'normal';
+              player.vy = -3.0;
+            } else if (freedTarget === 'peer' && freedPeerId) {
+              const freedAi = aiSlugcatsRef.current.get(freedPeerId);
+              if (freedAi && freedAi.hp > 0 && freedAi.state !== 'dead') {
+                freedAi.stunTimer = 0;
+                freedAi.state = 'normal';
+                freedAi.vy = -3.0;
+              }
+            }
             soundEngine.playHit(packet.weaponType);
             sendAuthoritativeLizardsSync();
           }
@@ -2743,6 +2915,19 @@ export default function OutskirtsLocation({
           player.isClimbing = false;
 
           if (!packet.grabbed || cfg.biteGrabImmunity) {
+            if (packet.grabbed && cfg.biteGrabImmunity) {
+              webRTCManager.broadcastPacket({
+                type: 'LIZARD_HIT',
+                senderId: webRTCManager.localPlayerId,
+                lizardId: packet.lizardId,
+                room: packet.room,
+                weaponType: 'rock',
+                damage: 0,
+                stunDuration: cfg.attackerStunOnGrabAttempt,
+                knockbackVx: 0,
+                knockbackVy: -3.0,
+              });
+            }
             player.vy = -3.0;
             if (player.hp <= 0) {
               player.state = 'dead';
@@ -2848,7 +3033,47 @@ export default function OutskirtsLocation({
 
       if (isMap) {
         e.preventDefault();
-        if (!e.repeat) setShowMapOverlay(prev => !prev);
+        if (!e.repeat) {
+          if (safariModeRef.current) {
+            setShowSafariWorldMap(prev => !prev);
+          } else {
+            setShowMapOverlay(prev => !prev);
+          }
+        }
+        return;
+      }
+
+      if (safariModeRef.current) {
+        if (code === 'Escape' && safariPossessingRef.current) {
+          e.preventDefault();
+          safariPossessingRef.current = false;
+          setSafariPossessing(false);
+          setLastAction('Повернення до вільної камери / спостереження.');
+          return;
+        }
+        if (
+          ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code) ||
+          ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)
+        ) {
+          e.preventDefault();
+        }
+        if (isLeft) setControlFlag('left', true);
+        if (isRight) setControlFlag('right', true);
+        if (isUp) setControlFlag('up', true);
+        if (isDown) setControlFlag('down', true);
+        if (isJump) setControlFlag('jump', true);
+        if (isGrab && !e.repeat) {
+          safariActionHoldRef.current.grab = true;
+          safariActionPulseRef.current.grab = true;
+        }
+        if (isThrow && !e.repeat) {
+          safariActionHoldRef.current.throwItem = true;
+          safariActionPulseRef.current.throwItem = true;
+        }
+        if (isEat && !e.repeat) {
+          safariActionHoldRef.current.eat = true;
+          safariActionPulseRef.current.eat = true;
+        }
         return;
       }
 
@@ -2916,6 +3141,15 @@ export default function OutskirtsLocation({
       if (code === kb.jump) {
         setControlFlag('jump', false);
       }
+      if (code === kb.grab || (!usedCodes.has('KeyC') && code === 'KeyC') || (!usedCodes.has('KeyF') && code === 'KeyF')) {
+        safariActionHoldRef.current.grab = false;
+      }
+      if (code === kb.throwItem || (!usedCodes.has('KeyQ') && code === 'KeyQ')) {
+        safariActionHoldRef.current.throwItem = false;
+      }
+      if (code === kb.eatBerry) {
+        safariActionHoldRef.current.eat = false;
+      }
     };
 
     const resetAllControls = () => {
@@ -2924,9 +3158,159 @@ export default function OutskirtsLocation({
       controlsRef.current.up = false;
       controlsRef.current.down = false;
       controlsRef.current.jump = false;
+      safariActionHoldRef.current.grab = false;
+      safariActionHoldRef.current.throwItem = false;
+      safariActionHoldRef.current.eat = false;
+      safariActionPulseRef.current.grab = false;
+      safariActionPulseRef.current.throwItem = false;
+      safariActionPulseRef.current.eat = false;
       setControls({ left: false, right: false, up: false, down: false, jump: false });
     };
     resetControlsActionRef.current = resetAllControls;
+
+    // Safari interactive callbacks (selecting creatures on canvas, cycling targets, switching rooms, toggling possession)
+    const getSafariRoomEntities = () => {
+      const list: Array<{ type: 'lizard' | 'slugcat'; id: string; label: string; isDead: boolean }> = [];
+      for (const entry of activeRoomLizards) {
+        list.push({
+          type: 'lizard',
+          id: entry.id,
+          label: `Рожевий ящер`,
+          isDead: entry.lizard.state === 'dead'
+        });
+      }
+      for (const ai of aiSlugcatsRef.current.values()) {
+        if (ai.roomId === activeLoc.id) {
+          list.push({
+            type: 'slugcat',
+            id: ai.id,
+            label: ai.name,
+            isDead: ai.state === 'dead'
+          });
+        }
+      }
+      return list;
+    };
+
+    safariCycleTargetRef.current = (dir: 1 | -1) => {
+      if (!safariModeRef.current) return;
+      const list = getSafariRoomEntities();
+      if (list.length === 0) {
+        safariSelectedRef.current = null;
+        setSafariSelected(null);
+        safariPossessingRef.current = false;
+        setSafariPossessing(false);
+        return;
+      }
+      const cur = safariSelectedRef.current;
+      const curIdx = cur ? list.findIndex(e => e.type === cur.type && e.id === cur.id) : -1;
+      const nextIdx = curIdx < 0
+        ? (dir > 0 ? 0 : list.length - 1)
+        : (curIdx + dir + list.length) % list.length;
+      const picked = list[nextIdx];
+      const nextTarget = { type: picked.type, id: picked.id };
+      safariSelectedRef.current = nextTarget;
+      setSafariSelected(nextTarget);
+      if (picked.isDead && safariPossessingRef.current) {
+        safariPossessingRef.current = false;
+        setSafariPossessing(false);
+      }
+      setLastAction(`Обрано для спостереження: ${picked.label}`);
+    };
+
+    safariSelectAtClientPointRef.current = (clientX: number, clientY: number) => {
+      if (!safariModeRef.current) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const canvasX = ((clientX - rect.left) / rect.width) * CANVAS_WIDTH;
+      const canvasY = ((clientY - rect.top) / rect.height) * CANVAS_HEIGHT;
+      const z = zoomRef.current;
+      const worldX = camera.x + canvasX / z;
+      const worldY = camera.y + canvasY / z;
+
+      let bestTarget: SafariTarget = null;
+      let bestDist = 42;
+
+      for (const entry of activeRoomLizards) {
+        const liz = entry.lizard;
+        if (liz.pipeTransit) continue;
+        const hit = liz.hitTestPoint(worldX, worldY, 26);
+        if (hit.hit) {
+          const d = Math.hypot(hit.hitX - worldX, hit.hitY - worldY);
+          if (d < bestDist) {
+            bestDist = d;
+            bestTarget = { type: 'lizard', id: entry.id };
+          }
+        }
+      }
+
+      for (const ai of aiSlugcatsRef.current.values()) {
+        if (ai.roomId !== activeLoc.id || ai.pipeTransit) continue;
+        const d = Math.hypot((ai.x + ai.width / 2) - worldX, (ai.y + ai.height / 2) - worldY);
+        if (d < 34 && d <= bestDist) {
+          bestDist = d;
+          bestTarget = { type: 'slugcat', id: ai.id };
+        }
+      }
+
+      if (bestTarget) {
+        safariSelectedRef.current = bestTarget;
+        setSafariSelected(bestTarget);
+        if (safariPossessingRef.current) {
+          const isDeadTarget = bestTarget.type === 'lizard'
+            ? cycleLizardsRef.current.get(bestTarget.id)?.lizard.state === 'dead'
+            : aiSlugcatsRef.current.get(bestTarget.id)?.state === 'dead';
+          if (isDeadTarget) {
+            safariPossessingRef.current = false;
+            setSafariPossessing(false);
+          }
+        }
+      } else if (!safariPossessingRef.current) {
+        safariSelectedRef.current = null;
+        setSafariSelected(null);
+      }
+    };
+
+    safariSwitchRoomRef.current = (loc: CustomLocationData) => {
+      if (!safariModeRef.current) return;
+      safariPossessingRef.current = false;
+      setSafariPossessing(false);
+      safariSelectedRef.current = null;
+      setSafariSelected(null);
+      switchSpectatorViewRoom(loc);
+      setShowSafariWorldMap(false);
+      setLastAction(`Камера Сафарі: ${loc.name}`);
+    };
+
+    safariTogglePossessRef.current = () => {
+      if (!safariModeRef.current) return;
+      if (safariPossessingRef.current) {
+        safariPossessingRef.current = false;
+        setSafariPossessing(false);
+        setLastAction('Контроль відпущено — режим спостерігача.');
+        return;
+      }
+      let target = safariSelectedRef.current;
+      if (!target) {
+        const list = getSafariRoomEntities().filter(e => !e.isDead);
+        if (list.length > 0) {
+          target = { type: list[0].type, id: list[0].id };
+          safariSelectedRef.current = target;
+          setSafariSelected(target);
+        }
+      }
+      if (!target) return;
+      const isDeadTarget = target.type === 'lizard'
+        ? cycleLizardsRef.current.get(target.id)?.lizard.state === 'dead'
+        : aiSlugcatsRef.current.get(target.id)?.state === 'dead';
+      if (isDeadTarget) {
+        setLastAction('Неможливо взяти під контроль мертву істоту.');
+        return;
+      }
+      safariPossessingRef.current = true;
+      setSafariPossessing(true);
+      setLastAction('Прямий контроль активовано! [ESC] щоб відпустити.');
+    };
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
@@ -2987,27 +3371,29 @@ export default function OutskirtsLocation({
       }
 
       // ---------------- Player State Updates ----------------
-      if (player.state === 'stunned') {
-        player.stunTimer -= delta;
-        if (player.stunTimer <= 0) {
-          player.stunTimer = 0;
-          player.state = 'normal';
-          setLastAction('Слимакокіт прийшов до тями!');
+      if (!safariModeRef.current) {
+        if (player.state === 'stunned') {
+          player.stunTimer -= delta;
+          if (player.stunTimer <= 0) {
+            player.stunTimer = 0;
+            player.state = 'normal';
+            setLastAction('Слимакокіт прийшов до тями!');
+          }
         }
-      }
 
-      if (player.hp <= 0 && player.state !== 'dead') {
-        player.state = 'dead';
-        player.isClimbing = false;
-        setIsDead(true);
-        setLastAction('Слимакокіт загинув!');
-        if (isMultiplayerActiveRef.current) {
-          freezeLocalPlayerBody('dead');
+        if (player.hp <= 0 && player.state !== 'dead') {
+          player.state = 'dead';
+          player.isClimbing = false;
+          setIsDead(true);
+          setLastAction('Слимакокіт загинув!');
+          if (isMultiplayerActiveRef.current) {
+            freezeLocalPlayerBody('dead');
+          }
         }
       }
 
       // Host tracks every peer's live state for disconnect/death persistence in current cycle
-      if (isWorldAuthority() && isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current && Date.now() >= newCycleGraceUntilRef.current) {
+      if (!safariModeRef.current && isWorldAuthority() && isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current && Date.now() >= newCycleGraceUntilRef.current) {
         const nowMs = Date.now();
         for (const rp of webRTCManager.remotePlayers.values()) {
           const existing = persistedPeersRef.current.get(rp.id);
@@ -3042,7 +3428,7 @@ export default function OutskirtsLocation({
       }
 
       // Singleplayer death -> show Cycle End (Death) screen before returning to shelter
-      if (player.state === 'dead' && !isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current) {
+      if (!safariModeRef.current && player.state === 'dead' && !isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current) {
         singleplayerDeathTimer += delta;
         if (singleplayerDeathTimer >= 1.4) {
           singleplayerDeathTimer = 0;
@@ -3053,7 +3439,7 @@ export default function OutskirtsLocation({
       }
 
       // Multiplayer Fast Cycle End (when all alive connected players sleep OR all players are dead)
-      if (isWorldAuthority() && isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current) {
+      if (!safariModeRef.current && isWorldAuthority() && isMultiplayerActiveRef.current && !cycleEndTriggeredRef.current) {
         const localStatus: 'normal' | 'stunned' | 'dead' | 'sleeping' =
           player.state === 'dead'
             ? 'dead'
@@ -3112,7 +3498,7 @@ export default function OutskirtsLocation({
       }
 
       // Auto-select living peer when spectating if current target vanished
-      if (isSpectatingRef.current || (player.state === 'dead' && isMultiplayerActiveRef.current)) {
+      if (!safariModeRef.current && (isSpectatingRef.current || (player.state === 'dead' && isMultiplayerActiveRef.current))) {
         const remoteList = Array.from(webRTCManager.remotePlayers.values());
         const currentSpec = spectatedPeerIdRef.current ? webRTCManager.remotePlayers.get(spectatedPeerIdRef.current) : null;
         if (!currentSpec || currentSpec.state === 'dead') {
@@ -3127,7 +3513,7 @@ export default function OutskirtsLocation({
         }
       }
 
-      // ---------------- Authoritative Pink Lizard Simulation vs Client Interpolation ----------------
+      // ---------------- Authoritative Pink Lizard & AI Slugcat Simulation ----------------
       if (isWorldAuthority()) {
         const roomPeers = new Map<string, Array<{
           id: string;
@@ -3139,8 +3525,10 @@ export default function OutskirtsLocation({
           hp: number;
           state: string;
           room: string;
+          stunTimer?: number;
           biteGrabImmunity?: boolean;
           attackerStunOnGrabAttempt?: number;
+          setPosition?: (x: number, y: number, vx: number, vy: number) => void;
         }>>();
         for (const p of webRTCManager.remotePlayers.values()) {
           const rId = p.room || activeLoc.id;
@@ -3160,28 +3548,88 @@ export default function OutskirtsLocation({
             hp: p.hp ?? peerCharCfg.maxHp,
             state: p.state || 'normal',
             room: rId,
+            stunTimer: p.stunTimer,
             biteGrabImmunity: peerCharCfg.biteGrabImmunity,
             attackerStunOnGrabAttempt: peerCharCfg.attackerStunOnGrabAttempt,
           });
         }
 
+        if (safariModeRef.current) {
+          for (const ai of aiSlugcatsRef.current.values()) {
+            if (ai.pipeTransit) continue;
+            let list = roomPeers.get(ai.roomId);
+            if (!list) {
+              list = [];
+              roomPeers.set(ai.roomId, list);
+            }
+            list.push({
+              id: ai.id,
+              name: ai.name,
+              x: ai.x,
+              y: ai.y,
+              vx: ai.vx,
+              vy: ai.vy,
+              hp: ai.hp,
+              state: ai.state,
+              room: ai.roomId,
+              stunTimer: ai.stunTimer,
+              biteGrabImmunity: ai.biteGrabImmunity,
+              attackerStunOnGrabAttempt: ai.attackerStunOnGrabAttempt,
+              setPosition: (nx: number, ny: number, nvx: number, nvy: number) => {
+                ai.x = nx;
+                ai.y = ny;
+                ai.vx = nvx;
+                ai.vy = nvy;
+              },
+            });
+          }
+        }
+
         const physicalHostRoomId = frozenBodyRef.current ? frozenBodyRef.current.roomId : activeLoc.id;
-        const activeRooms = new Set<string>([physicalHostRoomId, activeLoc.id, ...roomPeers.keys()]);
+        const activeRooms = new Set<string>([
+          ...(safariModeRef.current ? [activeLoc.id] : [physicalHostRoomId, activeLoc.id]),
+          ...roomPeers.keys(),
+        ]);
         const localCfg = charConfigRef.current;
         player.characterId = localCfg.id;
         player.biteGrabImmunity = localCfg.biteGrabImmunity;
         player.attackerStunOnGrabAttempt = localCfg.attackerStunOnGrabAttempt;
-        player.isPipeProtected = !!pipeTransit || roomTransitionGraceTimer > 0 || player.state === 'sleeping' || isSpectatingRef.current;
+        player.isPipeProtected = safariModeRef.current || !!pipeTransit || roomTransitionGraceTimer > 0 || player.state === 'sleeping' || isSpectatingRef.current;
 
         cycleLizardsRef.current.forEach((entry: LizardStoreEntry) => {
           const liz = entry.lizard;
           const roomLoc = getLocationById(entry.roomId) || activeLoc;
           const rEnv = getRoomEnv(roomLoc);
 
-          if (activeRooms.has(entry.roomId)) {
-            const physicalHostRoomId = frozenBodyRef.current ? frozenBodyRef.current.roomId : activeLoc.id;
-            const isLocalRoom = entry.roomId === physicalHostRoomId;
+          const isThisLizPossessed =
+            safariModeRef.current &&
+            safariPossessingRef.current &&
+            safariSelectedRef.current?.type === 'lizard' &&
+            safariSelectedRef.current?.id === entry.id;
+
+          if (isThisLizPossessed && liz.state === 'dead') {
+            safariPossessingRef.current = false;
+            setSafariPossessing(false);
+          }
+
+          if (activeRooms.has(entry.roomId) || isThisLizPossessed) {
+            const isLocalRoom = !safariModeRef.current && entry.roomId === physicalHostRoomId;
             const peersHere = roomPeers.get(entry.roomId) || [];
+
+            const lizPossessedControls = (isThisLizPossessed && liz.state !== 'dead')
+              ? {
+                  left: ctrl.left,
+                  right: ctrl.right,
+                  up: ctrl.up,
+                  down: ctrl.down,
+                  jump: ctrl.jump,
+                  bite:
+                    safariActionPulseRef.current.grab ||
+                    safariActionHoldRef.current.grab ||
+                    safariActionPulseRef.current.throwItem ||
+                    safariActionHoldRef.current.throwItem,
+                }
+              : null;
 
             liz.update(
               delta,
@@ -3218,6 +3666,9 @@ export default function OutskirtsLocation({
                     setLastAction(`Розовий ящер вкусив (${actualDmg.toFixed(2)} урону) і схопив у пащу! Стан ${actualStun.toFixed(1)}с!`);
                   }
                 }
+                if (webRTCManager.remotePlayers.size > 0) {
+                  sendAuthoritativeLizardsSync();
+                }
               },
               () => {
                 if (entry.roomId === activeLoc.id) {
@@ -3227,6 +3678,20 @@ export default function OutskirtsLocation({
               (peerId: string, damage: number, grabbed: boolean) => {
                 if (entry.roomId === activeLoc.id) {
                   soundEngine.playCreatureHurt();
+                }
+                const aiTarget = aiSlugcatsRef.current.get(peerId);
+                if (aiTarget) {
+                  aiTarget.applyBite(damage, grabbed);
+                  if (entry.roomId === activeLoc.id) {
+                    if (!grabbed && aiTarget.biteGrabImmunity && aiTarget.hp > 0) {
+                      setLastAction(`🛡️ ${aiTarget.name} відштовхнув ящера і оглушив його!`);
+                    } else if (aiTarget.state === 'dead') {
+                      setLastAction(`💀 Розовий ящер убив ${aiTarget.name}!`);
+                    } else if (grabbed) {
+                      setLastAction(`🦎 Розовий ящер схопив ${aiTarget.name} у пащу!`);
+                    }
+                  }
+                  return;
                 }
                 webRTCManager.sendPacketToPeer(peerId, {
                   type: 'LIZARD_BITE_PEER',
@@ -3238,6 +3703,9 @@ export default function OutskirtsLocation({
                   stunDuration: grabbed ? 20.0 : 0,
                   grabbed
                 });
+                if (webRTCManager.remotePlayers.size > 0) {
+                  sendAuthoritativeLizardsSync();
+                }
               },
               rEnv.transitPipes,
               (targetRoomId: string, spawnX?: number, spawnY?: number) => {
@@ -3265,7 +3733,15 @@ export default function OutskirtsLocation({
                   liz.resetProceduralPose(destSafe.x, destSafe.y);
                 }
 
-                if (liz.grabbedTarget === 'player') {
+                const carriedAi = (liz.grabbedTarget === 'peer' && liz.grabbedPeerId)
+                  ? aiSlugcatsRef.current.get(liz.grabbedPeerId)
+                  : undefined;
+                if (carriedAi) {
+                  carriedAi.roomId = targetRoomId;
+                  carriedAi.resetPose(destSafe.x, destSafe.y);
+                }
+
+                if (liz.grabbedTarget === 'player' && !safariModeRef.current) {
                   transitionToLocation(
                     destLoc,
                     destSafe.x,
@@ -3273,6 +3749,14 @@ export default function OutskirtsLocation({
                     undefined,
                     `Ящер затягнув вас через трубу у кімнату: ${destLoc.name}!`
                   );
+                } else if (
+                  safariModeRef.current &&
+                  (
+                    (safariSelectedRef.current?.type === 'lizard' && safariSelectedRef.current.id === entry.id) ||
+                    (carriedAi && safariSelectedRef.current?.type === 'slugcat' && safariSelectedRef.current.id === carriedAi.id)
+                  )
+                ) {
+                  switchSpectatorViewRoom(destLoc, destSafe.x, destSafe.y);
                 } else if (prevRoomId === activeLoc.id || targetRoomId === activeLoc.id) {
                   setLastAction(`Ящер проліз через трубу у кімнату: ${destLoc.name}!`);
                 }
@@ -3286,7 +3770,8 @@ export default function OutskirtsLocation({
                   setLastAction('Ящер заліз у лігво, залишив здобич, виліз назовні та пішов далі полювати!');
                 }
               },
-              { width: rEnv.width, height: rEnv.height, roomId: roomLoc.id }
+              { width: rEnv.width, height: rEnv.height, roomId: roomLoc.id },
+              lizPossessedControls
             );
           } else {
             // Simplified simulation for empty rooms with natural pipe emergence (never pops mid-air)
@@ -3430,8 +3915,158 @@ export default function OutskirtsLocation({
           }
         });
 
+        // AI-Controlled Slugcats Simulation (Exclusive to Safari Mode)
+        if (safariModeRef.current && aiSlugcatsRef.current.size > 0) {
+          for (const ai of aiSlugcatsRef.current.values()) {
+            const aiRoomLoc = getLocationById(ai.roomId) || activeLoc;
+            const aiEnv = getRoomEnv(aiRoomLoc);
+            const isInActiveRoom = ai.roomId === activeLoc.id;
+            const aiRoomItems = isInActiveRoom ? items : getOrInitRoomItems(aiRoomLoc);
+            const roomLizards: PinkLizard[] = [];
+            cycleLizardsRef.current.forEach((lEntry) => {
+              if (lEntry.roomId === ai.roomId) roomLizards.push(lEntry.lizard);
+            });
+
+            const isThisAiPossessed =
+              safariPossessingRef.current &&
+              safariSelectedRef.current?.type === 'slugcat' &&
+              safariSelectedRef.current?.id === ai.id;
+
+            if (isThisAiPossessed && ai.state === 'dead') {
+              safariPossessingRef.current = false;
+              setSafariPossessing(false);
+            }
+
+            const aiPossessedCtrl = (isThisAiPossessed && ai.state !== 'dead')
+              ? {
+                  left: ctrl.left,
+                  right: ctrl.right,
+                  up: ctrl.up,
+                  down: ctrl.down,
+                  jump: ctrl.jump,
+                  grab: safariActionPulseRef.current.grab || safariActionHoldRef.current.grab,
+                  throwItem: safariActionPulseRef.current.throwItem || safariActionHoldRef.current.throwItem,
+                  eat: safariActionPulseRef.current.eat || safariActionHoldRef.current.eat,
+                }
+              : null;
+
+            const prevItemCount = aiRoomItems.length;
+            ai.update(
+              delta,
+              {
+                width: aiEnv.width,
+                height: aiEnv.height,
+                roomId: aiRoomLoc.id,
+                platforms: aiEnv.platforms,
+                poles: aiEnv.poles,
+                transitPipes: aiEnv.transitPipes,
+              },
+              roomLizards,
+              aiRoomItems,
+              {
+                onChangedRoom: (targetRoomId, spawnX, spawnY) => {
+                  const destLoc = getLocationById(targetRoomId);
+                  if (!destLoc) return;
+                  const oldRoomId = ai.roomId;
+                  const carried = ai.heldItem as WorldItem | null;
+                  if (carried) {
+                    const oldIdx = aiRoomItems.indexOf(carried);
+                    if (oldIdx >= 0) aiRoomItems.splice(oldIdx, 1);
+                  }
+                  if (oldRoomId !== activeLoc.id) {
+                    syncRoomItemsCache(oldRoomId, aiRoomItems);
+                  }
+
+                  const safe = resolveSafeSpawn(destLoc, spawnX, spawnY);
+                  ai.roomId = destLoc.id;
+                  ai.resetPose(safe.x, safe.y);
+
+                  if (carried) {
+                    if (destLoc.id === activeLoc.id) {
+                      items.push(carried);
+                    } else {
+                      const destItems = getOrInitRoomItems(destLoc);
+                      destItems.push(carried);
+                      syncRoomItemsCache(destLoc.id, destItems);
+                    }
+                  }
+
+                  if (
+                    safariSelectedRef.current?.type === 'slugcat' &&
+                    safariSelectedRef.current?.id === ai.id
+                  ) {
+                    switchSpectatorViewRoom(destLoc, safe.x, safe.y);
+                  }
+                },
+                onThrowItem: (thrower, thrown, dirSign) => {
+                  const wItem = thrown as WorldItem;
+                  wItem.isHeld = false;
+                  wItem.heldBy = undefined;
+                  wItem.thrownBy = thrower.id;
+                  wItem.sleeping = false;
+                  wItem.x = thrower.chest.x + dirSign * 14;
+                  wItem.y = thrower.chest.y - 2;
+                  const isSp = wItem.type === 'spear' || wItem.type === 'explosive_spear';
+                  wItem.vx = dirSign * (isSp ? 16 : 11);
+                  wItem.vy = isSp ? -0.9 : -3.4;
+                  wItem.isAirborne = true;
+                  if (wItem.type === 'cherrybomb') {
+                    wItem.explosiveArmed = true;
+                    wItem.fuseTimer = 0.65;
+                    wItem.cherryPopCount = 2;
+                  }
+                  if (isSp) {
+                    wItem.rotation = Math.atan2(wItem.vy, wItem.vx);
+                  }
+                  if (thrower.roomId === activeLoc.id) {
+                    soundEngine.playThrow();
+                  }
+                },
+                onConsumeItem: (consumer, consumed) => {
+                  const idx = aiRoomItems.indexOf(consumed);
+                  if (idx >= 0) aiRoomItems.splice(idx, 1);
+                  if (consumer.roomId === activeLoc.id) {
+                    soundEngine.playEatComplete();
+                  } else {
+                    syncRoomItemsCache(consumer.roomId, aiRoomItems);
+                  }
+                },
+                onSoundPickup: () => {
+                  if (ai.roomId === activeLoc.id) soundEngine.playPickup();
+                },
+              },
+              aiPossessedCtrl
+            );
+
+            // Den hazard for ungrabbed AI Slugcats in background or active rooms
+            if (!aiEnv.denData || aiRoomLoc.isLizardDenRoom) {
+              const inDen = Boolean(
+                aiRoomLoc.isLizardDenRoom ||
+                (!aiRoomLoc.isShelterRoom && aiEnv.denData &&
+                  ai.x + 12 >= aiEnv.denData.x &&
+                  ai.x + 12 <= aiEnv.denData.x + aiEnv.denData.w &&
+                  ai.y + 19 >= aiEnv.denData.y &&
+                  ai.y + 19 <= aiEnv.denData.y + aiEnv.denData.h + 24)
+              );
+              const isAiGrabbed = roomLizards.some(l => l.grabbedTarget === 'peer' && l.grabbedPeerId === ai.id);
+              if (inDen && !isAiGrabbed && ai.state !== 'dead') {
+                if (ai.stunTimer > 0) ai.stunTimer += delta;
+                ai.hp = Math.max(0, ai.hp - 0.0033 * delta);
+                if (ai.hp <= 0) {
+                  ai.state = 'dead';
+                  ai.stunTimer = 0;
+                }
+              }
+            }
+
+            if (!isInActiveRoom && ai.roomId === aiRoomLoc.id && aiRoomItems.length !== prevItemCount) {
+              syncRoomItemsCache(aiRoomLoc.id, aiRoomItems);
+            }
+          }
+        }
+
         // 20 Hz Authoritative Lizards Sync Broadcast to clients
-        if (webRTCManager.remotePlayers.size > 0 && now - lastLizardsSyncMs >= 50) {
+        if (!safariModeRef.current && webRTCManager.remotePlayers.size > 0 && now - lastLizardsSyncMs >= 50) {
           lastLizardsSyncMs = now;
           sendAuthoritativeLizardsSync();
         }
@@ -3450,9 +4085,10 @@ export default function OutskirtsLocation({
       }
 
       // ---------------- Visible Lizard Den Mechanics ----------------
-      // "і зроби ящеру свою убержку ну видиму куда даже зайти можна но игрока якого заніс туда ящер буде медлено получать урон 0.01 урон в 3 сикунди та стан ставитиметься на паузу поки він там"
-      // ---------------- Visible Lizard Den Mechanics ----------------
-      const isInsideLizardDen = Boolean(
+      const isPlayerGrabbedNow = !safariModeRef.current && activeRoomLizards.some(
+        entry => entry.lizard.grabbedTarget === 'player'
+      );
+      const isInsideLizardDen = !safariModeRef.current && Boolean(
         activeLoc.isLizardDenRoom ||
         (!activeLoc.isShelterRoom && activeEnv.denData && (
           player.x + 12 >= activeEnv.denData.x &&
@@ -3462,7 +4098,8 @@ export default function OutskirtsLocation({
         ))
       );
 
-      if (isInsideLizardDen && player.state !== 'dead') {
+      // IMPORTANT: Only pause stun / apply slow den acid AFTER the lizard drops prey inside the den (never while actively held in jaws!)
+      if (!safariModeRef.current && isInsideLizardDen && !isPlayerGrabbedNow && player.state !== 'dead') {
         if (player.stunTimer > 0) {
           player.stunTimer += delta;
         }
@@ -3483,16 +4120,36 @@ export default function OutskirtsLocation({
       }
 
       // Dynamic Health Filter for Music:
-      musicManager.setHealthFilter(player.hp / player.maxHp);
+      if (safariModeRef.current) {
+        musicManager.setHealthFilter(1.0);
+      } else {
+        musicManager.setHealthFilter(player.hp / player.maxHp);
+      }
 
       // ---------------- Dynamic Music Category Switching with Exact 60s Timers ----------------
       for (const entry of activeRoomLizards) {
         const liz = entry.lizard;
         if (liz.state === 'dead') continue;
-        const distToLizard = Math.hypot((player.x + 12) - (liz.x + 26), (player.y + 19) - (liz.y + 12));
-        if (distToLizard < 480 || liz.grabbedTarget === 'player' || liz.state === 'hunt') {
-          lizardCombatTimerRef.current = 60.0;
-          break;
+        if (safariModeRef.current) {
+          if (liz.state === 'hunt' || liz.state === 'drag_prey') {
+            lizardCombatTimerRef.current = 60.0;
+            break;
+          }
+          for (const ai of aiSlugcatsRef.current.values()) {
+            if (ai.roomId !== activeLoc.id || ai.state === 'dead') continue;
+            const d = Math.hypot((ai.x + 12) - (liz.x + 26), (ai.y + 19) - (liz.y + 12));
+            if (d < 420) {
+              lizardCombatTimerRef.current = 60.0;
+              break;
+            }
+          }
+          if (lizardCombatTimerRef.current === 60.0) break;
+        } else {
+          const distToLizard = Math.hypot((player.x + 12) - (liz.x + 26), (player.y + 19) - (liz.y + 12));
+          if (distToLizard < 480 || liz.grabbedTarget === 'player' || liz.state === 'hunt') {
+            lizardCombatTimerRef.current = 60.0;
+            break;
+          }
         }
       }
 
@@ -3527,9 +4184,9 @@ export default function OutskirtsLocation({
       }
 
       // ---------------- Player Physics Updates ----------------
-      const canControl = player.state === 'normal' && !isSpectatingRef.current && !cycleEndOverlayRef.current;
+      const canControl = !safariModeRef.current && player.state === 'normal' && !isSpectatingRef.current && !cycleEndOverlayRef.current;
 
-      // Lethal Downpour upon cycle expiry (checks player's actual physical room, never spectator view room!):
+      // Lethal Downpour upon cycle expiry (or automatic clean Safari cycle loop)
       if (cycleSecondsLeftRef.current <= 0) {
         localStormSeconds += delta;
         setStormActive(true);
@@ -3537,7 +4194,25 @@ export default function OutskirtsLocation({
         const stormIntensity = Math.min(1.0, localStormSeconds / 25.0);
         soundEngine.setStormVolume(stormIntensity * 0.85);
 
-        if (
+        if (safariModeRef.current) {
+          if (localStormSeconds >= 10.0) {
+            localStormSeconds = 0;
+            const nextDur = getRandomCycleSeconds();
+            cycleSecondsLeftRef.current = nextDur;
+            setCycleTotalDuration(nextDur);
+            setCycleSecondsLeft(nextDur);
+            setStormActive(false);
+            setStormSeconds(0);
+            soundEngine.setStormVolume(0);
+            cycleRoomItemsCache.current.clear();
+            cycleLizardsRef.current.clear();
+            lizardsInitializedForCycle = false;
+            ensureCycleLizardsInitialized();
+            ensureCycleAiSlugcatsInitialized(true);
+            refreshActiveRoomLizard();
+            setLastAction('🌧️ Новий цикл екосистеми Сафарі розпочався!');
+          }
+        } else if (
           !isPhysicallySafeInShelter &&
           !isPhysicallyInDen &&
           player.state !== 'dead' &&
@@ -3568,6 +4243,7 @@ export default function OutskirtsLocation({
         }
       }
 
+      if (!safariModeRef.current) {
       // Pipe Conduit Transit: 1.1s delayed sliding travel through pipe (no telemetry/state resets!)
       if (pipeTransit) {
         pipeTransit.progress += delta / pipeTransit.duration;
@@ -4063,6 +4739,7 @@ export default function OutskirtsLocation({
           }
         }
       }
+      }
 
       playerPosRef.current = { x: player.x, y: player.y };
 
@@ -4143,7 +4820,7 @@ export default function OutskirtsLocation({
 
         if (item.isStuck) {
           item.sleeping = true;
-          // Attached to stuck target (Lizard or Player)
+          // Attached to stuck target (Lizard, Player, or AI Slugcat)
           if (item.stuckTarget === 'lizard') {
             const stuckLiz = (item.stuckLizardId
               ? activeRoomLizards.find(e => e.id === item.stuckLizardId)?.lizard
@@ -4157,6 +4834,17 @@ export default function OutskirtsLocation({
             item.x = player.chest.x + (item.stuckOffsetX ?? 0);
             item.y = player.chest.y + (item.stuckOffsetY ?? 0);
             item.rotation = (item.stuckAngle ?? 0) + (player.ragdollAngle ?? 0);
+          } else if (item.stuckTarget) {
+            const stuckAi = aiSlugcatsRef.current.get(item.stuckTarget);
+            if (stuckAi && stuckAi.roomId === activeLoc.id) {
+              item.x = stuckAi.chest.x + (item.stuckOffsetX ?? 0);
+              item.y = stuckAi.chest.y + (item.stuckOffsetY ?? 0);
+              item.rotation = (item.stuckAngle ?? 0) + (stuckAi.ragdollAngle ?? 0);
+            } else if (stuckAi) {
+              item.stuckTarget = undefined;
+              item.isStuck = false;
+              item.sleeping = false;
+            }
           }
           // Firmly stuck (in creature or wall/floor), static until picked up or detonated
           continue;
@@ -4177,9 +4865,24 @@ export default function OutskirtsLocation({
             item.wingPhase = (item.wingPhase ?? 0) + delta * 26;
             item.flyDecisionTimer = (item.flyDecisionTimer ?? 0) - delta;
 
-            const pxMid = player.x + player.width / 2;
-            const pyMid = player.y + player.height / 2;
-            const distToPlayer = Math.hypot(item.x - pxMid, item.y - pyMid);
+            let nearestSlugDist = 9999;
+            let nearestSlugX = 0;
+            let nearestSlugY = 0;
+            if (!safariModeRef.current) {
+              nearestSlugX = player.x + player.width / 2;
+              nearestSlugY = player.y + player.height / 2;
+              nearestSlugDist = Math.hypot(item.x - nearestSlugX, item.y - nearestSlugY);
+            } else {
+              for (const ai of aiSlugcatsRef.current.values()) {
+                if (ai.roomId !== activeLoc.id || ai.state === 'dead') continue;
+                const d = Math.hypot(item.x - (ai.x + ai.width / 2), item.y - (ai.y + ai.height / 2));
+                if (d < nearestSlugDist) {
+                  nearestSlugDist = d;
+                  nearestSlugX = ai.x + ai.width / 2;
+                  nearestSlugY = ai.y + ai.height / 2;
+                }
+              }
+            }
 
             let nearestLizDist = 9999;
             let nearestLizX = 0;
@@ -4195,8 +4898,8 @@ export default function OutskirtsLocation({
               }
             }
 
-            if (distToPlayer < 82) {
-              const awayAng = Math.atan2(item.y - pyMid, item.x - pxMid);
+            if (nearestSlugDist < 82) {
+              const awayAng = Math.atan2(item.y - nearestSlugY, item.x - nearestSlugX);
               item.flyTargetVx = Math.cos(awayAng) * 3.1;
               item.flyTargetVy = Math.sin(awayAng) * 2.4 - 0.6;
               item.flyDecisionTimer = 0.35;
@@ -4326,13 +5029,13 @@ export default function OutskirtsLocation({
           }
           if (hitBatfly && itemsToRemove.has(item.id)) continue;
 
-          // 1. Check collision with ALL Pink Lizards currently in this room
+          // 1. Check collision with ALL Pink Lizards currently in this room (Sectional Head / Body / Tail Hitboxes)
           let hitAnyLizard = false;
           for (const lizEntry of activeRoomLizards) {
             const targetLiz = lizEntry.lizard;
             if (targetLiz.state === 'dead' || targetLiz.pipeTransit) continue;
-            const lizDist = Math.hypot(item.x - (targetLiz.x + targetLiz.width / 2), item.y - (targetLiz.y + targetLiz.height / 2));
-            if (lizDist < 36) {
+            const lizHit = targetLiz.hitTestPoint(item.x, item.y, isSpearItem ? 10 : 7);
+            if (lizHit.hit) {
               hitAnyLizard = true;
               if (item.type === 'berry' || item.type === 'pearl') {
                 item.isAirborne = false;
@@ -4347,18 +5050,34 @@ export default function OutskirtsLocation({
                 itemsToRemove.add(item.id);
                 break;
               }
-              const cfg = charConfigRef.current;
+              const aiAttacker = item.thrownBy ? aiSlugcatsRef.current.get(item.thrownBy) : undefined;
+              const cfg = aiAttacker ? SLUGCAT_CHARACTERS[aiAttacker.characterId] : charConfigRef.current;
               const kbVx = item.vx * 0.14;
               const kbVy = -2.2;
+              const zoneLabel = lizHit.zone === 'head' ? 'у голову' : (lizHit.zone === 'tail' ? 'у хвіст' : 'у тіло');
               if (isSpearItem) {
                 const isExpl = item.type === 'explosive_spear';
-                const dmg = Math.round((isExpl ? 0.85 : 1.0) * cfg.outgoingDamageMult * 100) / 100;
-                const stun = roundToOneDecimal((isExpl ? 2.0 : 2.5) * cfg.outgoingStunMult);
+                const dmg = Math.round((isExpl ? 0.85 : 1.0) * cfg.outgoingDamageMult * lizHit.damageMult * 100) / 100;
+                const stun = roundToOneDecimal((isExpl ? 2.0 : 2.5) * cfg.outgoingStunMult * lizHit.stunMult);
                 soundEngine.playHit(isExpl ? 'explosive_spear' : 'spear');
                 if (isWorldAuthority()) {
+                  const freedTarget = targetLiz.grabbedTarget;
+                  const freedPeerId = targetLiz.grabbedPeerId;
                   targetLiz.takeDamage(dmg, stun);
                   targetLiz.vx += kbVx;
                   targetLiz.vy += kbVy;
+                  if (freedTarget === 'player' && player.hp > 0 && player.state !== 'dead') {
+                    player.stunTimer = 0;
+                    player.state = 'normal';
+                    player.vy = -3.0;
+                  } else if (freedTarget === 'peer' && freedPeerId) {
+                    const freedAi = aiSlugcatsRef.current.get(freedPeerId);
+                    if (freedAi && freedAi.hp > 0 && freedAi.state !== 'dead') {
+                      freedAi.stunTimer = 0;
+                      freedAi.state = 'normal';
+                      freedAi.vy = -3.0;
+                    }
+                  }
                   sendAuthoritativeLizardsSync();
                 } else {
                   webRTCManager.broadcastPacket({
@@ -4377,26 +5096,40 @@ export default function OutskirtsLocation({
                 item.isStuck = true;
                 item.stuckTarget = 'lizard';
                 item.stuckLizardId = targetLiz.id;
-                item.stuckOffsetX = (targetLiz.facingRight ? -1 : 1) * 8;
-                item.stuckOffsetY = (Math.random() - 0.5) * 6;
+                item.stuckOffsetX = lizHit.offsetX;
+                item.stuckOffsetY = lizHit.offsetY;
                 item.stuckAngle = item.rotation;
                 item.vx = 0;
                 item.vy = 0;
                 if (isExpl) {
                   item.explosiveArmed = true;
                   item.fuseTimer = 0.28;
-                  setLastAction(`🧨 Вибуховий спис упʼявся в ящера — детонація!`);
+                  setLastAction(`🧨 Вибуховий спис упʼявся ${zoneLabel} ящера — детонація!`);
                 } else {
-                  setLastAction(`Спис влучив у ящера (-${dmg.toFixed(1)} HP, стан ${stun.toFixed(1)}с)!`);
+                  setLastAction(`Спис влучив ${zoneLabel} ящера (-${dmg.toFixed(2)} HP, стан ${stun.toFixed(1)}с)!`);
                 }
               } else {
-                const dmg = Math.round(0.2 * cfg.outgoingDamageMult * 100) / 100;
-                const stun = roundToOneDecimal(1.8 * cfg.outgoingStunMult);
+                const dmg = Math.round(0.2 * cfg.outgoingDamageMult * lizHit.damageMult * 100) / 100;
+                const stun = roundToOneDecimal(1.8 * cfg.outgoingStunMult * lizHit.stunMult);
                 soundEngine.playHit('rock');
                 if (isWorldAuthority()) {
+                  const freedTarget = targetLiz.grabbedTarget;
+                  const freedPeerId = targetLiz.grabbedPeerId;
                   targetLiz.takeDamage(dmg, stun);
                   targetLiz.vx += kbVx * 0.6;
                   targetLiz.vy += kbVy * 0.6;
+                  if (freedTarget === 'player' && player.hp > 0 && player.state !== 'dead') {
+                    player.stunTimer = 0;
+                    player.state = 'normal';
+                    player.vy = -3.0;
+                  } else if (freedTarget === 'peer' && freedPeerId) {
+                    const freedAi = aiSlugcatsRef.current.get(freedPeerId);
+                    if (freedAi && freedAi.hp > 0 && freedAi.state !== 'dead') {
+                      freedAi.stunTimer = 0;
+                      freedAi.state = 'normal';
+                      freedAi.vy = -3.0;
+                    }
+                  }
                   sendAuthoritativeLizardsSync();
                 } else {
                   webRTCManager.broadcastPacket({
@@ -4414,16 +5147,17 @@ export default function OutskirtsLocation({
                 item.isAirborne = false;
                 item.vx = -item.vx * 0.35;
                 item.vy = -1.8;
-                setLastAction(`Камінь влучив у ящера! Стан ${stun.toFixed(1)}с (-${dmg.toFixed(2)} HP)`);
+                setLastAction(`Камінь влучив ${zoneLabel} ящера! Стан ${stun.toFixed(1)}с (-${dmg.toFixed(2)} HP)`);
               }
               break;
             }
           }
           if (hitAnyLizard) continue;
 
-          // 2. Check collision with Player
+          // 2. Check collision with Player (skip in Safari Mode or while grabbed by a lizard)
+          const isPlayerGrabbedProjectile = activeRoomLizards.some(e => e.lizard.grabbedTarget === 'player');
           const playerDist = Math.hypot(item.x - (player.x + player.width / 2), item.y - (player.y + player.height / 2));
-          if (playerDist < 26 && item.thrownBy !== 'player') {
+          if (!safariModeRef.current && !isPlayerGrabbedProjectile && playerDist < 26 && item.thrownBy !== 'player') {
             if (item.type === 'berry' || item.type === 'pearl') {
               item.isAirborne = false;
               item.vx = -item.vx * 0.28;
@@ -4460,6 +5194,63 @@ export default function OutskirtsLocation({
               item.vy = -1.8;
             }
             continue;
+          }
+
+          // 2.5 Check collision with AI-Controlled Slugcats (Safari Mode)
+          if (safariModeRef.current) {
+            let hitAiSlugcat = false;
+            for (const ai of aiSlugcatsRef.current.values()) {
+              if (ai.roomId !== activeLoc.id || ai.state === 'dead' || ai.pipeTransit || item.thrownBy === ai.id) continue;
+              const isAiGrabbed = activeRoomLizards.some(e => e.lizard.grabbedTarget === 'peer' && e.lizard.grabbedPeerId === ai.id);
+              if (isAiGrabbed) continue;
+              const aiDist = Math.hypot(item.x - (ai.x + ai.width / 2), item.y - (ai.y + ai.height / 2));
+              if (aiDist < 26) {
+                hitAiSlugcat = true;
+                if (item.type === 'berry' || item.type === 'pearl') {
+                  item.isAirborne = false;
+                  item.vx = -item.vx * 0.28;
+                  item.vy = -1.6;
+                  if (item.type === 'pearl') soundEngine.playPearlChime();
+                  else soundEngine.playPickup();
+                  break;
+                }
+                if (item.type === 'cherrybomb') {
+                  detonateExplosion(item.x, item.y, 130, 0.45, 4.5, 'cherrybomb', item.thrownBy);
+                  itemsToRemove.add(item.id);
+                  break;
+                }
+                const aiAttacker = item.thrownBy ? aiSlugcatsRef.current.get(item.thrownBy) : undefined;
+                const aCfg = aiAttacker ? SLUGCAT_CHARACTERS[aiAttacker.characterId] : charConfigRef.current;
+                const baseDmg = isSpearItem ? 1.0 : 0.01;
+                const baseStun = isSpearItem ? 1.8 : 1.2;
+                ai.applyProjectileHit(item.type as WeaponItemType, baseDmg * aCfg.outgoingDamageMult, baseStun * aCfg.outgoingStunMult);
+                soundEngine.playHit(item.type as WeaponItemType);
+                if (isSpearItem) {
+                  item.isAirborne = false;
+                  item.isStuck = true;
+                  item.stuckTarget = ai.id;
+                  const hitDir = item.vx >= 0 ? 1 : -1;
+                  item.stuckOffsetX = hitDir * 7;
+                  item.stuckOffsetY = (Math.random() - 0.5) * 6;
+                  item.stuckAngle = item.rotation;
+                  item.vx = 0;
+                  item.vy = 0;
+                  ai.vx += hitDir * 2.8;
+                  ai.vy = -2.0;
+                  if (item.type === 'explosive_spear') {
+                    item.explosiveArmed = true;
+                    item.fuseTimer = 0.28;
+                  }
+                } else {
+                  item.isAirborne = false;
+                  item.vx = -item.vx * 0.35;
+                  item.vy = -1.8;
+                }
+                setLastAction(`🎯 ${getItemLabel(item.type)} вразив ${ai.name}!`);
+                break;
+              }
+            }
+            if (hitAiSlugcat) continue;
           }
 
           // 3. Check collision with Remote Players
@@ -4783,11 +5574,21 @@ export default function OutskirtsLocation({
         }
       }
 
-      // ---------------- Procedural Skeleton Physics (Player / Frozen Anchor) ----------------
-      if (frozenBodyRef.current) {
-        updateSkeleton(frozenBodyRef.current, t, delta);
-      } else {
-        updateSkeleton(player, t, delta);
+      // ---------------- Procedural Skeleton Physics (Player / Frozen Anchor / AI Slugcats) ----------------
+      if (!safariModeRef.current) {
+        if (frozenBodyRef.current) {
+          updateSkeleton(frozenBodyRef.current, t, delta);
+        } else {
+          updateSkeleton(player, t, delta);
+        }
+      }
+
+      if (safariModeRef.current) {
+        for (const ai of aiSlugcatsRef.current.values()) {
+          if (ai.roomId === activeLoc.id) {
+            updateSkeleton(ai, t, delta);
+          }
+        }
       }
 
       // ---------------- Procedural Skeleton Physics (Remote & Offline Peers) ----------------
@@ -4802,9 +5603,15 @@ export default function OutskirtsLocation({
         }
       }
 
+      // Consume one-frame Safari action pulses right after lizards/AI slugcats have processed them
+      if (safariModeRef.current) {
+        safariActionPulseRef.current.grab = false;
+        safariActionPulseRef.current.throwItem = false;
+        safariActionPulseRef.current.eat = false;
+      }
+
       // Throttled WebRTC P2P Player State Broadcast (25 Hz)
-      // Always transmits the real physical anchor room & position so spectating NEVER teleports the sleeping/dead slugcat!
-      if (webRTCManager.connectionStatus === 'connected' && t - lastBroadcastTime > 0.04) {
+      if (!safariModeRef.current && webRTCManager.connectionStatus === 'connected' && t - lastBroadcastTime > 0.04) {
         lastBroadcastTime = t;
         const anchor = frozenBodyRef.current;
         if (anchor) {
@@ -4859,7 +5666,7 @@ export default function OutskirtsLocation({
       }
 
       // Authoritative item synchronization from room host to peers (all occupied/spectated rooms every 0.45s)
-      if (isWorldAuthority() && webRTCManager.remotePlayers.size > 0 && t - lastItemsSyncTime > 0.45) {
+      if (!safariModeRef.current && isWorldAuthority() && webRTCManager.remotePlayers.size > 0 && t - lastItemsSyncTime > 0.45) {
         lastItemsSyncTime = t;
         const roomsToSync = new Set<string>([activeLoc.id]);
         for (const rp of webRTCManager.remotePlayers.values()) {
@@ -4904,7 +5711,7 @@ export default function OutskirtsLocation({
           }
           sendAuthoritativeItemsSync(undefined, roomId);
         }
-      } else if (!isWorldAuthority() && (isSpectatingRef.current || player.state === 'dead') && webRTCManager.connectionStatus === 'connected' && t - lastItemsSyncTime > 1.0) {
+      } else if (!safariModeRef.current && !isWorldAuthority() && (isSpectatingRef.current || player.state === 'dead') && webRTCManager.connectionStatus === 'connected' && t - lastItemsSyncTime > 1.0) {
         lastItemsSyncTime = t;
         webRTCManager.broadcastPacket({
           type: 'REQUEST_ITEMS_SYNC',
@@ -4914,107 +5721,216 @@ export default function OutskirtsLocation({
         });
       }
 
-      // Sync state for React HUD telemetry periodically
+      // Sync state for React HUD telemetry + Safari World Mini-Map periodically
       telemetryThrottleTimer += delta;
-      const throttleTarget = 0.5;
+      const throttleTarget = safariModeRef.current ? 0.25 : 0.5;
       if (telemetryThrottleTimer > throttleTarget) {
         telemetryThrottleTimer = 0;
-        const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
 
-        let spears = 0;
-        let rocks = 0;
-        let berries = 0;
-        let pearls = 0;
-        let batflies = 0;
-        for (let i = 0; i < items.length; i++) {
-          const it = items[i].type;
-          if (it === 'spear' || it === 'explosive_spear') spears++;
-          else if (it === 'rock' || it === 'cherrybomb') rocks++;
-          else if (it === 'berry') berries++;
-          else if (it === 'pearl') pearls++;
-          else if (it === 'batfly') batflies++;
+        if (safariModeRef.current) {
+          const sel = safariSelectedRef.current;
+          if (!sel) {
+            setSafariTargetInfo(null);
+          } else if (sel.type === 'lizard') {
+            const le = cycleLizardsRef.current.get(sel.id);
+            if (!le) {
+              setSafariTargetInfo(null);
+            } else {
+              if (le.roomId !== activeLoc.id) {
+                const dest = getLocationById(le.roomId);
+                if (dest) switchSpectatorViewRoom(dest, le.lizard.x, le.lizard.y);
+              }
+              setSafariTargetInfo({
+                name: 'Рожевий ящер',
+                sublabel: `${getLocationById(le.roomId)?.name.split(' (')[0] || le.roomId}`,
+                isDead: le.lizard.state === 'dead',
+                heldItem: null,
+              });
+            }
+          } else {
+            const ai = aiSlugcatsRef.current.get(sel.id);
+            if (!ai) {
+              setSafariTargetInfo(null);
+            } else {
+              if (ai.roomId !== activeLoc.id) {
+                const dest = getLocationById(ai.roomId);
+                if (dest) switchSpectatorViewRoom(dest, ai.x, ai.y);
+              }
+              setSafariTargetInfo({
+                name: ai.name,
+                sublabel: `${ai.characterId === 'monk' ? 'Монах' : 'Виживший'} • ${getLocationById(ai.roomId)?.name.split(' (')[0] || ai.roomId}`,
+                isDead: ai.state === 'dead',
+                heldItem: ai.heldItem ? ai.heldItem.type : null,
+              });
+            }
+          }
+
+          const snap: Record<string, SafariRoomSnapshot> = {};
+          cycleLizardsRef.current.forEach((le) => {
+            if (!snap[le.roomId]) snap[le.roomId] = { lizards: [], slugcats: [] };
+            snap[le.roomId].lizards.push({
+              id: le.id,
+              hunting: le.lizard.state === 'hunt' || le.lizard.state === 'drag_prey',
+              grabbing: !!le.lizard.grabbedTarget,
+              dead: le.lizard.state === 'dead',
+            });
+          });
+          aiSlugcatsRef.current.forEach((ai) => {
+            if (!snap[ai.roomId]) snap[ai.roomId] = { lizards: [], slugcats: [] };
+            snap[ai.roomId].slugcats.push({
+              id: ai.id,
+              name: ai.name,
+              characterId: ai.characterId,
+              dead: ai.state === 'dead',
+              stunned: ai.state === 'stunned',
+            });
+          });
+          setSafariWorldSnapshot(snap);
+        } else {
+          const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+
+          let spears = 0;
+          let rocks = 0;
+          let berries = 0;
+          let pearls = 0;
+          let batflies = 0;
+          for (let i = 0; i < items.length; i++) {
+            const it = items[i].type;
+            if (it === 'spear' || it === 'explosive_spear') spears++;
+            else if (it === 'rock' || it === 'cherrybomb') rocks++;
+            else if (it === 'berry') berries++;
+            else if (it === 'pearl') pearls++;
+            else if (it === 'batfly') batflies++;
+          }
+
+          setTelemetry({
+            x: Math.round(player.x * 10) / 10,
+            y: Math.round(player.y * 10) / 10,
+            vx: Math.round(player.vx * 100) / 100,
+            vy: Math.round(player.vy * 100) / 100,
+            speed: Math.round(speed * 100) / 100,
+            isGrounded: player.isGrounded,
+            isClimbing: player.isClimbing,
+            crouching: player.crouching,
+            facingRight: player.facingRight,
+            state: player.state,
+            hp: Math.round(player.hp * 100) / 100,
+            maxHp: player.maxHp,
+            stunTimer: Math.max(0, Math.round(player.stunTimer * 100) / 100),
+            heldItem: player.heldItem ? player.heldItem.type : null,
+
+            npcState: pinkLizard ? (pinkLizard.state as SlugcatState) : 'normal',
+            npcHp: pinkLizard ? Math.round(pinkLizard.hp * 100) / 100 : 0,
+            npcMaxHp: 3.5,
+            npcStunTimer: pinkLizard ? Math.max(0, Math.round(pinkLizard.stunTimer * 100) / 100) : 0,
+            npcX: pinkLizard ? Math.round(pinkLizard.x) : 0,
+            npcY: pinkLizard ? Math.round(pinkLizard.y) : 0,
+            roomLizards: activeRoomLizards.map(e => ({
+              id: e.id,
+              x: Math.round(e.lizard.x + e.lizard.width / 2),
+              y: Math.round(e.lizard.y + e.lizard.height / 2)
+            })),
+
+            spearsCount: spears,
+            rocksCount: rocks,
+            berriesCount: berries,
+            pearlsCount: pearls,
+            batfliesCount: batflies,
+            foodCount: foodCountRef.current,
+            isEating,
+            eatingProgress: Math.min(100, Math.round((eatingTimer / 3.5) * 100)),
+            fps: currentFps,
+            particles: sparks.length,
+          });
+
+          setIsDead(player.state === 'dead');
         }
-
-        setTelemetry({
-          x: Math.round(player.x * 10) / 10,
-          y: Math.round(player.y * 10) / 10,
-          vx: Math.round(player.vx * 100) / 100,
-          vy: Math.round(player.vy * 100) / 100,
-          speed: Math.round(speed * 100) / 100,
-          isGrounded: player.isGrounded,
-          isClimbing: player.isClimbing,
-          crouching: player.crouching,
-          facingRight: player.facingRight,
-          state: player.state,
-          hp: Math.round(player.hp * 100) / 100,
-          maxHp: player.maxHp,
-          stunTimer: Math.max(0, Math.round(player.stunTimer * 100) / 100),
-          heldItem: player.heldItem ? player.heldItem.type : null,
-
-          npcState: pinkLizard ? (pinkLizard.state as SlugcatState) : 'normal',
-          npcHp: pinkLizard ? Math.round(pinkLizard.hp * 100) / 100 : 0,
-          npcMaxHp: 3.5,
-          npcStunTimer: pinkLizard ? Math.max(0, Math.round(pinkLizard.stunTimer * 100) / 100) : 0,
-          npcX: pinkLizard ? Math.round(pinkLizard.x) : 0,
-          npcY: pinkLizard ? Math.round(pinkLizard.y) : 0,
-          roomLizards: activeRoomLizards.map(e => ({
-            id: e.id,
-            x: Math.round(e.lizard.x + e.lizard.width / 2),
-            y: Math.round(e.lizard.y + e.lizard.height / 2)
-          })),
-
-          spearsCount: spears,
-          rocksCount: rocks,
-          berriesCount: berries,
-          pearlsCount: pearls,
-          batfliesCount: batflies,
-          foodCount: foodCountRef.current,
-          isEating,
-          eatingProgress: Math.min(100, Math.round((eatingTimer / 3.5) * 100)),
-          fps: currentFps,
-          particles: sparks.length,
-        });
-
-        setIsDead(player.state === 'dead');
       }
 
-      // ---------------- Dynamic Camera Tracking & Zoom ----------------
+      // ---------------- Dynamic Camera Tracking & Zoom (including Safari Free-Cam & Target Follow) ----------------
       const currentZoom = zoomRef.current;
       const viewW = CANVAS_WIDTH / currentZoom;
       const viewH = CANVAS_HEIGHT / currentZoom;
+      const maxCamX = Math.max(0, activeEnv.width - viewW);
+      const maxCamY = Math.max(0, activeEnv.height - viewH);
 
-      let focusX = player.x + player.width / 2;
-      let focusY = player.y + player.height / 2;
-      let leadX = (player.state === 'normal' && !isSpectatingRef.current && (ctrl.left || ctrl.right))
-        ? (player.facingRight ? 40 : -40)
-        : 0;
-
-      if ((isSpectatingRef.current || (player.state === 'dead' && isMultiplayerActiveRef.current)) && spectatedPeerIdRef.current) {
-        const specPeer = webRTCManager.remotePlayers.get(spectatedPeerIdRef.current);
-        if (specPeer) {
-          focusX = specPeer.x + 12;
-          focusY = specPeer.y + 19;
-          leadX = specPeer.facingRight ? 30 : -30;
-          if (specPeer.room && specPeer.room !== activeLoc.id) {
-            const loc = getLocationById(specPeer.room);
-            if (loc) {
-              // Switches spectator viewport room ONLY — never teleports local slugcat!
-              switchSpectatorViewRoom(loc, specPeer.x, specPeer.y);
+      if (safariModeRef.current) {
+        const sel = safariSelectedRef.current;
+        let followedEntity = false;
+        if (sel) {
+          if (sel.type === 'lizard') {
+            const le = cycleLizardsRef.current.get(sel.id);
+            if (le) {
+              if (le.roomId !== activeLoc.id) {
+                const dest = getLocationById(le.roomId);
+                if (dest) switchSpectatorViewRoom(dest, le.lizard.x, le.lizard.y);
+              }
+              const fx = le.lizard.x + le.lizard.width / 2 + (le.lizard.facingRight ? 36 : -36);
+              const fy = le.lizard.y + le.lizard.height / 2;
+              const clampedX = Math.max(0, Math.min(maxCamX, fx - viewW / 2));
+              const clampedY = Math.max(0, Math.min(maxCamY, fy - viewH / 2));
+              camera.x += (clampedX - camera.x) * 0.14;
+              camera.y += (clampedY - camera.y) * 0.14;
+              followedEntity = true;
+            }
+          } else {
+            const ai = aiSlugcatsRef.current.get(sel.id);
+            if (ai) {
+              if (ai.roomId !== activeLoc.id) {
+                const dest = getLocationById(ai.roomId);
+                if (dest) switchSpectatorViewRoom(dest, ai.x, ai.y);
+              }
+              const fx = ai.x + ai.width / 2 + (ai.facingRight ? 32 : -32);
+              const fy = ai.y + ai.height / 2;
+              const clampedX = Math.max(0, Math.min(maxCamX, fx - viewW / 2));
+              const clampedY = Math.max(0, Math.min(maxCamY, fy - viewH / 2));
+              camera.x += (clampedX - camera.x) * 0.14;
+              camera.y += (clampedY - camera.y) * 0.14;
+              followedEntity = true;
             }
           }
         }
+        if (!followedEntity && !safariPossessingRef.current) {
+          const panSpeed = 480 * delta;
+          if (ctrl.left) camera.x -= panSpeed;
+          if (ctrl.right) camera.x += panSpeed;
+          if (ctrl.up) camera.y -= panSpeed;
+          if (ctrl.down) camera.y += panSpeed;
+          camera.x = Math.max(0, Math.min(maxCamX, camera.x));
+          camera.y = Math.max(0, Math.min(maxCamY, camera.y));
+        }
+      } else {
+        let focusX = player.x + player.width / 2;
+        let focusY = player.y + player.height / 2;
+        let leadX = (player.state === 'normal' && !isSpectatingRef.current && (ctrl.left || ctrl.right))
+          ? (player.facingRight ? 40 : -40)
+          : 0;
+
+        if ((isSpectatingRef.current || (player.state === 'dead' && isMultiplayerActiveRef.current)) && spectatedPeerIdRef.current) {
+          const specPeer = webRTCManager.remotePlayers.get(spectatedPeerIdRef.current);
+          if (specPeer) {
+            focusX = specPeer.x + 12;
+            focusY = specPeer.y + 19;
+            leadX = specPeer.facingRight ? 30 : -30;
+            if (specPeer.room && specPeer.room !== activeLoc.id) {
+              const loc = getLocationById(specPeer.room);
+              if (loc) {
+                // Switches spectator viewport room ONLY — never teleports local slugcat!
+                switchSpectatorViewRoom(loc, specPeer.x, specPeer.y);
+              }
+            }
+          }
+        }
+
+        const targetCamX = (focusX + leadX) - viewW / 2;
+        const targetCamY = focusY - viewH / 2;
+
+        const clampedCamX = Math.max(0, Math.min(maxCamX, targetCamX));
+        const clampedCamY = Math.max(0, Math.min(maxCamY, targetCamY));
+
+        camera.x += (clampedCamX - camera.x) * 0.12;
+        camera.y += (clampedCamY - camera.y) * 0.12;
       }
-
-      const targetCamX = (focusX + leadX) - viewW / 2;
-      const targetCamY = focusY - viewH / 2;
-
-      const maxCamX = Math.max(0, activeEnv.width - viewW);
-      const maxCamY = Math.max(0, activeEnv.height - viewH);
-      const clampedCamX = Math.max(0, Math.min(maxCamX, targetCamX));
-      const clampedCamY = Math.max(0, Math.min(maxCamY, targetCamY));
-
-      camera.x += (clampedCamX - camera.x) * 0.12;
-      camera.y += (clampedCamY - camera.y) * 0.12;
 
       const shakeDecay = cameraShakeTimer > 0 ? Math.min(1, cameraShakeTimer / 0.35) : 0;
       const shakeOffsetX = shakeDecay > 0 ? (Math.random() - 0.5) * 2 * cameraShakeIntensity * shakeDecay : 0;
@@ -5419,58 +6335,122 @@ export default function OutskirtsLocation({
         entry.lizard.render(ctx, t);
       }
 
-      // 7. Draw Player (or Frozen Sleeping/Dead Anchor) strictly in its physical room
-      const anchorBody = frozenBodyRef.current;
-      if (anchorBody) {
-        if (anchorBody.roomId === activeLoc.id) {
-          renderSlugcatCharacter(ctx, anchorBody, t, true, webRTCManager.localPlayerName);
-        }
-      } else if (pipeTransit) {
-        const p = Math.min(1, pipeTransit.progress);
-        const curX = pipeTransit.startX + (pipeTransit.endX - pipeTransit.startX) * p;
-        const curY = pipeTransit.startY + (pipeTransit.endY - pipeTransit.startY) * p;
-        const transitAngle = Math.atan2(pipeTransit.endY - pipeTransit.startY, pipeTransit.endX - pipeTransit.startX);
+      // 7. Draw Player (skipped cleanly in Safari Mode)
+      if (!safariModeRef.current) {
+        const anchorBody = frozenBodyRef.current;
+        if (anchorBody) {
+          if (anchorBody.roomId === activeLoc.id) {
+            renderSlugcatCharacter(ctx, anchorBody, t, true, webRTCManager.localPlayerName);
+          }
+        } else if (pipeTransit) {
+          const p = Math.min(1, pipeTransit.progress);
+          const curX = pipeTransit.startX + (pipeTransit.endX - pipeTransit.startX) * p;
+          const curY = pipeTransit.startY + (pipeTransit.endY - pipeTransit.startY) * p;
+          const transitAngle = Math.atan2(pipeTransit.endY - pipeTransit.startY, pipeTransit.endX - pipeTransit.startX);
 
-        ctx.save();
-        ctx.fillStyle = charConfigRef.current.bodyColorTop;
-        if (gfx.glowEffects) {
-          ctx.shadowColor = pipeTransit.isShelter ? '#38bdf8' : '#34d399';
-          ctx.shadowBlur = 12;
+          ctx.save();
+          ctx.fillStyle = charConfigRef.current.bodyColorTop;
+          if (gfx.glowEffects) {
+            ctx.shadowColor = pipeTransit.isShelter ? '#38bdf8' : '#34d399';
+            ctx.shadowBlur = 12;
+          }
+          ctx.beginPath();
+          ctx.ellipse(curX, curY, 11, 7, transitAngle, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else {
+          renderSlugcatCharacter(ctx, player, t, true, webRTCManager.localPlayerName);
         }
-        ctx.beginPath();
-        ctx.ellipse(curX, curY, 11, 7, transitAngle, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      } else {
-        renderSlugcatCharacter(ctx, player, t, true, webRTCManager.localPlayerName);
+
+        // 7.05 Draw Shelter Hibernation Sleep Meter and In-World Prompts
+        if ((activeLoc.isShelterRoom || inShelterChamberRef.current) && !pipeTransit && !isHibernatingRef.current && !isSpectatingRef.current && player.state === 'normal') {
+          ctx.save();
+          const px = player.x + player.width / 2;
+          const py = player.y - 18;
+
+          if (shelterSleepTimer > 0) {
+            const sleepP = Math.min(1, shelterSleepTimer / 1.5);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(px, py - 4, 11, -Math.PI / 2, -Math.PI / 2 + sleepP * Math.PI * 2);
+            ctx.stroke();
+
+            ctx.fillStyle = '#38bdf8';
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(`СНУ: ${Math.round(sleepP * 100)}%`, px, py - 18);
+          } else {
+            const pulseAlpha = 0.5 + Math.sin(t * 3.5) * 0.35;
+            ctx.fillStyle = `rgba(56, 189, 248, ${pulseAlpha})`;
+            ctx.font = 'bold 8px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('⛊ ЗАТИСНІТЬ [ПРИЖОК] АБО [ВНИЗ] ДЛЯ СНУ', px, py - 8);
+          }
+          ctx.restore();
+        }
       }
 
-      // 7.05 Draw Shelter Hibernation Sleep Meter and In-World Prompts
-      if ((activeLoc.isShelterRoom || inShelterChamberRef.current) && !pipeTransit && !isHibernatingRef.current && !isSpectatingRef.current && player.state === 'normal') {
-        ctx.save();
-        const px = player.x + player.width / 2;
-        const py = player.y - 18;
-
-        if (shelterSleepTimer > 0) {
-          const sleepP = Math.min(1, shelterSleepTimer / 1.5);
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 3;
-          ctx.beginPath();
-          ctx.arc(px, py - 4, 11, -Math.PI / 2, -Math.PI / 2 + sleepP * Math.PI * 2);
-          ctx.stroke();
-
-          ctx.fillStyle = '#38bdf8';
-          ctx.font = 'bold 9px monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(`СНУ: ${Math.round(sleepP * 100)}%`, px, py - 18);
-        } else {
-          const pulseAlpha = 0.5 + Math.sin(t * 3.5) * 0.35;
-          ctx.fillStyle = `rgba(56, 189, 248, ${pulseAlpha})`;
-          ctx.font = 'bold 8px monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText('⛊ ЗАТИСНІТЬ [ПРИЖОК] АБО [ВНИЗ] ДЛЯ СНУ', px, py - 8);
+      // 7.08 Draw AI-Controlled Slugcats & Safari Selection/Possession Reticle (Safari Mode Only)
+      if (safariModeRef.current) {
+        for (const ai of aiSlugcatsRef.current.values()) {
+          if (ai.roomId !== activeLoc.id) continue;
+          if (ai.pipeTransit) {
+            const p = Math.min(1, ai.pipeTransit.progress);
+            const curX = ai.pipeTransit.fromX + (ai.pipeTransit.toX - ai.pipeTransit.fromX) * p;
+            const curY = ai.pipeTransit.fromY + (ai.pipeTransit.toY - ai.pipeTransit.fromY) * p;
+            const cfg = SLUGCAT_CHARACTERS[ai.characterId];
+            ctx.save();
+            ctx.fillStyle = cfg.bodyColorTop;
+            ctx.beginPath();
+            ctx.ellipse(curX, curY, 10, 6, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          } else {
+            renderSlugcatCharacter(ctx, ai, t, false, ai.name);
+          }
         }
-        ctx.restore();
+
+        const sel = safariSelectedRef.current;
+        if (sel) {
+          let rx = 0;
+          let ry = 0;
+          let rr = 26;
+          let foundSel = false;
+          if (sel.type === 'lizard') {
+            const le = cycleLizardsRef.current.get(sel.id);
+            if (le && le.roomId === activeLoc.id && !le.lizard.pipeTransit) {
+              rx = le.lizard.x + le.lizard.width / 2;
+              ry = le.lizard.y + le.lizard.height / 2;
+              rr = 34;
+              foundSel = true;
+            }
+          } else {
+            const ai = aiSlugcatsRef.current.get(sel.id);
+            if (ai && ai.roomId === activeLoc.id && !ai.pipeTransit) {
+              rx = ai.x + ai.width / 2;
+              ry = ai.y + ai.height / 2;
+              rr = 26;
+              foundSel = true;
+            }
+          }
+          if (foundSel) {
+            const isPoss = safariPossessingRef.current;
+            ctx.save();
+            ctx.strokeStyle = isPoss ? '#10b981' : '#f59e0b';
+            ctx.lineWidth = isPoss ? 2.4 : 1.6;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.arc(rx, ry, rr + Math.sin(t * 4) * 2.5, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = isPoss ? '#34d399' : '#fbbf24';
+            ctx.font = 'bold 9px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(isPoss ? '▼ ПІД КОНТРОЛЕМ' : '▼ ОБРАНО', rx, ry - rr - 6);
+            ctx.restore();
+          }
+        }
       }
 
       // 7.1 Draw Remote P2P Players & Offline/Disconnected Slugcat Bodies strictly in current location room
@@ -6729,27 +7709,37 @@ export default function OutskirtsLocation({
 
   triggerHibernateRef.current = handleHibernate;
 
-  const handleSelectLocation = (loc: CustomLocationData) => {
-    setShowLocationModal(false);
-    if (isSpectatingRef.current || isDead || frozenBodyRef.current || cycleEndOverlay) {
-      return;
-    }
-    if (transitionToLocationRef.current) {
-      transitionToLocationRef.current(
-        loc,
-        undefined,
-        undefined,
-        undefined,
-        `Перехід до локації: ${loc.name}`
-      );
-    } else {
-      distributedSimulation.enterRoom(loc.id);
-      currentLocationRef.current = loc;
-      setCurrentLocation(loc);
-      setInShelterChamber(!!loc.isShelterRoom);
-      setLastAction(`Перехід до локації: ${loc.name}`);
-    }
+  const SAFARI_MAP_NODES: Record<string, { x: number; y: number; code: string; kind: 'region' | 'shelter' | 'den' }> = {
+    'chimney-canopy': { x: 500, y: 78, code: 'CC', kind: 'region' },
+    'shelter-chimney': { x: 720, y: 66, code: 'S-CC', kind: 'shelter' },
+    'industrial-complex': { x: 500, y: 205, code: 'HI', kind: 'region' },
+    'shelter-industrial': { x: 665, y: 150, code: 'S-HI', kind: 'shelter' },
+    'shaded-citadel': { x: 815, y: 205, code: 'SH', kind: 'region' },
+    'shelter-shaded': { x: 935, y: 205, code: 'S-SH', kind: 'shelter' },
+    'outskirts-default': { x: 255, y: 265, code: 'SU', kind: 'region' },
+    'shelter-outskirts': { x: 100, y: 210, code: 'S-SU', kind: 'shelter' },
+    'lizard-den-outskirts': { x: 100, y: 318, code: 'DEN', kind: 'den' },
+    'drainage-system': { x: 255, y: 420, code: 'DS', kind: 'region' },
+    'shelter-drainage': { x: 95, y: 445, code: 'S-DS', kind: 'shelter' },
+    'garbage-wastes': { x: 540, y: 400, code: 'GW', kind: 'region' },
+    'shelter-garbage': { x: 540, y: 495, code: 'S-GW', kind: 'shelter' },
   };
+
+  const safariMapEdges = React.useMemo(() => {
+    const seen = new Set<string>();
+    const edges: Array<{ from: string; to: string; key: string }> = [];
+    for (const loc of BUILTIN_LOCATIONS) {
+      if (!SAFARI_MAP_NODES[loc.id]) continue;
+      for (const p of loc.transitPipes) {
+        if (!p.targetLocationId || !SAFARI_MAP_NODES[p.targetLocationId]) continue;
+        const pair = [loc.id, p.targetLocationId].sort().join('__');
+        if (seen.has(pair)) continue;
+        seen.add(pair);
+        edges.push({ from: loc.id, to: p.targetLocationId, key: pair });
+      }
+    }
+    return edges;
+  }, []);
 
   return (
     <div 
@@ -6840,16 +7830,27 @@ export default function OutskirtsLocation({
             </div>
           )}
 
-          {/* Location Selector Button */}
-          <button
-            onClick={() => setShowLocationModal(true)}
-            className="px-2 py-1.5 rounded-lg border border-amber-800/60 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 text-xs font-mono tracking-wider shadow-sm active:scale-95"
-            title={t(lang, 'locationsTitle')}
+          {/* Current Room Badge (Non-teleport indicator) */}
+          <div
+            className="px-2.5 py-1.5 rounded-lg border border-zinc-800 bg-zinc-950/80 text-amber-300/90 flex items-center gap-1.5 text-xs font-mono tracking-wider shadow-sm"
+            title={currentLocation.name}
           >
-            <MapIcon className="w-3.5 h-3.5 text-amber-400" />
-            <span className="font-bold hidden sm:inline">{currentLocation.name.split(' (')[0]}</span>
-            <span className="text-[10px] text-zinc-500">▾</span>
-          </button>
+            <MapIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="font-bold hidden sm:inline truncate max-w-[170px]">{currentLocation.name.split(' (')[0]}</span>
+          </div>
+
+          {/* Safari Minimalist World Mini-Map Button */}
+          {safariMode && (
+            <button
+              type="button"
+              onClick={() => setShowSafariWorldMap(true)}
+              className="px-2.5 py-1.5 rounded-lg border border-emerald-500/70 bg-emerald-950/60 hover:bg-emerald-900/75 text-emerald-200 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 text-xs font-mono tracking-wider shadow-[0_0_12px_rgba(16,185,129,0.25)] active:scale-95"
+              title={t(lang, 'safariWorldMapTitle')}
+            >
+              <Compass className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="font-bold">{t(lang, 'safariWorldMapBtn')}</span>
+            </button>
+          )}
         </div>
 
         {/* Action / State ticker (Hidden on mobile to save space) */}
@@ -6936,8 +7937,94 @@ export default function OutskirtsLocation({
             ref={canvasRef}
             width={CANVAS_WIDTH}
             height={CANVAS_HEIGHT}
-            className="w-full h-full block object-contain"
+            onClick={(e) => {
+              if (safariMode) {
+                safariSelectAtClientPointRef.current?.(e.clientX, e.clientY);
+              }
+            }}
+            className={`w-full h-full block object-contain ${safariMode ? 'cursor-crosshair' : ''}`}
           />
+
+          {/* SAFARI MODE OBSERVER & POSSESSION HUD */}
+          {safariMode && (
+            <div className="absolute top-2.5 left-2.5 z-30 flex flex-wrap items-center gap-1.5 max-w-[calc(100%-6.5rem)] pointer-events-auto select-none">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-black/80 backdrop-blur-md border border-emerald-500/45 shadow-lg font-mono text-[10px]">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold tracking-wider">
+                  <Eye className="w-3 h-3" />
+                  {t(lang, 'safariBadge')}
+                </span>
+                <span className={`font-bold ${
+                  safariPossessing
+                    ? 'text-amber-300'
+                    : safariTargetInfo
+                    ? 'text-cyan-300'
+                    : 'text-zinc-400'
+                }`}>
+                  {safariPossessing
+                    ? t(lang, 'safariPossessing')
+                    : safariTargetInfo
+                    ? t(lang, 'safariFollowing')
+                    : t(lang, 'safariFreeCam')}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1 px-2 py-1 rounded-xl bg-black/80 backdrop-blur-md border border-zinc-700/80 shadow-lg font-mono text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => safariCycleTargetRef.current?.(-1)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold cursor-pointer active:scale-95"
+                  title="Prev"
+                >
+                  ←
+                </button>
+                <div className="px-1.5 min-w-0 max-w-[165px] sm:max-w-[220px] truncate">
+                  {safariTargetInfo ? (
+                    <span className="text-zinc-100 font-bold">
+                      {safariTargetInfo.name}
+                      <span className="text-zinc-400 font-normal ml-1">• {safariTargetInfo.sublabel}</span>
+                      {safariTargetInfo.isDead && (
+                        <span className="text-red-400 ml-1">☠</span>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="text-zinc-400">{t(lang, 'safariSelectHint')}</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => safariCycleTargetRef.current?.(1)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold cursor-pointer active:scale-95"
+                  title="Next"
+                >
+                  →
+                </button>
+              </div>
+
+              {safariTargetInfo && (
+                <button
+                  type="button"
+                  disabled={safariTargetInfo.isDead}
+                  onClick={() => safariTogglePossessRef.current?.()}
+                  className={`px-2.5 py-1 rounded-xl border font-mono text-[10px] font-bold transition-all shadow-lg flex items-center gap-1 ${
+                    safariTargetInfo.isDead
+                      ? 'bg-zinc-900/80 border-zinc-800 text-zinc-500 cursor-not-allowed'
+                      : safariPossessing
+                      ? 'bg-amber-500 hover:bg-amber-400 border-amber-300 text-black cursor-pointer active:scale-95'
+                      : 'bg-emerald-600 hover:bg-emerald-500 border-emerald-400 text-black cursor-pointer active:scale-95'
+                  }`}
+                >
+                  <Gamepad2 className="w-3 h-3" />
+                  <span>
+                    {safariTargetInfo.isDead
+                      ? t(lang, 'safariDeadNoControl')
+                      : safariPossessing
+                      ? t(lang, 'safariReleaseControl')
+                      : t(lang, 'safariTakeControl')}
+                  </span>
+                </button>
+              )}
+            </div>
+          )}
 
           {/* ON-CANVAS QUICK CONTROLS (FULLSCREEN) */}
           <div className="absolute top-2.5 right-2.5 z-30 flex items-center gap-1.5">
@@ -6952,6 +8039,7 @@ export default function OutskirtsLocation({
           </div>
 
           {/* BOTTOM-LEFT GAME SCREEN OVERLAY: DISTINCT KARMA GLYPH + 10 CLOCKWISE CYCLE DOTS */}
+          {!safariMode && (
           <div className="absolute bottom-3 left-3 sm:bottom-4 sm:left-4 z-30 flex items-center gap-3.5 pointer-events-none select-none">
             <div
               className="relative w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]"
@@ -7096,6 +8184,7 @@ export default function OutskirtsLocation({
               </div>
             </div>
           </div>
+          )}
 
           {/* HOLOGRAPHIC ROOM MAP OVERLAY (КАРТА КІМНАТИ ОКРАЇН) */}
           <AnimatePresence>
@@ -7471,7 +8560,7 @@ export default function OutskirtsLocation({
                   controls.left
                     ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
                     : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
-                } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                } ${!safariMode && telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                 title="Рух вліво (A / ←)"
               >
                 <span className="text-xl sm:text-3xl font-black leading-none">←</span>
@@ -7492,7 +8581,7 @@ export default function OutskirtsLocation({
                   controls.right
                     ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
                     : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
-                } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                } ${!safariMode && telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                 title="Рух вправо (D / →)"
               >
                 <span className="text-xl sm:text-3xl font-black leading-none">→</span>
@@ -7503,12 +8592,14 @@ export default function OutskirtsLocation({
             {/* RIGHT COMPARTMENT: CONTEXTUAL STRIP + FIXED-WIDTH 2-TIER ACTION PAD */}
             <div className="flex flex-col items-end gap-1.5 min-w-0 shrink-0 pointer-events-none">
               {/* CONTEXTUAL ROW (EAT / PIGGYBACK) — stays neatly stacked above without widening the pad */}
-              {(heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly' || carriedPlayerId || nearbyPickupCandidate) && (
+              {((!safariMode && (heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly' || carriedPlayerId || nearbyPickupCandidate)) ||
+                (safariMode && safariPossessing && safariSelected?.type === 'slugcat' && (safariTargetInfo?.heldItem === 'berry' || safariTargetInfo?.heldItem === 'batfly'))) && (
                 <div
                   style={{ touchAction: 'none' }}
                   className="flex items-center justify-end gap-1.5 pointer-events-auto bg-black/75 backdrop-blur-md p-1 rounded-2xl border border-zinc-800/90 shadow-xl touch-none"
                 >
-                  {(heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly') && (
+                  {((!safariMode && (heldItemType === 'berry' || heldItemType === 'batfly' || telemetry.heldItem === 'berry' || telemetry.heldItem === 'batfly')) ||
+                    (safariMode && safariPossessing && safariSelected?.type === 'slugcat' && (safariTargetInfo?.heldItem === 'berry' || safariTargetInfo?.heldItem === 'batfly'))) && (
                     <button
                       id="touch-ctrl-eat"
                       type="button"
@@ -7518,7 +8609,7 @@ export default function OutskirtsLocation({
                         isEating 
                           ? 'bg-amber-400 text-black border-amber-300 animate-pulse shadow-[0_0_16px_rgba(245,158,11,0.8)]' 
                           : 'bg-sky-950/95 hover:bg-sky-900 border-sky-400 text-sky-200 shadow-[0_0_12px_rgba(56,189,248,0.35)]'
-                      } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                      } ${!safariMode && telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                       title="З'їсти ягоду або муху-кажана (заповнює 1 ячейку їжі)"
                     >
                       <div className="w-3 h-3 rounded-full border-2 border-current flex items-center justify-center shrink-0">
@@ -7530,7 +8621,7 @@ export default function OutskirtsLocation({
                     </button>
                   )}
 
-                  {(carriedPlayerId || nearbyPickupCandidate) && (
+                  {!safariMode && (carriedPlayerId || nearbyPickupCandidate) && (
                     <button
                       id="touch-ctrl-piggyback"
                       type="button"
@@ -7559,7 +8650,7 @@ export default function OutskirtsLocation({
               >
                 {/* UPPER TIER: GRAB, THROW, CLIMB UP */}
                 <div className="flex items-center gap-1.5 sm:gap-2">
-                  {/* ITEM GRAB / DROP BUTTON */}
+                  {/* ITEM GRAB / DROP / BITE BUTTON */}
                   <button
                     id="touch-ctrl-grab"
                     type="button"
@@ -7568,14 +8659,22 @@ export default function OutskirtsLocation({
                     className={`${
                       buttonScale === 'large' ? 'w-12 h-11 sm:w-15 sm:h-14' : 'w-10.5 h-10 sm:w-14 sm:h-13'
                     } rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
-                      (heldItemType || telemetry.heldItem) 
+                      safariMode && safariPossessing && safariSelected?.type === 'lizard'
+                        ? 'bg-pink-950/90 border-pink-500 text-pink-200 shadow-[0_0_12px_rgba(236,72,153,0.4)]'
+                        : ((!safariMode && (heldItemType || telemetry.heldItem)) || (safariMode && safariPossessing && safariTargetInfo?.heldItem))
                         ? 'bg-amber-950/85 border-amber-500 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.3)]' 
                         : 'bg-zinc-950/90 hover:bg-zinc-900 border-cyan-700/80 text-cyan-300'
-                    } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
-                    title="Підібрати / Покласти (Z або E)"
+                    } ${!safariMode && telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                    title={safariMode && safariPossessing && safariSelected?.type === 'lizard' ? t(lang, 'safariBiteHint') : 'Підібрати / Покласти (Z або E)'}
                   >
                     <CircleDot className="w-3.5 h-3.5 sm:w-4 sm:h-4 mb-0.5" />
-                    <span className="text-[7px] sm:text-[8px] tracking-tight leading-none">{(heldItemType || telemetry.heldItem) ? 'ПОКЛАСТ' : 'ВЗЯТИ'}</span>
+                    <span className="text-[7px] sm:text-[8px] tracking-tight leading-none">
+                      {safariMode && safariPossessing && safariSelected?.type === 'lizard'
+                        ? 'УКУС'
+                        : ((!safariMode && (heldItemType || telemetry.heldItem)) || (safariMode && safariPossessing && safariTargetInfo?.heldItem))
+                        ? 'ПОКЛАСТ'
+                        : 'ВЗЯТИ'}
+                    </span>
                   </button>
 
                   {/* ITEM THROW BUTTON */}
@@ -7587,7 +8686,7 @@ export default function OutskirtsLocation({
                     className={`${
                       buttonScale === 'large' ? 'w-12 h-11 sm:w-15 sm:h-14' : 'w-10.5 h-10 sm:w-14 sm:h-13'
                     } rounded-xl sm:rounded-2xl border-2 flex flex-col items-center justify-center font-mono font-bold active:scale-90 select-none shadow-xl cursor-pointer transition-all touch-none ${
-                      (heldItemType || telemetry.heldItem) 
+                      ((!safariMode && (heldItemType || telemetry.heldItem)) || (safariMode && safariPossessing && safariTargetInfo?.heldItem))
                         ? 'bg-red-950/90 border-red-500 text-red-300 animate-pulse shadow-[0_0_15px_rgba(239,68,68,0.5)]' 
                         : 'bg-zinc-950/50 border-zinc-800 text-zinc-600 opacity-40'
                     }`}
@@ -7609,7 +8708,7 @@ export default function OutskirtsLocation({
                       controls.up
                         ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
                         : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
-                    } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                    } ${!safariMode && telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                     title="Піднятися вгору / Схопитися за шест (W / ↑)"
                   >
                     <span className="text-lg sm:text-2xl font-black leading-none">↑</span>
@@ -7631,7 +8730,7 @@ export default function OutskirtsLocation({
                       controls.down
                         ? 'bg-amber-500/40 border-amber-400 scale-95 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
                         : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-700 hover:border-amber-500/80'
-                    } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                    } ${!safariMode && telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                     title="Спуститися вниз / Присісти (S / ↓)"
                   >
                     <span className="text-lg sm:text-2xl font-black leading-none">↓</span>
@@ -7652,7 +8751,7 @@ export default function OutskirtsLocation({
                       controls.jump
                         ? 'bg-amber-400 text-black border-amber-300 scale-95 shadow-[0_0_25px_rgba(245,158,11,0.8)]'
                         : 'bg-gradient-to-r from-amber-950/90 via-amber-900/80 to-amber-950/90 hover:from-amber-900 hover:to-amber-950 border-amber-500 text-amber-300 shadow-[0_0_20px_rgba(245,158,11,0.35)]'
-                    } ${telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
+                    } ${!safariMode && telemetry.state !== 'normal' ? 'opacity-40' : ''}`}
                     title="Стрибок (Пробіл або Z)"
                   >
                     <span className="text-sm sm:text-lg leading-none">▲</span>
@@ -7669,7 +8768,7 @@ export default function OutskirtsLocation({
       {/* ---------------- DEDICATED SHELTER SLEEP BUTTON (TOUCH & DESKTOP) ---------------- */}
       {/* "В убержкі досихпор не работає додай окрему кнопку яку нада зажать і буде сон" */}
       <AnimatePresence>
-        {(currentLocation.isShelterRoom || inShelterChamber) && !isHibernating && !isDead && !isSpectating && (() => {
+        {!safariMode && (currentLocation.isShelterRoom || inShelterChamber) && !isHibernating && !isDead && !isSpectating && (() => {
           const hasReqFood = foodCount >= charConfig.requiredFood;
           const isRainingNow = cycleSecondsLeft <= 0 || stormActive;
           const isDangerSleep = !hasReqFood && isRainingNow;
@@ -7937,108 +9036,197 @@ export default function OutskirtsLocation({
         )}
       </AnimatePresence>
 
-      {/* ---------------- LOCATION SELECTOR MODAL ---------------- */}
+      {/* ---------------- SAFARI MINIMALIST WORLD MINI-MAP MODAL ---------------- */}
       <AnimatePresence>
-        {showLocationModal && (
+        {safariMode && showSafariWorldMap && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 select-none"
+            onClick={() => setShowSafariWorldMap(false)}
+            className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 select-none"
           >
             <motion.div
-              initial={{ scale: 0.95, y: 15 }}
+              initial={{ scale: 0.95, y: 12 }}
               animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.95, y: 15 }}
-              className="w-full max-w-2xl bg-zinc-950 border border-amber-600/50 rounded-2xl p-4 sm:p-6 shadow-2xl flex flex-col font-sans text-left max-h-[85vh] overflow-hidden"
+              exit={{ scale: 0.95, y: 12 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-4xl bg-[#07090d] border border-emerald-500/45 rounded-2xl p-4 sm:p-5 shadow-2xl flex flex-col gap-3 font-mono text-left max-h-[90vh] overflow-hidden"
             >
               {/* Header */}
-              <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-amber-950/60 border border-amber-600/60 flex items-center justify-center">
-                    <Globe className="w-4 h-4 text-amber-400" />
+              <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2.5 gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-950/70 border border-emerald-500/50 flex items-center justify-center shrink-0">
+                    <Compass className="w-4 h-4 text-emerald-400" />
                   </div>
-                  <div>
-                    <h2 className="text-sm sm:text-base font-bold text-amber-400">
-                      {t(lang, 'locationsTitle')}
+                  <div className="min-w-0">
+                    <h2 className="text-xs sm:text-sm font-bold text-emerald-300 tracking-wider truncate">
+                      {t(lang, 'safariWorldMapTitle')}
                     </h2>
-                    <p className="text-[10px] text-zinc-400">
-                      {t(lang, 'locationsSubtitle')}
+                    <p className="text-[10px] text-zinc-400 font-sans truncate">
+                      {t(lang, 'safariWorldMapDesc')}
                     </p>
                   </div>
                 </div>
-
                 <button
-                  onClick={() => setShowLocationModal(false)}
-                  className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-white cursor-pointer"
+                  type="button"
+                  onClick={() => setShowSafariWorldMap(false)}
+                  className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-white cursor-pointer shrink-0"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
-              {/* Location list */}
-              <div className="py-4 space-y-2.5 overflow-y-auto pr-1">
+              {/* Minimalist Schematic Graph Canvas */}
+              <div className="relative w-full aspect-[1000/560] bg-[#040508] border border-zinc-800/80 rounded-xl overflow-hidden">
+                <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 1000 560" preserveAspectRatio="none">
+                  {/* Subtle blueprint grid */}
+                  <defs>
+                    <pattern id="safari-mini-grid" width="50" height="50" patternUnits="userSpaceOnUse">
+                      <path d="M 50 0 L 0 0 0 50" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
+                    </pattern>
+                  </defs>
+                  <rect width="1000" height="560" fill="url(#safari-mini-grid)" />
+
+                  {/* Room pipe connections */}
+                  {safariMapEdges.map((edge) => {
+                    const a = SAFARI_MAP_NODES[edge.from];
+                    const b = SAFARI_MAP_NODES[edge.to];
+                    if (!a || !b) return null;
+                    const touchesCurrent = edge.from === currentLocation.id || edge.to === currentLocation.id;
+                    return (
+                      <line
+                        key={edge.key}
+                        x1={a.x}
+                        y1={a.y}
+                        x2={b.x}
+                        y2={b.y}
+                        stroke={touchesCurrent ? 'rgba(52,211,153,0.65)' : 'rgba(113,113,122,0.45)'}
+                        strokeWidth={touchesCurrent ? 2.5 : 1.5}
+                        strokeDasharray={a.kind !== 'region' || b.kind !== 'region' ? '4 4' : undefined}
+                      />
+                    );
+                  })}
+                </svg>
+
+                {/* Minimalist Room Nodes */}
                 {BUILTIN_LOCATIONS.map((loc) => {
+                  const pos = SAFARI_MAP_NODES[loc.id];
+                  if (!pos) return null;
                   const isCurrent = loc.id === currentLocation.id;
+                  const snap = safariWorldSnapshot[loc.id];
+                  const lizards = snap?.lizards || [];
+                  const slugcats = snap?.slugcats || [];
+                  const hasCombat = lizards.some((l) => !l.dead && (l.hunting || l.grabbing));
+                  const isSmall = pos.kind !== 'region';
+
                   return (
-                    <div
+                    <button
                       key={loc.id}
-                      onClick={() => handleSelectLocation(loc)}
-                      className={`p-3.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                      type="button"
+                      onClick={() => {
+                        safariSwitchRoomRef.current?.(loc);
+                        setShowSafariWorldMap(false);
+                      }}
+                      style={{
+                        left: `${(pos.x / 1000) * 100}%`,
+                        top: `${(pos.y / 560) * 100}%`,
+                      }}
+                      className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-lg border transition-all cursor-pointer flex flex-col items-center justify-center gap-0.5 text-center px-1.5 py-1 active:scale-95 ${
+                        isSmall ? 'min-w-[58px] sm:min-w-[74px]' : 'min-w-[82px] sm:min-w-[118px]'
+                      } ${
                         isCurrent
-                          ? 'bg-amber-950/40 border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.2)]'
-                          : 'bg-zinc-900/60 hover:bg-zinc-850 border-zinc-800 hover:border-zinc-700'
+                          ? 'bg-emerald-950/90 border-emerald-400 shadow-[0_0_18px_rgba(16,185,129,0.45)] z-20'
+                          : hasCombat
+                          ? 'bg-pink-950/60 border-pink-500/70 hover:border-pink-400 z-10'
+                          : pos.kind === 'shelter'
+                          ? 'bg-zinc-950/90 border-cyan-800/60 hover:border-cyan-400/80'
+                          : pos.kind === 'den'
+                          ? 'bg-zinc-950/90 border-pink-900/60 hover:border-pink-500/80'
+                          : 'bg-zinc-950/90 border-zinc-700/80 hover:border-emerald-400/70'
                       }`}
+                      title={loc.name}
                     >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-bold text-xs sm:text-sm text-slate-100">
-                            {loc.name}
+                      <div className="flex items-center justify-center gap-1 w-full">
+                        <span className={`text-[8px] sm:text-[9px] font-bold tracking-wider ${
+                          isCurrent ? 'text-emerald-300' : pos.kind === 'shelter' ? 'text-cyan-300' : pos.kind === 'den' ? 'text-pink-300' : 'text-zinc-200'
+                        }`}>
+                          {pos.code}
+                        </span>
+                        {!isSmall && (
+                          <span className="hidden sm:inline text-[8px] text-zinc-400 truncate max-w-[74px]">
+                            {loc.name.split(' (')[0]}
                           </span>
-                          <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-zinc-800 text-zinc-300">
-                            {loc.region}
-                          </span>
-                          {isCurrent && (
-                            <span className="px-2 py-0.5 rounded-full text-[8px] font-mono font-bold bg-amber-500 text-black">
-                              {t(lang, 'currentRoomTag')}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] text-zinc-400 flex items-center gap-3 font-mono">
-                          <span>{loc.width}×{loc.height}</span>
-                          <span>•</span>
-                          <span>Platforms: {loc.platforms.length}</span>
-                          <span>•</span>
-                          <span>Pipes: {loc.transitPipes.length}</span>
-                          <span>•</span>
-                          <span>Berries: {loc.items.filter(i => i.type === 'berry').length}</span>
-                        </div>
+                        )}
                       </div>
 
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleSelectLocation(loc);
-                        }}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all shrink-0 cursor-pointer ${
-                          isCurrent
-                            ? 'bg-amber-500 text-black'
-                            : 'bg-zinc-800 hover:bg-amber-600 hover:text-black text-zinc-200'
-                        }`}
-                      >
-                        {isCurrent ? t(lang, 'selectedTag') : t(lang, 'enterRoomBtn')}
-                      </button>
-                    </div>
+                      {/* Live Creature Dots */}
+                      <div className="flex items-center justify-center flex-wrap gap-1 min-h-[10px]">
+                        {lizards.length === 0 && slugcats.length === 0 ? (
+                          <span className="w-1 h-1 rounded-full bg-zinc-700/70" />
+                        ) : (
+                          <>
+                            {lizards.map((l) => (
+                              <span
+                                key={l.id}
+                                title={t(lang, 'safariLegendLizard')}
+                                className={`w-2 h-2 rounded-full ${
+                                  l.dead
+                                    ? 'bg-zinc-600'
+                                    : l.grabbing
+                                    ? 'bg-red-500 ring-2 ring-red-400/80 animate-ping'
+                                    : l.hunting
+                                    ? 'bg-pink-400 ring-2 ring-pink-400/70 animate-pulse'
+                                    : 'bg-pink-500'
+                                }`}
+                              />
+                            ))}
+                            {slugcats.map((s) => (
+                              <span
+                                key={s.id}
+                                title={s.name}
+                                className={`w-2 h-2 rounded-full border border-black/50 ${
+                                  s.dead
+                                    ? 'bg-zinc-600'
+                                    : s.characterId === 'monk'
+                                    ? 'bg-yellow-300'
+                                    : 'bg-white'
+                                } ${!s.dead && s.stunned ? 'ring-2 ring-amber-400' : ''}`}
+                              />
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    </button>
                   );
                 })}
               </div>
 
-              {/* Footer */}
-              <div className="border-t border-zinc-800 pt-3 flex items-center justify-between text-[10px] font-mono text-zinc-500">
-                <span>Rain Game • World Rooms</span>
+              {/* Minimalist Legend Footer */}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-400 pt-1">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-pink-500 inline-block" />
+                    {t(lang, 'safariLegendLizard')}
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-white inline-block" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-yellow-300 inline-block -ml-1" />
+                    {t(lang, 'safariLegendSlugcat')}
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-pink-400 ring-2 ring-pink-400/70 inline-block" />
+                    {t(lang, 'safariLegendHunt')}
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-3 h-2.5 rounded border border-emerald-400 bg-emerald-950 inline-block" />
+                    {t(lang, 'safariLegendActive')}
+                  </span>
+                </div>
                 <button
-                  onClick={() => setShowLocationModal(false)}
-                  className="px-3 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 cursor-pointer"
+                  type="button"
+                  onClick={() => setShowSafariWorldMap(false)}
+                  className="px-3 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 cursor-pointer"
                 >
                   {t(lang, 'closeBtn')}
                 </button>
